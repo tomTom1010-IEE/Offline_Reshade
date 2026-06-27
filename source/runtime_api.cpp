@@ -1425,6 +1425,38 @@ void reshade::runtime::reorder_techniques(size_t count, const api::effect_techni
 	reorder_techniques(std::move(technique_indices));
 }
 
+void reshade::runtime::enumerate_preprocessor_definitions(const char *effect_name_in, void(*callback)(effect_runtime *runtime, const char *effect_name, const char *name, const char *default_value, const char *current_value, void *user_data), void *user_data)
+{
+	if (is_loading() || callback == nullptr)
+		return;
+
+	const std::filesystem::path filter = effect_name_in != nullptr ? std::filesystem::u8path(effect_name_in) : std::filesystem::path();
+
+	for (const effect &effect : _effects)
+	{
+		if (effect.definitions.empty())
+			continue;
+
+		if (effect_name_in != nullptr && effect.source_file.filename() != filter)
+			continue;
+
+		const std::string effect_name = effect.source_file.filename().u8string();
+		for (const std::pair<std::string, std::string> &definition : effect.definitions)
+		{
+			std::string current_value = definition.second;
+			size_t size = 0;
+			if (get_preprocessor_definition_for_effect(effect_name.c_str(), definition.first.c_str(), nullptr, &size) && size != 0)
+			{
+				current_value.assign(size, '\0');
+				get_preprocessor_definition_for_effect(effect_name.c_str(), definition.first.c_str(), current_value.data(), &size);
+				while (!current_value.empty() && current_value.back() == '\0')
+					current_value.pop_back();
+			}
+
+			callback(this, effect_name.c_str(), definition.first.c_str(), definition.second.c_str(), current_value.c_str(), user_data);
+		}
+	}
+}
 #if RESHADE_GUI == 0
 bool reshade::runtime::open_overlay(bool /*open*/, api::input_source /*source*/)
 {

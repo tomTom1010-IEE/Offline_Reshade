@@ -227,46 +227,81 @@ namespace OfflineReShade.UI
 				commandPanel.Children.Add(MakeCommandButton("Save Preset", async () => await SendRpcAsync("save_preset", new Dictionary<string, object>())));
 				ControlsPanel.Children.Add(commandPanel);
 
+				var enabledEffectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+				var enabledEffectOrder = new List<string>();
 				var techniquesPanel = new StackPanel();
 				foreach (var item in AsArray(state.ContainsKey("techniques") ? state["techniques"] : null))
 				{
 					var technique = AsDict(item);
 					var id = Convert.ToString(technique["id"]);
-					var label = Convert.ToString(technique["name"]) + " [" + Convert.ToString(technique["effectName"]) + "]";
-					var checkBox = new CheckBox { Content = label, IsChecked = Convert.ToBoolean(technique["enabled"]), Tag = id, Margin = new Thickness(0, 0, 0, 4) };
-					checkBox.Checked += async (_, __) => { if (!_buildingControls) await SetTechniqueStateAsync((string)checkBox.Tag, true); };
-					checkBox.Unchecked += async (_, __) => { if (!_buildingControls) await SetTechniqueStateAsync((string)checkBox.Tag, false); };
+					var effectName = Convert.ToString(technique["effectName"]);
+					var isEnabled = Convert.ToBoolean(technique["enabled"]);
+					if (isEnabled && enabledEffectNames.Add(effectName))
+						enabledEffectOrder.Add(effectName);
+					var label = Convert.ToString(technique["name"]) + " [" + effectName + "]";
+					var checkBox = new CheckBox { Content = label, IsChecked = isEnabled, Tag = id, Margin = new Thickness(0, 0, 0, 4) };
+					checkBox.Checked += async (_, __) =>
+					{
+						if (_buildingControls) return;
+						await SetTechniqueStateAsync((string)checkBox.Tag, true);
+						await RefreshControlStateAsync();
+					};
+					checkBox.Unchecked += async (_, __) =>
+					{
+						if (_buildingControls) return;
+						await SetTechniqueStateAsync((string)checkBox.Tag, false);
+						await RefreshControlStateAsync();
+					};
 					techniquesPanel.Children.Add(checkBox);
 				}
 				ControlsPanel.Children.Add(new Expander { Header = "Techniques", IsExpanded = true, Content = techniquesPanel, Margin = new Thickness(0, 0, 0, 12) });
 
-				var uniformsByEffect = new Dictionary<string, List<Dictionary<string, object>>>();
-				var effectOrder = new List<string>();
+				var uniformsByEffect = new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.OrdinalIgnoreCase);
 				foreach (var item in AsArray(state.ContainsKey("uniforms") ? state["uniforms"] : null))
 				{
 					var uniform = AsDict(item);
 					var effectName = uniform.ContainsKey("effectName") ? Convert.ToString(uniform["effectName"]) : "Unknown Effect";
+					if (!enabledEffectNames.Contains(effectName))
+						continue;
 					if (!uniformsByEffect.TryGetValue(effectName, out var list))
 					{
 						list = new List<Dictionary<string, object>>();
 						uniformsByEffect.Add(effectName, list);
-						effectOrder.Add(effectName);
 					}
 					list.Add(uniform);
 				}
 
-				var uniformsPanel = new StackPanel();
-				foreach (var effectName in effectOrder)
+				var preprocessorByEffect = new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.OrdinalIgnoreCase);
+				foreach (var item in AsArray(state.ContainsKey("preprocessorDefinitions") ? state["preprocessorDefinitions"] : null))
 				{
-					uniformsPanel.Children.Add(new Expander
+					var definition = AsDict(item);
+					var effectName = definition.ContainsKey("effectName") ? Convert.ToString(definition["effectName"]) : "Unknown Effect";
+					if (!enabledEffectNames.Contains(effectName))
+						continue;
+					if (!preprocessorByEffect.TryGetValue(effectName, out var list))
+					{
+						list = new List<Dictionary<string, object>>();
+						preprocessorByEffect.Add(effectName, list);
+					}
+					list.Add(definition);
+				}
+
+				var effectsPanel = new StackPanel();
+				foreach (var effectName in enabledEffectOrder)
+				{
+					uniformsByEffect.TryGetValue(effectName, out var uniforms);
+					preprocessorByEffect.TryGetValue(effectName, out var definitions);
+					if ((uniforms == null || uniforms.Count == 0) && (definitions == null || definitions.Count == 0))
+						continue;
+					effectsPanel.Children.Add(new Expander
 					{
 						Header = effectName,
 						IsExpanded = false,
-						Content = MakeEffectUniformPanel(uniformsByEffect[effectName]),
+						Content = MakeEffectUniformPanel(uniforms ?? new List<Dictionary<string, object>>(), definitions ?? new List<Dictionary<string, object>>()),
 						Margin = new Thickness(0, 0, 0, 8)
 					});
 				}
-				ControlsPanel.Children.Add(new Expander { Header = "Uniforms", IsExpanded = true, Content = uniformsPanel });
+				ControlsPanel.Children.Add(new Expander { Header = "Enabled Effect Controls", IsExpanded = true, Content = effectsPanel });
 				ControlStatusText.Text = "Ready";
 			}
 			finally
@@ -274,7 +309,6 @@ namespace OfflineReShade.UI
 				_buildingControls = false;
 			}
 		}
-
 		private Button MakeCommandButton(string label, Func<Task> action)
 		{
 			var button = new Button { Content = label, MinWidth = 92, Height = 28, Margin = new Thickness(0, 0, 8, 8) };
@@ -286,9 +320,17 @@ namespace OfflineReShade.UI
 			return button;
 		}
 
-		private FrameworkElement MakeEffectUniformPanel(List<Dictionary<string, object>> uniforms)
+		private FrameworkElement MakeEffectUniformPanel(List<Dictionary<string, object>> uniforms, List<Dictionary<string, object>> preprocessorDefinitions)
 		{
 			var panel = new StackPanel();
+			if (preprocessorDefinitions.Count != 0)
+			{
+				var preprocessorPanel = new StackPanel();
+				foreach (var definition in preprocessorDefinitions)
+					preprocessorPanel.Children.Add(MakePreprocessorControl(definition));
+				panel.Children.Add(new Expander { Header = "Preprocessor Definitions", IsExpanded = false, Content = preprocessorPanel, Margin = new Thickness(0, 0, 0, 8) });
+			}
+
 			var byCategory = new Dictionary<string, StackPanel>();
 			var order = new List<string>();
 			foreach (var uniform in uniforms)
@@ -307,7 +349,7 @@ namespace OfflineReShade.UI
 
 			foreach (var category in order)
 			{
-				if (category == "General" && order.Count == 1)
+				if (category == "General" && order.Count == 1 && preprocessorDefinitions.Count == 0)
 				{
 					panel.Children.Add(byCategory[category]);
 				}
@@ -318,6 +360,40 @@ namespace OfflineReShade.UI
 			}
 			return panel;
 		}
+
+		private FrameworkElement MakePreprocessorControl(Dictionary<string, object> definition)
+		{
+			var effectName = definition.ContainsKey("effectName") ? Convert.ToString(definition["effectName"]) : string.Empty;
+			var name = definition.ContainsKey("name") ? Convert.ToString(definition["name"]) : string.Empty;
+			var value = definition.ContainsKey("value") ? Convert.ToString(definition["value"]) : string.Empty;
+			var defaultValue = definition.ContainsKey("defaultValue") ? Convert.ToString(definition["defaultValue"]) : string.Empty;
+			var group = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+			group.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+			var row = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
+			var button = new Button { Content = "Apply", Width = 72, Height = 24, Margin = new Thickness(8, 0, 0, 0) };
+			DockPanel.SetDock(button, Dock.Right);
+			row.Children.Add(button);
+			var text = new TextBox { Text = value, MinWidth = 120 };
+			row.Children.Add(text);
+			button.Click += async (_, __) =>
+			{
+				try
+				{
+					await SetPreprocessorDefinitionAsync(effectName, name, text.Text);
+					await Task.Delay(500);
+					await RefreshControlStateAsync();
+				}
+				catch (Exception ex)
+				{
+					AppendLog(ex.Message);
+				}
+			};
+			group.Children.Add(row);
+			if (!string.IsNullOrEmpty(defaultValue))
+				group.Children.Add(new TextBlock { Text = "Default: " + defaultValue, Foreground = System.Windows.Media.Brushes.DimGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+			return group;
+		}
+
 		private FrameworkElement MakeUniformControl(Dictionary<string, object> uniform)
 		{
 			var id = Convert.ToString(uniform["id"]);
@@ -369,25 +445,26 @@ namespace OfflineReShade.UI
 				DockPanel.SetDock(text, Dock.Right);
 				row.Children.Add(text);
 
-				if (uniform.ContainsKey("min") && uniform.ContainsKey("max"))
+				var minimum = uniform.ContainsKey("min") ? Convert.ToDouble(uniform["min"]) : numericValues[i] - Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0);
+				var maximum = uniform.ContainsKey("max") ? Convert.ToDouble(uniform["max"]) : numericValues[i] + Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0);
+				if (Math.Abs(maximum - minimum) < 0.000001)
+					maximum = minimum + 1.0;
+				var slider = new Slider
 				{
-					var slider = new Slider
-					{
-						Minimum = Convert.ToDouble(uniform["min"]),
-						Maximum = Convert.ToDouble(uniform["max"]),
-						Value = numericValues[i],
-						TickFrequency = uniform.ContainsKey("step") ? Math.Max(0.000001, Convert.ToDouble(uniform["step"])) : 0.0,
-						IsSnapToTickEnabled = uniform.ContainsKey("step") && type != "float",
-						Margin = new Thickness(0, 0, 8, 0)
-					};
-					slider.ValueChanged += (_, __) =>
-					{
-						if (_buildingControls) return;
-						text.Text = slider.Value.ToString("0.######");
-						QueueUniformUpdate(id, BuildNumericUniformValue(componentBoxes, componentIndex, slider.Value, numericValues.Count));
-					};
-					row.Children.Add(slider);
-				}
+					Minimum = minimum,
+					Maximum = maximum,
+					Value = Math.Max(minimum, Math.Min(maximum, numericValues[i])),
+					TickFrequency = uniform.ContainsKey("step") ? Math.Max(0.000001, Convert.ToDouble(uniform["step"])) : (type == "float" ? 0.0 : 1.0),
+					IsSnapToTickEnabled = type != "float",
+					Margin = new Thickness(0, 0, 8, 0)
+				};
+				slider.ValueChanged += (_, __) =>
+				{
+					if (_buildingControls) return;
+					text.Text = slider.Value.ToString("0.######");
+					QueueUniformUpdate(id, BuildNumericUniformValue(componentBoxes, componentIndex, slider.Value, numericValues.Count));
+				};
+				row.Children.Add(slider);
 
 				text.LostFocus += async (_, __) => { if (TryBuildNumericUniformValue(componentBoxes, out var next)) await SetUniformAsync(id, next); };
 				text.KeyDown += async (_, e) => { if (e.Key == System.Windows.Input.Key.Enter && TryBuildNumericUniformValue(componentBoxes, out var next)) await SetUniformAsync(id, next); };
@@ -487,6 +564,11 @@ namespace OfflineReShade.UI
 		private async Task SetUniformAsync(string id, object value)
 		{
 			await SendRpcAsync("set_uniform", new Dictionary<string, object> { { "id", id }, { "value", value } });
+		}
+
+		private async Task SetPreprocessorDefinitionAsync(string effectName, string name, string value)
+		{
+			await SendRpcAsync("set_preprocessor_definition", new Dictionary<string, object> { { "effectName", effectName }, { "name", name }, { "value", value } });
 		}
 
 		private async Task SendRpcSafeAsync(string method, string key, object value)

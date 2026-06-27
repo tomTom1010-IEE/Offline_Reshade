@@ -800,6 +800,14 @@ namespace reshade::api
 		virtual void set_preprocessor_definition_for_effect(const char *effect_name, const char *name, const char *value) = 0;
 
 		/// <summary>
+		/// Enumerates preprocessor definitions declared by loaded effects.
+		/// </summary>
+		/// <param name="effect_name">Optional file name of a single effect file to enumerate definitions for, or <c>nullptr</c> for all effects.</param>
+		/// <param name="callback">Callback invoked once per definition.</param>
+		/// <param name="user_data">User data passed to the callback.</param>
+		virtual void enumerate_preprocessor_definitions(const char *effect_name, void(*callback)(effect_runtime *runtime, const char *effect_name, const char *name, const char *default_value, const char *current_value, void *user_data), void *user_data) = 0;
+
+		/// <summary>
 		/// Open or close the ReShade overlay.
 		/// </summary>
 		/// <remarks>

@@ -377,6 +377,9 @@ namespace
 			return opts.preset_path;
 
 		const std::filesystem::path preset_path = work_dir / L"OfflinePreset.ini";
+		if (std::filesystem::exists(preset_path))
+			return preset_path;
+
 		std::ofstream preset(preset_path, std::ios::binary | std::ios::trunc);
 		preset << "Techniques=\n";
 		preset << "TechniqueSorting=\n";
@@ -973,6 +976,28 @@ namespace
 		return state.result;
 	}
 
+	struct preprocessor_list_state
+	{
+		std::string result;
+		bool first = true;
+	};
+
+	std::string build_preprocessor_definitions_json(reshade::api::effect_runtime *runtime)
+	{
+		preprocessor_list_state state;
+		state.result = "[";
+		runtime->enumerate_preprocessor_definitions(nullptr, [](reshade::api::effect_runtime *, const char *effect_name, const char *name, const char *default_value, const char *current_value, void *user_data) {
+			auto &state = *static_cast<preprocessor_list_state *>(user_data);
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			const std::string effect = effect_name != nullptr ? effect_name : "";
+			const std::string definition_name = name != nullptr ? name : "";
+			state.result += "{\"id\":" + json_string(effect + "::" + definition_name) + ",\"effectName\":" + json_string(effect) + ",\"name\":" + json_string(definition_name) + ",\"defaultValue\":" + json_string(default_value != nullptr ? default_value : "") + ",\"value\":" + json_string(current_value != nullptr ? current_value : "") + "}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
 	std::string make_response(int id, const std::string &result)
 	{
 		return "{\"id\":" + std::to_string(id) + ",\"ok\":true,\"result\":" + result + "}";
@@ -1132,7 +1157,7 @@ namespace
 				}
 				if (command.method == "list_state")
 				{
-					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":[]}");
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + "}");
 				}
 				if (command.method == "set_effects_state")
 				{
@@ -1140,6 +1165,7 @@ namespace
 					if (!json_get_bool(command.params, "enabled", enabled))
 						return make_error(command.id, "bad_params", "Missing enabled.");
 					_runtime->set_effects_state(enabled);
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_technique_state")
@@ -1152,6 +1178,7 @@ namespace
 					if (technique.handle == 0)
 						return make_error(command.id, "not_found", "Technique not found.");
 					_runtime->set_technique_state(technique, enabled);
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_uniform")
@@ -1173,6 +1200,7 @@ namespace
 						float values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<float>(numbers[std::min(i, numbers.size() - 1)]);
 						_runtime->set_uniform_value_float(variable, values, count);
+						_runtime->save_current_preset();
 					}
 					else if (base_type == reshade::api::format::r32_sint)
 					{
@@ -1181,6 +1209,7 @@ namespace
 						int32_t values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<int32_t>(numbers[std::min(i, numbers.size() - 1)]);
 						_runtime->set_uniform_value_int(variable, values, count);
+						_runtime->save_current_preset();
 					}
 					else if (base_type == reshade::api::format::r32_uint)
 					{
@@ -1189,6 +1218,7 @@ namespace
 						uint32_t values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<uint32_t>(std::max(0.0, numbers[std::min(i, numbers.size() - 1)]));
 						_runtime->set_uniform_value_uint(variable, values, count);
+						_runtime->save_current_preset();
 					}
 					else
 					{
@@ -1202,6 +1232,7 @@ namespace
 						bool values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = value;
 						_runtime->set_uniform_value_bool(variable, values, count);
+						_runtime->save_current_preset();
 					}
 					return make_response(command.id, "{}");
 				}
@@ -1214,6 +1245,7 @@ namespace
 					if (variable.handle == 0)
 						return make_error(command.id, "not_found", "Uniform not found.");
 					_runtime->reset_uniform_value(variable);
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "reorder_techniques")
@@ -1231,6 +1263,7 @@ namespace
 						techniques.push_back(technique);
 					}
 					_runtime->reorder_techniques(techniques.size(), techniques.data());
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_preprocessor_definition")
@@ -1248,6 +1281,7 @@ namespace
 						_runtime->set_preprocessor_definition(name.c_str(), value.c_str());
 						_runtime->reload_effect_next_frame(nullptr);
 					}
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "reload_effects")

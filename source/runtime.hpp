@@ -152,6 +152,7 @@ namespace reshade
 		bool get_preprocessor_definition_for_effect(const char *effect_name, const char *name, char *value, size_t *value_size) const final;
 		void set_preprocessor_definition(const char *name, const char *value) final;
 		void set_preprocessor_definition_for_effect(const char *effect_name, const char *name, const char *value) final;
+		void enumerate_preprocessor_definitions(const char *effect_name, void(*callback)(effect_runtime *runtime, const char *effect_name, const char *name, const char *default_value, const char *current_value, void *user_data), void *user_data) final;
 
 		bool get_effects_state() const final;
 		void set_effects_state(bool enabled) final;
