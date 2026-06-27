@@ -27,6 +27,9 @@ namespace OfflineReShade.UI
 		private StreamWriter _pipeWriter;
 		private int _rpcId;
 		private bool _buildingControls;
+		private readonly object _uniformUpdateLock = new object();
+		private readonly Dictionary<string, object> _pendingUniformValues = new Dictionary<string, object>();
+		private readonly Dictionary<string, CancellationTokenSource> _activeUniformUpdates = new Dictionary<string, CancellationTokenSource>();
 
 		public MainWindow()
 		{
@@ -237,9 +240,32 @@ namespace OfflineReShade.UI
 				}
 				ControlsPanel.Children.Add(new Expander { Header = "Techniques", IsExpanded = true, Content = techniquesPanel, Margin = new Thickness(0, 0, 0, 12) });
 
-				var uniformsPanel = new StackPanel();
+				var uniformsByEffect = new Dictionary<string, StackPanel>();
+				var effectOrder = new List<string>();
 				foreach (var item in AsArray(state.ContainsKey("uniforms") ? state["uniforms"] : null))
-					uniformsPanel.Children.Add(MakeUniformControl(AsDict(item)));
+				{
+					var uniform = AsDict(item);
+					var effectName = uniform.ContainsKey("effectName") ? Convert.ToString(uniform["effectName"]) : "Unknown Effect";
+					if (!uniformsByEffect.TryGetValue(effectName, out var effectPanel))
+					{
+						effectPanel = new StackPanel();
+						uniformsByEffect.Add(effectName, effectPanel);
+						effectOrder.Add(effectName);
+					}
+					effectPanel.Children.Add(MakeUniformControl(uniform));
+				}
+
+				var uniformsPanel = new StackPanel();
+				foreach (var effectName in effectOrder)
+				{
+					uniformsPanel.Children.Add(new Expander
+					{
+						Header = effectName,
+						IsExpanded = false,
+						Content = uniformsByEffect[effectName],
+						Margin = new Thickness(0, 0, 0, 8)
+					});
+				}
 				ControlsPanel.Children.Add(new Expander { Header = "Uniforms", IsExpanded = true, Content = uniformsPanel });
 				ControlStatusText.Text = "Ready";
 			}
@@ -288,11 +314,11 @@ namespace OfflineReShade.UI
 				if (uniform.ContainsKey("min") && uniform.ContainsKey("max"))
 				{
 					var slider = new Slider { Minimum = Convert.ToDouble(uniform["min"]), Maximum = Convert.ToDouble(uniform["max"]), Value = current, Margin = new Thickness(0, 0, 8, 0) };
-					slider.ValueChanged += async (_, __) =>
+					slider.ValueChanged += (_, __) =>
 					{
 						if (_buildingControls) return;
 						text.Text = slider.Value.ToString("0.######");
-						await SetUniformAsync(id, slider.Value);
+						QueueUniformUpdate(id, slider.Value);
 					};
 					row.Children.Add(slider);
 				}
@@ -326,6 +352,61 @@ namespace OfflineReShade.UI
 			await SendRpcAsync("set_technique_state", new Dictionary<string, object> { { "id", id }, { "enabled", enabled } });
 		}
 
+		private void QueueUniformUpdate(string id, object value)
+		{
+			CancellationTokenSource source = null;
+			lock (_uniformUpdateLock)
+			{
+				_pendingUniformValues[id] = value;
+				if (!_activeUniformUpdates.ContainsKey(id))
+				{
+					source = new CancellationTokenSource();
+					_activeUniformUpdates.Add(id, source);
+				}
+			}
+
+			if (source != null)
+				_ = SendUniformUpdateLoopAsync(id, source);
+		}
+
+		private async Task SendUniformUpdateLoopAsync(string id, CancellationTokenSource source)
+		{
+			try
+			{
+				while (!source.IsCancellationRequested)
+				{
+					object value;
+					lock (_uniformUpdateLock)
+					{
+						if (!_pendingUniformValues.TryGetValue(id, out value))
+						{
+							_activeUniformUpdates.Remove(id);
+							return;
+						}
+						_pendingUniformValues.Remove(id);
+					}
+
+					await Task.Delay(16, source.Token);
+					await SetUniformAsync(id, value);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+			}
+			catch (Exception ex)
+			{
+				AppendLog(ex.Message);
+			}
+			finally
+			{
+				lock (_uniformUpdateLock)
+				{
+					if (_activeUniformUpdates.TryGetValue(id, out var existing) && ReferenceEquals(existing, source))
+						_activeUniformUpdates.Remove(id);
+				}
+				source.Dispose();
+			}
+		}
 		private async Task SetUniformAsync(string id, object value)
 		{
 			await SendRpcAsync("set_uniform", new Dictionary<string, object> { { "id", id }, { "value", value } });

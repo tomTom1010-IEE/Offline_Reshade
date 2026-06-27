@@ -377,30 +377,11 @@ namespace
 			return opts.preset_path;
 
 		const std::filesystem::path preset_path = work_dir / L"OfflinePreset.ini";
-		if (std::filesystem::exists(preset_path))
-			return preset_path;
-
-		const std::vector<std::pair<std::string, std::string>> techniques = scan_techniques(opts.effect_dir);
-
-		std::ofstream preset(preset_path, std::ios::binary);
-		preset << "Techniques=";
-		for (size_t i = 0; i < techniques.size(); ++i)
-		{
-			if (i != 0)
-				preset << ',';
-			preset << techniques[i].first << '@' << techniques[i].second;
-		}
-		preset << "\nTechniqueSorting=";
-		for (size_t i = 0; i < techniques.size(); ++i)
-		{
-			if (i != 0)
-				preset << ',';
-			preset << techniques[i].first << '@' << techniques[i].second;
-		}
-		preset << "\n";
+		std::ofstream preset(preset_path, std::ios::binary | std::ios::trunc);
+		preset << "Techniques=\n";
+		preset << "TechniqueSorting=\n";
 		return preset_path;
 	}
-
 	std::filesystem::path make_config(const options &opts, const std::filesystem::path &work_dir, const std::filesystem::path &preset_path)
 	{
 		const std::filesystem::path config_path = work_dir / L"ReShade.ini";
