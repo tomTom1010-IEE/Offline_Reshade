@@ -166,6 +166,8 @@ namespace reshade
 
 		bool open_overlay(bool open, api::input_source source) final;
 
+		void set_external_overlay_target(api::resource_view target, uint32_t width, uint32_t height);
+
 		void set_color_space(api::color_space color_space) final;
 
 		void reload_effect_next_frame(const char *effect_name) final;
@@ -417,6 +419,11 @@ namespace reshade
 		void destroy_imgui_resources();
 
 		#pragma region Overlay
+		api::resource_view _external_overlay_target = {};
+		uint32_t _external_overlay_width = 0;
+		uint32_t _external_overlay_height = 0;
+		bool _external_overlay_enabled = false;
+
 		ImGuiContext *_imgui_context = nullptr;
 
 		bool _show_splash = true;
@@ -535,3 +542,4 @@ namespace reshade
 	template <> void runtime::set_uniform_value<int32_t>(uniform &variable, const int32_t *values, size_t count, size_t array_index);
 	template <> void runtime::set_uniform_value<uint32_t>(uniform &variable, const uint32_t *values, size_t count, size_t array_index);
 }
+

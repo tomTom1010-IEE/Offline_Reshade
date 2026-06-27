@@ -854,8 +854,8 @@ void reshade::runtime::draw_gui()
 
 	ImGuiIO &imgui_io = _imgui_context->IO;
 	imgui_io.DeltaTime = _last_frame_duration.count() * 1e-9f;
-	imgui_io.DisplaySize.x = static_cast<float>(_width);
-	imgui_io.DisplaySize.y = static_cast<float>(_height);
+	imgui_io.DisplaySize.x = static_cast<float>(_external_overlay_enabled ? _external_overlay_width : _width);
+	imgui_io.DisplaySize.y = static_cast<float>(_external_overlay_enabled ? _external_overlay_height : _height);
 
 	if (_input != nullptr)
 	{
@@ -1513,7 +1513,11 @@ void reshade::runtime::draw_gui()
 	{
 		api::command_list *const cmd_list = _graphics_queue->get_immediate_command_list();
 
-		if (_back_buffer_resolved != 0)
+		if (_external_overlay_enabled)
+		{
+			render_imgui_draw_data(cmd_list, draw_data, _external_overlay_target);
+		}
+		else if (_back_buffer_resolved != 0)
 		{
 			render_imgui_draw_data(cmd_list, draw_data, _back_buffer_targets[0]);
 		}
@@ -5103,6 +5107,14 @@ void reshade::runtime::destroy_imgui_resources()
 	_imgui_pipeline_layout = {};
 }
 
+
+void reshade::runtime::set_external_overlay_target(api::resource_view target, uint32_t width, uint32_t height)
+{
+	_external_overlay_target = target;
+	_external_overlay_width = width;
+	_external_overlay_height = height;
+	_external_overlay_enabled = target.handle != 0 && width != 0 && height != 0;
+}
 bool reshade::runtime::open_overlay(bool open, api::input_source source)
 {
 #if RESHADE_ADDON
@@ -5119,3 +5131,5 @@ bool reshade::runtime::open_overlay(bool open, api::input_source source)
 }
 
 #endif
+
+

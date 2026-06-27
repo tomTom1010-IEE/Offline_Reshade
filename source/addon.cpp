@@ -262,6 +262,14 @@ void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime)
 	}
 }
 
+
+void ReShadeSetExternalOverlayTarget(reshade::api::effect_runtime *runtime, void *render_target_view, uint32_t width, uint32_t height)
+{
+	if (runtime == nullptr)
+		return;
+
+	static_cast<reshade::runtime *>(runtime)->set_external_overlay_target(reshade::api::resource_view { reinterpret_cast<uintptr_t>(render_target_view) }, width, height);
+}
 void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 {
 	if (runtime == nullptr)
@@ -273,3 +281,4 @@ void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 }
 
 #endif
+

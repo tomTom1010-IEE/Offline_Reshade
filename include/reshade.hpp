@@ -46,6 +46,7 @@ RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlayForAddon(void *module, con
 RESHADE_API_LIBRARY_DECL bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_device, void *opaque_command_queue, void *opaque_swapchain, const char *config_path, reshade::api::effect_runtime **out_runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime);
+RESHADE_API_LIBRARY_DECL void ReShadeSetExternalOverlayTarget(reshade::api::effect_runtime *runtime, void *render_target_view, uint32_t width, uint32_t height);
 
 #else
 
@@ -425,3 +426,4 @@ namespace reshade
 #endif
 	}
 }
+
