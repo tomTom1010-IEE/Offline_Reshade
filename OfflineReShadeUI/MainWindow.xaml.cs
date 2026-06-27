@@ -228,6 +228,7 @@ namespace OfflineReShade.UI
 				ControlsPanel.Children.Add(commandPanel);
 
 				var enabledEffectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+				var enabledEffectAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 				var enabledEffectOrder = new List<string>();
 				var techniquesPanel = new StackPanel();
 				foreach (var item in AsArray(state.ContainsKey("techniques") ? state["techniques"] : null))
@@ -237,7 +238,10 @@ namespace OfflineReShade.UI
 					var effectName = Convert.ToString(technique["effectName"]);
 					var isEnabled = Convert.ToBoolean(technique["enabled"]);
 					if (isEnabled && enabledEffectNames.Add(effectName))
+					{
 						enabledEffectOrder.Add(effectName);
+						enabledEffectAliases[NormalizeEffectName(effectName)] = effectName;
+					}
 					var label = Convert.ToString(technique["name"]) + " [" + effectName + "]";
 					var checkBox = new CheckBox { Content = label, IsChecked = isEnabled, Tag = id, Margin = new Thickness(0, 0, 0, 4) };
 					checkBox.Checked += async (_, __) =>
@@ -261,12 +265,13 @@ namespace OfflineReShade.UI
 				{
 					var uniform = AsDict(item);
 					var effectName = uniform.ContainsKey("effectName") ? Convert.ToString(uniform["effectName"]) : "Unknown Effect";
-					if (!enabledEffectNames.Contains(effectName))
+					var panelEffectName = ResolveEnabledEffectName(effectName, enabledEffectNames, enabledEffectAliases);
+					if (panelEffectName == null)
 						continue;
-					if (!uniformsByEffect.TryGetValue(effectName, out var list))
+					if (!uniformsByEffect.TryGetValue(panelEffectName, out var list))
 					{
 						list = new List<Dictionary<string, object>>();
-						uniformsByEffect.Add(effectName, list);
+						uniformsByEffect.Add(panelEffectName, list);
 					}
 					list.Add(uniform);
 				}
@@ -276,12 +281,13 @@ namespace OfflineReShade.UI
 				{
 					var definition = AsDict(item);
 					var effectName = definition.ContainsKey("effectName") ? Convert.ToString(definition["effectName"]) : "Unknown Effect";
-					if (!enabledEffectNames.Contains(effectName))
+					var panelEffectName = ResolveEnabledEffectName(effectName, enabledEffectNames, enabledEffectAliases);
+					if (panelEffectName == null)
 						continue;
-					if (!preprocessorByEffect.TryGetValue(effectName, out var list))
+					if (!preprocessorByEffect.TryGetValue(panelEffectName, out var list))
 					{
 						list = new List<Dictionary<string, object>>();
-						preprocessorByEffect.Add(effectName, list);
+						preprocessorByEffect.Add(panelEffectName, list);
 					}
 					list.Add(definition);
 				}
@@ -308,6 +314,26 @@ namespace OfflineReShade.UI
 			{
 				_buildingControls = false;
 			}
+		}
+		
+		private static string ResolveEnabledEffectName(string effectName, HashSet<string> enabledEffectNames, Dictionary<string, string> enabledEffectAliases)
+		{
+			if (enabledEffectNames.Contains(effectName))
+				return effectName;
+			return enabledEffectAliases.TryGetValue(NormalizeEffectName(effectName), out var enabledEffectName) ? enabledEffectName : null;
+		}
+
+		private static string NormalizeEffectName(string effectName)
+		{
+			if (string.IsNullOrEmpty(effectName))
+				return string.Empty;
+			var builder = new StringBuilder(effectName.Length);
+			foreach (var ch in effectName)
+			{
+				if (char.IsLetterOrDigit(ch))
+					builder.Append(char.ToLowerInvariant(ch));
+			}
+			return builder.ToString();
 		}
 		private Button MakeCommandButton(string label, Func<Task> action)
 		{
