@@ -44,6 +44,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OfflineReShadePrototype", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OfflineReShadeUI", "OfflineReShadeUI\OfflineReShadeUI.csproj", "{5F3A7618-6E98-4697-915B-2C267E7BB9C2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OfflineReShadeWinUI", "OfflineReShadeWinUI\OfflineReShadeWinUI.csproj", "{47D669EC-0E87-486D-AD62-00817220802E}"
+EndProject
 
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -305,6 +307,20 @@ Global
 		{5F3A7618-6E98-4697-915B-2C267E7BB9C2}.Release|32-bit.ActiveCfg = Release|Any CPU
 		{5F3A7618-6E98-4697-915B-2C267E7BB9C2}.Release|64-bit.ActiveCfg = Release|Any CPU
 		{5F3A7618-6E98-4697-915B-2C267E7BB9C2}.Release|64-bit.Build.0 = Release|Any CPU
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug App|32-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug App|64-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug Setup|32-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug Setup|64-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug|32-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug|64-bit.ActiveCfg = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Debug|64-bit.Build.0 = Debug|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release App|32-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release App|64-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release Setup|32-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release Setup|64-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release|32-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release|64-bit.ActiveCfg = Release|x64
+		{47D669EC-0E87-486D-AD62-00817220802E}.Release|64-bit.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
