@@ -240,19 +240,19 @@ namespace OfflineReShade.UI
 				}
 				ControlsPanel.Children.Add(new Expander { Header = "Techniques", IsExpanded = true, Content = techniquesPanel, Margin = new Thickness(0, 0, 0, 12) });
 
-				var uniformsByEffect = new Dictionary<string, StackPanel>();
+				var uniformsByEffect = new Dictionary<string, List<Dictionary<string, object>>>();
 				var effectOrder = new List<string>();
 				foreach (var item in AsArray(state.ContainsKey("uniforms") ? state["uniforms"] : null))
 				{
 					var uniform = AsDict(item);
 					var effectName = uniform.ContainsKey("effectName") ? Convert.ToString(uniform["effectName"]) : "Unknown Effect";
-					if (!uniformsByEffect.TryGetValue(effectName, out var effectPanel))
+					if (!uniformsByEffect.TryGetValue(effectName, out var list))
 					{
-						effectPanel = new StackPanel();
-						uniformsByEffect.Add(effectName, effectPanel);
+						list = new List<Dictionary<string, object>>();
+						uniformsByEffect.Add(effectName, list);
 						effectOrder.Add(effectName);
 					}
-					effectPanel.Children.Add(MakeUniformControl(uniform));
+					list.Add(uniform);
 				}
 
 				var uniformsPanel = new StackPanel();
@@ -262,7 +262,7 @@ namespace OfflineReShade.UI
 					{
 						Header = effectName,
 						IsExpanded = false,
-						Content = uniformsByEffect[effectName],
+						Content = MakeEffectUniformPanel(uniformsByEffect[effectName]),
 						Margin = new Thickness(0, 0, 0, 8)
 					});
 				}
@@ -286,14 +286,63 @@ namespace OfflineReShade.UI
 			return button;
 		}
 
+		private FrameworkElement MakeEffectUniformPanel(List<Dictionary<string, object>> uniforms)
+		{
+			var panel = new StackPanel();
+			var byCategory = new Dictionary<string, StackPanel>();
+			var order = new List<string>();
+			foreach (var uniform in uniforms)
+			{
+				var category = uniform.ContainsKey("category") ? Convert.ToString(uniform["category"]) : "General";
+				if (string.IsNullOrWhiteSpace(category))
+					category = "General";
+				if (!byCategory.TryGetValue(category, out var categoryPanel))
+				{
+					categoryPanel = new StackPanel();
+					byCategory.Add(category, categoryPanel);
+					order.Add(category);
+				}
+				categoryPanel.Children.Add(MakeUniformControl(uniform));
+			}
+
+			foreach (var category in order)
+			{
+				if (category == "General" && order.Count == 1)
+				{
+					panel.Children.Add(byCategory[category]);
+				}
+				else
+				{
+					panel.Children.Add(new Expander { Header = category, IsExpanded = true, Content = byCategory[category], Margin = new Thickness(0, 0, 0, 8) });
+				}
+			}
+			return panel;
+		}
 		private FrameworkElement MakeUniformControl(Dictionary<string, object> uniform)
 		{
 			var id = Convert.ToString(uniform["id"]);
 			var name = uniform.ContainsKey("label") ? Convert.ToString(uniform["label"]) : Convert.ToString(uniform["name"]);
 			var type = Convert.ToString(uniform["type"]);
+			var uiType = uniform.ContainsKey("uiType") ? Convert.ToString(uniform["uiType"]) : string.Empty;
 			var values = AsArray(uniform.ContainsKey("value") ? uniform["value"] : null);
+			var items = AsArray(uniform.ContainsKey("items") ? uniform["items"] : null);
 			var group = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
 			group.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+
+			if ((uiType == "combo" || uiType == "list" || uiType == "radio") && items.Length != 0)
+			{
+				var combo = new ComboBox { Margin = new Thickness(0, 4, 0, 0), MinWidth = 160 };
+				foreach (var item in items)
+					combo.Items.Add(Convert.ToString(item));
+				combo.SelectedIndex = Math.Max(0, Math.Min(combo.Items.Count - 1, values.Length == 0 ? 0 : Convert.ToInt32(values[0])));
+				combo.SelectionChanged += async (_, __) =>
+				{
+					if (_buildingControls || combo.SelectedIndex < 0) return;
+					await SetUniformAsync(id, combo.SelectedIndex);
+				};
+				group.Children.Add(combo);
+				return group;
+			}
 
 			if (type == "bool")
 			{
@@ -304,49 +353,77 @@ namespace OfflineReShade.UI
 				return group;
 			}
 
-			if (values.Length <= 1)
+			var numericValues = new List<double>();
+			foreach (var value in values)
+				numericValues.Add(Convert.ToDouble(value));
+			if (numericValues.Count == 0)
+				numericValues.Add(0.0);
+
+			var componentBoxes = new List<TextBox>();
+			for (var i = 0; i < numericValues.Count; ++i)
 			{
-				var current = values.Length == 0 ? 0.0 : Convert.ToDouble(values[0]);
+				var componentIndex = i;
 				var row = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
-				var text = new TextBox { Width = 72, Text = current.ToString("0.######") };
+				var text = new TextBox { Width = 72, Text = numericValues[i].ToString("0.######") };
+				componentBoxes.Add(text);
 				DockPanel.SetDock(text, Dock.Right);
 				row.Children.Add(text);
+
 				if (uniform.ContainsKey("min") && uniform.ContainsKey("max"))
 				{
-					var slider = new Slider { Minimum = Convert.ToDouble(uniform["min"]), Maximum = Convert.ToDouble(uniform["max"]), Value = current, Margin = new Thickness(0, 0, 8, 0) };
+					var slider = new Slider
+					{
+						Minimum = Convert.ToDouble(uniform["min"]),
+						Maximum = Convert.ToDouble(uniform["max"]),
+						Value = numericValues[i],
+						TickFrequency = uniform.ContainsKey("step") ? Math.Max(0.000001, Convert.ToDouble(uniform["step"])) : 0.0,
+						IsSnapToTickEnabled = uniform.ContainsKey("step") && type != "float",
+						Margin = new Thickness(0, 0, 8, 0)
+					};
 					slider.ValueChanged += (_, __) =>
 					{
 						if (_buildingControls) return;
 						text.Text = slider.Value.ToString("0.######");
-						QueueUniformUpdate(id, slider.Value);
+						QueueUniformUpdate(id, BuildNumericUniformValue(componentBoxes, componentIndex, slider.Value, numericValues.Count));
 					};
 					row.Children.Add(slider);
 				}
-				text.LostFocus += async (_, __) => { if (double.TryParse(text.Text, out var parsed)) await SetUniformAsync(id, parsed); };
-				text.KeyDown += async (_, e) => { if (e.Key == System.Windows.Input.Key.Enter && double.TryParse(text.Text, out var parsed)) await SetUniformAsync(id, parsed); };
+
+				text.LostFocus += async (_, __) => { if (TryBuildNumericUniformValue(componentBoxes, out var next)) await SetUniformAsync(id, next); };
+				text.KeyDown += async (_, e) => { if (e.Key == System.Windows.Input.Key.Enter && TryBuildNumericUniformValue(componentBoxes, out var next)) await SetUniformAsync(id, next); };
 				group.Children.Add(row);
-				return group;
 			}
 
-			var vectorPanel = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
-			var boxes = new List<TextBox>();
-			for (var i = 0; i < values.Length; ++i)
-			{
-				var box = new TextBox { Width = 64, Text = Convert.ToDouble(values[i]).ToString("0.######"), Margin = new Thickness(0, 0, 6, 6) };
-				boxes.Add(box);
-				vectorPanel.Children.Add(box);
-			}
-			vectorPanel.Children.Add(MakeCommandButton("Apply", async () =>
-			{
-				var next = new List<double>();
-				foreach (var box in boxes)
-					if (double.TryParse(box.Text, out var parsed)) next.Add(parsed);
-				await SetUniformAsync(id, next.ToArray());
-			}));
-			group.Children.Add(vectorPanel);
 			return group;
 		}
 
+		private object BuildNumericUniformValue(List<TextBox> boxes, int changedIndex, double changedValue, int componentCount)
+		{
+			var values = new double[componentCount];
+			for (var i = 0; i < componentCount; ++i)
+			{
+				if (i == changedIndex)
+					values[i] = changedValue;
+				else if (!double.TryParse(boxes[i].Text, out values[i]))
+					values[i] = 0.0;
+			}
+			return componentCount == 1 ? (object)values[0] : values;
+		}
+
+		private static bool TryBuildNumericUniformValue(List<TextBox> boxes, out object value)
+		{
+			var values = new double[boxes.Count];
+			for (var i = 0; i < boxes.Count; ++i)
+			{
+				if (!double.TryParse(boxes[i].Text, out values[i]))
+				{
+					value = null;
+					return false;
+				}
+			}
+			value = values.Length == 1 ? (object)values[0] : values;
+			return true;
+		}
 		private async Task SetTechniqueStateAsync(string id, bool enabled)
 		{
 			await SendRpcAsync("set_technique_state", new Dictionary<string, object> { { "id", id }, { "enabled", enabled } });

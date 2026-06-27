@@ -678,6 +678,54 @@ namespace
 		return "\"" + json_escape(value) + "\"";
 	}
 
+	std::string json_string_array_from_nul_list(const std::string &value)
+	{
+		std::string result = "[";
+		bool first = true;
+		size_t start = 0;
+		while (start < value.size())
+		{
+			size_t end = value.find('\0', start);
+			if (end == std::string::npos)
+				end = value.size();
+			std::string item = value.substr(start, end - start);
+			if (!item.empty() && item.front() == '\\')
+				item.erase(item.begin());
+			if (!item.empty())
+			{
+				if (!first)
+					result += ',';
+				first = false;
+				result += json_string(item);
+			}
+			start = end + 1;
+		}
+		result += "]";
+		return result;
+	}
+
+	bool uniform_annotation_number(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name, double &value)
+	{
+		float float_value = 0.0f;
+		if (runtime->get_annotation_float_from_uniform_variable(variable, name, &float_value, 1))
+		{
+			value = float_value;
+			return true;
+		}
+		int32_t int_value = 0;
+		if (runtime->get_annotation_int_from_uniform_variable(variable, name, &int_value, 1))
+		{
+			value = int_value;
+			return true;
+		}
+		uint32_t uint_value = 0;
+		if (runtime->get_annotation_uint_from_uniform_variable(variable, name, &uint_value, 1))
+		{
+			value = uint_value;
+			return true;
+		}
+		return false;
+	}
 	bool json_get_raw_string(const std::string &json, const std::string &key, std::string &value)
 	{
 		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"");
@@ -879,13 +927,15 @@ namespace
 			const std::string label = uniform_annotation_string(runtime, variable, "ui_label");
 			const std::string category = uniform_annotation_string(runtime, variable, "ui_category");
 			const std::string ui_type = uniform_annotation_string(runtime, variable, "ui_type");
+			const std::string ui_items = uniform_annotation_string(runtime, variable, "ui_items");
 			if (!label.empty()) state.result += ",\"label\":" + json_string(label);
 			if (!category.empty()) state.result += ",\"category\":" + json_string(category);
 			if (!ui_type.empty()) state.result += ",\"uiType\":" + json_string(ui_type);
-			float min_value = 0.0f, max_value = 0.0f, step_value = 0.0f;
-			if (uniform_annotation_float(runtime, variable, "ui_min", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
-			if (uniform_annotation_float(runtime, variable, "ui_max", max_value)) state.result += ",\"max\":" + std::to_string(max_value);
-			if (uniform_annotation_float(runtime, variable, "ui_step", step_value)) state.result += ",\"step\":" + std::to_string(step_value);
+			if (!ui_items.empty()) state.result += ",\"items\":" + json_string_array_from_nul_list(ui_items);
+			double min_value = 0.0, max_value = 0.0, step_value = 0.0;
+			if (uniform_annotation_number(runtime, variable, "ui_min", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
+			if (uniform_annotation_number(runtime, variable, "ui_max", max_value)) state.result += ",\"max\":" + std::to_string(max_value);
+			if (uniform_annotation_number(runtime, variable, "ui_step", step_value)) state.result += ",\"step\":" + std::to_string(step_value);
 
 			state.result += ",\"value\":[";
 			for (uint32_t i = 0; i < components; ++i)
