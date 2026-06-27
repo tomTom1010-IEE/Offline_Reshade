@@ -1,12 +1,15 @@
 using Microsoft.Win32;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
+using System.IO.Pipes;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows;
-using System.Windows.Input;
+using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 using Forms = System.Windows.Forms;
 
@@ -16,8 +19,14 @@ namespace OfflineReShade.UI
 	{
 		private readonly string _repoRoot;
 		private readonly string _prototypePath;
+		private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
+		private readonly SemaphoreSlim _rpcLock = new SemaphoreSlim(1, 1);
 		private Process _previewProcess;
-		private IntPtr _previewChildHandle;
+		private NamedPipeClientStream _controlPipe;
+		private StreamReader _pipeReader;
+		private StreamWriter _pipeWriter;
+		private int _rpcId;
+		private bool _buildingControls;
 
 		public MainWindow()
 		{
@@ -32,17 +41,8 @@ namespace OfflineReShade.UI
 			OutputPathBox.Text = Path.Combine(exportDir, "reshadeoutput.png");
 			EffectDirBox.Text = Path.Combine(_repoRoot, "bin", "x64", "Release", "OfflinePrototype", "Effects");
 			PreviewPanel.TabStop = true;
-			OverlayPanel.TabStop = true;
-			PreviewPanel.MouseDown += (_, __) => FocusPreviewChildWindow();
-			OverlayPanel.MouseDown += (_, e) => ForwardOverlayMouse(e, MouseDownMessage(e.Button));
-			OverlayPanel.MouseUp += (_, e) => ForwardOverlayMouse(e, MouseUpMessage(e.Button));
-			OverlayPanel.MouseMove += (_, e) => ForwardOverlayMouse(e, WM_MOUSEMOVE);
-			OverlayPanel.MouseWheel += ForwardOverlayMouseWheel;
-			OverlayPanel.KeyDown += ForwardOverlayKeyDown;
-			OverlayPanel.KeyUp += ForwardOverlayKeyUp;
-			PreviewKeyDown += ForwardPreviewKeyDown;
-			PreviewKeyUp += ForwardPreviewKeyUp;
-
+			PreviewPanel.MouseDown += (_, __) => PreviewPanel.Focus();
+			RenderDisconnectedControls();
 			RefreshOutputInfo();
 		}
 
@@ -70,7 +70,7 @@ namespace OfflineReShade.UI
 			}
 		}
 
-		private void StartPreviewClick(object sender, RoutedEventArgs e)
+		private async void StartPreviewClick(object sender, RoutedEventArgs e)
 		{
 			try
 			{
@@ -80,15 +80,17 @@ namespace OfflineReShade.UI
 					throw new FileNotFoundException("OfflineReShadePrototype.exe was not found.", _prototypePath);
 
 				var panelHandle = PreviewPanel.Handle;
-				var overlayHandle = OverlayPanel.Handle;
-				if (panelHandle == IntPtr.Zero || overlayHandle == IntPtr.Zero)
-					throw new InvalidOperationException("Preview or overlay panel handle is not available yet.");
+				if (panelHandle == IntPtr.Zero)
+					throw new InvalidOperationException("Preview panel handle is not available yet.");
 
+				var pipeName = "OfflineReShade-" + Guid.NewGuid().ToString("N");
 				LogBox.Clear();
+				RenderConnectingControls();
+
 				var startInfo = new ProcessStartInfo
 				{
 					FileName = _prototypePath,
-					Arguments = BuildPreviewArguments(panelHandle, overlayHandle),
+					Arguments = BuildPreviewArguments(panelHandle, pipeName),
 					WorkingDirectory = Path.GetDirectoryName(_prototypePath),
 					UseShellExecute = false,
 					RedirectStandardOutput = true,
@@ -104,23 +106,26 @@ namespace OfflineReShade.UI
 					StartPreviewButton.IsEnabled = true;
 					StopPreviewButton.IsEnabled = false;
 					StatusText.Text = "Preview stopped";
+					ControlStatusText.Text = "Disconnected";
 				}));
 
 				_previewProcess.Start();
 				_previewProcess.BeginOutputReadLine();
 				_previewProcess.BeginErrorReadLine();
 
-				Task.Delay(300).ContinueWith(_ => Dispatcher.BeginInvoke(new Action(FocusPreviewChildWindow)));
-
 				StartPreviewButton.IsEnabled = false;
 				StopPreviewButton.IsEnabled = true;
 				StatusText.Text = "Preview running";
-				PreviewInfoText.Text = "Full-res ReShade runtime - preview is scaled, press Home for overlay";
+				PreviewInfoText.Text = "Full-res ReShade runtime - preview is scaled";
+
+				await ConnectControlPipeAsync(pipeName);
+				await RefreshControlStateAsync();
 			}
 			catch (Exception ex)
 			{
 				AppendLog(ex.Message);
 				StatusText.Text = "Failed";
+				ControlStatusText.Text = "Control failed";
 				StartPreviewButton.IsEnabled = true;
 				StopPreviewButton.IsEnabled = false;
 			}
@@ -130,6 +135,220 @@ namespace OfflineReShade.UI
 		{
 			StopPreviewProcess();
 			StatusText.Text = "Preview stopped";
+		}
+
+		private async void ReShadeScreenshotClick(object sender, RoutedEventArgs e)
+		{
+			try
+			{
+				await SendRpcAsync("save_screenshot", new Dictionary<string, object>());
+				AppendLog("Screenshot requested.");
+			}
+			catch (Exception ex)
+			{
+				AppendLog(ex.Message);
+			}
+		}
+
+		private async Task ConnectControlPipeAsync(string pipeName)
+		{
+			CloseControlPipe();
+			ControlStatusText.Text = "Connecting";
+			_controlPipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+			await Task.Run(() => _controlPipe.Connect(5000));
+			_pipeReader = new StreamReader(_controlPipe, new UTF8Encoding(false));
+			_pipeWriter = new StreamWriter(_controlPipe, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
+			ControlStatusText.Text = "Connected";
+		}
+
+		private async Task RefreshControlStateAsync()
+		{
+			Dictionary<string, object> state = null;
+			for (var attempt = 0; attempt < 20; ++attempt)
+			{
+				state = await SendRpcAsync("list_state", new Dictionary<string, object>());
+				if (AsArray(state.ContainsKey("techniques") ? state["techniques"] : null).Length != 0 || AsArray(state.ContainsKey("uniforms") ? state["uniforms"] : null).Length != 0)
+					break;
+				await Task.Delay(250);
+			}
+			BuildControls(state ?? new Dictionary<string, object>());
+		}
+
+		private async Task<Dictionary<string, object>> SendRpcAsync(string method, Dictionary<string, object> parameters)
+		{
+			if (_pipeWriter == null || _pipeReader == null)
+				throw new InvalidOperationException("Control pipe is not connected.");
+
+			await _rpcLock.WaitAsync();
+			try
+			{
+				var request = new Dictionary<string, object>
+				{
+					{ "id", ++_rpcId },
+					{ "method", method },
+					{ "params", parameters ?? new Dictionary<string, object>() }
+				};
+				await _pipeWriter.WriteLineAsync(_json.Serialize(request));
+				var line = await _pipeReader.ReadLineAsync();
+				if (line == null)
+					throw new IOException("Control pipe closed.");
+				var response = AsDict(_json.DeserializeObject(line));
+				if (!response.ContainsKey("ok") || !(bool)response["ok"])
+				{
+					var error = response.ContainsKey("error") ? AsDict(response["error"]) : new Dictionary<string, object>();
+					throw new InvalidOperationException(error.ContainsKey("message") ? Convert.ToString(error["message"]) : "ReShade control command failed.");
+				}
+				return response.ContainsKey("result") ? AsDict(response["result"]) : new Dictionary<string, object>();
+			}
+			finally
+			{
+				_rpcLock.Release();
+			}
+		}
+
+		private void BuildControls(Dictionary<string, object> state)
+		{
+			_buildingControls = true;
+			ControlsPanel.Children.Clear();
+			try
+			{
+				var runtime = state.ContainsKey("runtime") ? AsDict(state["runtime"]) : new Dictionary<string, object>();
+				var effectsEnabled = !runtime.ContainsKey("effectsEnabled") || Convert.ToBoolean(runtime["effectsEnabled"]);
+
+				var commandPanel = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
+				var effectsBox = new CheckBox { Content = "Effects Enabled", IsChecked = effectsEnabled, Margin = new Thickness(0, 0, 12, 8), VerticalAlignment = VerticalAlignment.Center };
+				effectsBox.Checked += async (_, __) => { if (!_buildingControls) await SendRpcSafeAsync("set_effects_state", "enabled", true); };
+				effectsBox.Unchecked += async (_, __) => { if (!_buildingControls) await SendRpcSafeAsync("set_effects_state", "enabled", false); };
+				commandPanel.Children.Add(effectsBox);
+				commandPanel.Children.Add(MakeCommandButton("Reload", async () => { await SendRpcAsync("reload_effects", new Dictionary<string, object>()); await Task.Delay(500); await RefreshControlStateAsync(); }));
+				commandPanel.Children.Add(MakeCommandButton("Save Preset", async () => await SendRpcAsync("save_preset", new Dictionary<string, object>())));
+				ControlsPanel.Children.Add(commandPanel);
+
+				var techniquesPanel = new StackPanel();
+				foreach (var item in AsArray(state.ContainsKey("techniques") ? state["techniques"] : null))
+				{
+					var technique = AsDict(item);
+					var id = Convert.ToString(technique["id"]);
+					var label = Convert.ToString(technique["name"]) + " [" + Convert.ToString(technique["effectName"]) + "]";
+					var checkBox = new CheckBox { Content = label, IsChecked = Convert.ToBoolean(technique["enabled"]), Tag = id, Margin = new Thickness(0, 0, 0, 4) };
+					checkBox.Checked += async (_, __) => { if (!_buildingControls) await SetTechniqueStateAsync((string)checkBox.Tag, true); };
+					checkBox.Unchecked += async (_, __) => { if (!_buildingControls) await SetTechniqueStateAsync((string)checkBox.Tag, false); };
+					techniquesPanel.Children.Add(checkBox);
+				}
+				ControlsPanel.Children.Add(new Expander { Header = "Techniques", IsExpanded = true, Content = techniquesPanel, Margin = new Thickness(0, 0, 0, 12) });
+
+				var uniformsPanel = new StackPanel();
+				foreach (var item in AsArray(state.ContainsKey("uniforms") ? state["uniforms"] : null))
+					uniformsPanel.Children.Add(MakeUniformControl(AsDict(item)));
+				ControlsPanel.Children.Add(new Expander { Header = "Uniforms", IsExpanded = true, Content = uniformsPanel });
+				ControlStatusText.Text = "Ready";
+			}
+			finally
+			{
+				_buildingControls = false;
+			}
+		}
+
+		private Button MakeCommandButton(string label, Func<Task> action)
+		{
+			var button = new Button { Content = label, MinWidth = 92, Height = 28, Margin = new Thickness(0, 0, 8, 8) };
+			button.Click += async (_, __) =>
+			{
+				try { await action(); }
+				catch (Exception ex) { AppendLog(ex.Message); }
+			};
+			return button;
+		}
+
+		private FrameworkElement MakeUniformControl(Dictionary<string, object> uniform)
+		{
+			var id = Convert.ToString(uniform["id"]);
+			var name = uniform.ContainsKey("label") ? Convert.ToString(uniform["label"]) : Convert.ToString(uniform["name"]);
+			var type = Convert.ToString(uniform["type"]);
+			var values = AsArray(uniform.ContainsKey("value") ? uniform["value"] : null);
+			var group = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+			group.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+
+			if (type == "bool")
+			{
+				var checkBox = new CheckBox { Content = Convert.ToString(uniform["effectName"]), IsChecked = values.Length != 0 && Convert.ToBoolean(values[0]), Margin = new Thickness(0, 4, 0, 0) };
+				checkBox.Checked += async (_, __) => { if (!_buildingControls) await SetUniformAsync(id, true); };
+				checkBox.Unchecked += async (_, __) => { if (!_buildingControls) await SetUniformAsync(id, false); };
+				group.Children.Add(checkBox);
+				return group;
+			}
+
+			if (values.Length <= 1)
+			{
+				var current = values.Length == 0 ? 0.0 : Convert.ToDouble(values[0]);
+				var row = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
+				var text = new TextBox { Width = 72, Text = current.ToString("0.######") };
+				DockPanel.SetDock(text, Dock.Right);
+				row.Children.Add(text);
+				if (uniform.ContainsKey("min") && uniform.ContainsKey("max"))
+				{
+					var slider = new Slider { Minimum = Convert.ToDouble(uniform["min"]), Maximum = Convert.ToDouble(uniform["max"]), Value = current, Margin = new Thickness(0, 0, 8, 0) };
+					slider.ValueChanged += async (_, __) =>
+					{
+						if (_buildingControls) return;
+						text.Text = slider.Value.ToString("0.######");
+						await SetUniformAsync(id, slider.Value);
+					};
+					row.Children.Add(slider);
+				}
+				text.LostFocus += async (_, __) => { if (double.TryParse(text.Text, out var parsed)) await SetUniformAsync(id, parsed); };
+				text.KeyDown += async (_, e) => { if (e.Key == System.Windows.Input.Key.Enter && double.TryParse(text.Text, out var parsed)) await SetUniformAsync(id, parsed); };
+				group.Children.Add(row);
+				return group;
+			}
+
+			var vectorPanel = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
+			var boxes = new List<TextBox>();
+			for (var i = 0; i < values.Length; ++i)
+			{
+				var box = new TextBox { Width = 64, Text = Convert.ToDouble(values[i]).ToString("0.######"), Margin = new Thickness(0, 0, 6, 6) };
+				boxes.Add(box);
+				vectorPanel.Children.Add(box);
+			}
+			vectorPanel.Children.Add(MakeCommandButton("Apply", async () =>
+			{
+				var next = new List<double>();
+				foreach (var box in boxes)
+					if (double.TryParse(box.Text, out var parsed)) next.Add(parsed);
+				await SetUniformAsync(id, next.ToArray());
+			}));
+			group.Children.Add(vectorPanel);
+			return group;
+		}
+
+		private async Task SetTechniqueStateAsync(string id, bool enabled)
+		{
+			await SendRpcAsync("set_technique_state", new Dictionary<string, object> { { "id", id }, { "enabled", enabled } });
+		}
+
+		private async Task SetUniformAsync(string id, object value)
+		{
+			await SendRpcAsync("set_uniform", new Dictionary<string, object> { { "id", id }, { "value", value } });
+		}
+
+		private async Task SendRpcSafeAsync(string method, string key, object value)
+		{
+			try { await SendRpcAsync(method, new Dictionary<string, object> { { key, value } }); }
+			catch (Exception ex) { AppendLog(ex.Message); }
+		}
+
+		private void RenderDisconnectedControls()
+		{
+			ControlsPanel.Children.Clear();
+			ControlsPanel.Children.Add(new TextBlock { Text = "Start preview to load ReShade controls.", Foreground = System.Windows.Media.Brushes.DimGray, TextWrapping = TextWrapping.Wrap });
+			ControlStatusText.Text = "Disconnected";
+		}
+
+		private void RenderConnectingControls()
+		{
+			ControlsPanel.Children.Clear();
+			ControlsPanel.Children.Add(new TextBlock { Text = "Connecting to ReShade runtime...", Foreground = System.Windows.Media.Brushes.DimGray });
+			ControlStatusText.Text = "Connecting";
 		}
 
 		private Task<string> RunPrototypeAsync(string arguments)
@@ -157,15 +376,10 @@ namespace OfflineReShade.UI
 					process.WaitForExit();
 
 					var log = new StringBuilder();
-					if (!string.IsNullOrWhiteSpace(output))
-						log.AppendLine(output.TrimEnd());
-					if (!string.IsNullOrWhiteSpace(error))
-						log.AppendLine(error.TrimEnd());
+					if (!string.IsNullOrWhiteSpace(output)) log.AppendLine(output.TrimEnd());
+					if (!string.IsNullOrWhiteSpace(error)) log.AppendLine(error.TrimEnd());
 					log.AppendLine("ExitCode=" + process.ExitCode.ToString());
-
-					if (process.ExitCode != 0)
-						throw new InvalidOperationException(log.ToString());
-
+					if (process.ExitCode != 0) throw new InvalidOperationException(log.ToString());
 					return log.ToString();
 				}
 			});
@@ -180,14 +394,13 @@ namespace OfflineReShade.UI
 			return args.ToString();
 		}
 
-		private string BuildPreviewArguments(IntPtr panelHandle, IntPtr overlayHandle)
+		private string BuildPreviewArguments(IntPtr panelHandle, string pipeName)
 		{
 			var args = BuildCommonArguments();
 			AddArg(args, "--parent-hwnd", panelHandle.ToInt64().ToString());
-			AddArg(args, "--overlay-hwnd", overlayHandle.ToInt64().ToString());
+			AddArg(args, "--control-pipe", pipeName);
 			AddSwitch(args, "--interactive");
 			AddArg(args, "--output", OutputPathBox.Text);
-
 			AddArg(args, "--width", WidthBox.Text);
 			AddArg(args, "--height", HeightBox.Text);
 			return args.ToString();
@@ -202,174 +415,6 @@ namespace OfflineReShade.UI
 			AddArg(args, "--preset", PresetPathBox.Text);
 			return args;
 		}
-		private void ReShadeScreenshotClick(object sender, RoutedEventArgs e)
-		{
-			SendKeyToPreview(0x2C);
-		}
-
-		private void ForwardPreviewKeyDown(object sender, KeyEventArgs e)
-		{
-			ForwardPreviewKey(e, true);
-		}
-
-		private void ForwardPreviewKeyUp(object sender, KeyEventArgs e)
-		{
-			ForwardPreviewKey(e, false);
-		}
-		private void ForwardOverlayKeyDown(object sender, Forms.KeyEventArgs e)
-		{
-			ForwardOverlayKey(e, true);
-		}
-
-		private void ForwardOverlayKeyUp(object sender, Forms.KeyEventArgs e)
-		{
-			ForwardOverlayKey(e, false);
-		}
-
-		private void ForwardOverlayKey(Forms.KeyEventArgs e, bool keyDown)
-		{
-			if (_previewProcess == null || _previewProcess.HasExited)
-				return;
-
-			PostKeyMessageToPreview(e.KeyValue, keyDown);
-			e.Handled = true;
-		}
-
-		private void ForwardPreviewKey(KeyEventArgs e, bool keyDown)
-		{
-			if (_previewProcess == null || _previewProcess.HasExited || IsTextBoxFocused())
-				return;
-
-			var key = e.Key == Key.System ? e.SystemKey : e.Key;
-			if (key == Key.ImeProcessed)
-				key = e.ImeProcessedKey;
-
-			var vk = KeyInterop.VirtualKeyFromKey(key);
-			if (vk == 0)
-				return;
-
-			PostKeyMessageToPreview(vk, keyDown);
-			e.Handled = true;
-		}
-
-		private void SendKeyToPreview(int vk)
-		{
-			if (_previewProcess == null || _previewProcess.HasExited)
-				return;
-
-			FocusPreviewChildWindow();
-			PostKeyMessageToPreview(vk, true);
-			PostKeyMessageToPreview(vk, false);
-		}
-
-		private void PostKeyMessageToPreview(int vk, bool keyDown)
-		{
-			if (!TryGetPreviewChildWindow(out var hwnd))
-				return;
-
-			var scanCode = MapVirtualKey((uint)vk, 0);
-			var lparam = 1 | ((int)scanCode << 16);
-			if (!keyDown)
-				lparam |= unchecked((int)0xC0000000);
-
-			PostMessage(hwnd, keyDown ? WM_KEYDOWN : WM_KEYUP, new IntPtr(vk), new IntPtr(lparam));
-		}
-		private void ForwardOverlayMouse(Forms.MouseEventArgs e, int message)
-		{
-			if (_previewProcess == null || _previewProcess.HasExited)
-				return;
-			if (!TryGetPreviewChildWindow(out var hwnd))
-				return;
-
-			OverlayPanel.Focus();
-			PostMessage(hwnd, message, new IntPtr(MouseKeyState()), MakeMouseLParam(e.X, e.Y));
-		}
-
-		private void ForwardOverlayMouseWheel(object sender, Forms.MouseEventArgs e)
-		{
-			if (_previewProcess == null || _previewProcess.HasExited)
-				return;
-			if (!TryGetPreviewChildWindow(out var hwnd))
-				return;
-
-			OverlayPanel.Focus();
-			var wparam = (e.Delta << 16) | (MouseKeyState() & 0xffff);
-			PostMessage(hwnd, WM_MOUSEWHEEL, new IntPtr(wparam), MakeMouseLParam(e.X, e.Y));
-		}
-
-		private static int MouseDownMessage(Forms.MouseButtons button)
-		{
-			if (button == Forms.MouseButtons.Left)
-				return WM_LBUTTONDOWN;
-			if (button == Forms.MouseButtons.Right)
-				return WM_RBUTTONDOWN;
-			if (button == Forms.MouseButtons.Middle)
-				return WM_MBUTTONDOWN;
-			return WM_MOUSEMOVE;
-		}
-
-		private static int MouseUpMessage(Forms.MouseButtons button)
-		{
-			if (button == Forms.MouseButtons.Left)
-				return WM_LBUTTONUP;
-			if (button == Forms.MouseButtons.Right)
-				return WM_RBUTTONUP;
-			if (button == Forms.MouseButtons.Middle)
-				return WM_MBUTTONUP;
-			return WM_MOUSEMOVE;
-		}
-
-		private static int MouseKeyState()
-		{
-			var state = 0;
-			if ((Forms.Control.MouseButtons & Forms.MouseButtons.Left) != 0)
-				state |= MK_LBUTTON;
-			if ((Forms.Control.MouseButtons & Forms.MouseButtons.Right) != 0)
-				state |= MK_RBUTTON;
-			if ((Forms.Control.MouseButtons & Forms.MouseButtons.Middle) != 0)
-				state |= MK_MBUTTON;
-			if ((Forms.Control.ModifierKeys & Forms.Keys.Shift) != 0)
-				state |= MK_SHIFT;
-			if ((Forms.Control.ModifierKeys & Forms.Keys.Control) != 0)
-				state |= MK_CONTROL;
-			return state;
-		}
-
-		private static IntPtr MakeMouseLParam(int x, int y)
-		{
-			return new IntPtr((x & 0xffff) | ((y & 0xffff) << 16));
-		}
-
-		private void FocusPreviewChildWindow()
-		{
-			PreviewPanel.Focus();
-			if (TryGetPreviewChildWindow(out var hwnd))
-				SetFocus(hwnd);
-		}
-
-		private bool TryGetPreviewChildWindow(out IntPtr hwnd)
-		{
-			if (_previewChildHandle != IntPtr.Zero && IsWindow(_previewChildHandle))
-			{
-				hwnd = _previewChildHandle;
-				return true;
-			}
-
-			_previewChildHandle = IntPtr.Zero;
-			EnumChildWindows(PreviewPanel.Handle, (child, _) =>
-			{
-				_previewChildHandle = child;
-				return false;
-			}, IntPtr.Zero);
-
-			hwnd = _previewChildHandle;
-			return hwnd != IntPtr.Zero && IsWindow(hwnd);
-		}
-
-		private static bool IsTextBoxFocused()
-		{
-			return Keyboard.FocusedElement is System.Windows.Controls.TextBox;
-		}
 
 		private void BrowseColorClick(object sender, RoutedEventArgs e) => BrowseFile(ColorPathBox, "PNG files|*.png|All files|*.*");
 		private void BrowseDepthClick(object sender, RoutedEventArgs e) => BrowseFile(DepthPathBox, "PNG files|*.png|All files|*.*");
@@ -378,10 +423,8 @@ namespace OfflineReShade.UI
 		private void BrowseOutputClick(object sender, RoutedEventArgs e)
 		{
 			var dialog = new SaveFileDialog { Filter = "PNG files|*.png|All files|*.*", FileName = Path.GetFileName(OutputPathBox.Text) };
-			if (!string.IsNullOrWhiteSpace(OutputPathBox.Text))
-				dialog.InitialDirectory = Path.GetDirectoryName(OutputPathBox.Text);
-			if (dialog.ShowDialog(this) == true)
-				OutputPathBox.Text = dialog.FileName;
+			if (!string.IsNullOrWhiteSpace(OutputPathBox.Text)) dialog.InitialDirectory = Path.GetDirectoryName(OutputPathBox.Text);
+			if (dialog.ShowDialog(this) == true) OutputPathBox.Text = dialog.FileName;
 		}
 
 		private void BrowseEffectClick(object sender, RoutedEventArgs e)
@@ -389,15 +432,13 @@ namespace OfflineReShade.UI
 			using (var dialog = new Forms.FolderBrowserDialog())
 			{
 				dialog.SelectedPath = Directory.Exists(EffectDirBox.Text) ? EffectDirBox.Text : _repoRoot;
-				if (dialog.ShowDialog() == Forms.DialogResult.OK)
-					EffectDirBox.Text = dialog.SelectedPath;
+				if (dialog.ShowDialog() == Forms.DialogResult.OK) EffectDirBox.Text = dialog.SelectedPath;
 			}
 		}
 
 		private void OpenOutputClick(object sender, RoutedEventArgs e)
 		{
-			if (File.Exists(OutputPathBox.Text))
-				Process.Start(new ProcessStartInfo(OutputPathBox.Text) { UseShellExecute = true });
+			if (File.Exists(OutputPathBox.Text)) Process.Start(new ProcessStartInfo(OutputPathBox.Text) { UseShellExecute = true });
 		}
 
 		private void RefreshOutputClick(object sender, RoutedEventArgs e) => RefreshOutputInfo();
@@ -421,43 +462,47 @@ namespace OfflineReShade.UI
 
 		private void StopPreviewProcess()
 		{
+			CloseControlPipe();
 			var process = _previewProcess;
 			_previewProcess = null;
-			if (process == null)
-				return;
-
-			try
+			if (process != null)
 			{
-				if (!process.HasExited)
+				try
 				{
-					process.Kill();
-					process.WaitForExit(2000);
+					if (!process.HasExited)
+					{
+						process.Kill();
+						process.WaitForExit(2000);
+					}
 				}
+				catch (InvalidOperationException) { }
+				finally { process.Dispose(); }
 			}
-			catch (InvalidOperationException)
-			{
-			}
-			finally
-			{
-				process.Dispose();
-				StartPreviewButton.IsEnabled = true;
-				StopPreviewButton.IsEnabled = false;
-			}
+			StartPreviewButton.IsEnabled = true;
+			StopPreviewButton.IsEnabled = false;
+			RenderDisconnectedControls();
+		}
+
+		private void CloseControlPipe()
+		{
+			_pipeWriter?.Dispose();
+			_pipeReader?.Dispose();
+			_controlPipe?.Dispose();
+			_pipeWriter = null;
+			_pipeReader = null;
+			_controlPipe = null;
 		}
 
 		private void AppendLogFromProcess(string line)
 		{
-			if (string.IsNullOrWhiteSpace(line))
-				return;
+			if (string.IsNullOrWhiteSpace(line)) return;
 			Dispatcher.BeginInvoke(new Action(() => AppendLog(line)));
 		}
 
 		private void AppendLog(string text)
 		{
-			if (string.IsNullOrWhiteSpace(text))
-				return;
-			if (LogBox.Text.Length != 0)
-				LogBox.AppendText(Environment.NewLine);
+			if (string.IsNullOrWhiteSpace(text)) return;
+			if (LogBox.Text.Length != 0) LogBox.AppendText(Environment.NewLine);
 			LogBox.AppendText(text.TrimEnd());
 			LogBox.ScrollToEnd();
 		}
@@ -467,68 +512,28 @@ namespace OfflineReShade.UI
 			StopPreviewProcess();
 			base.OnClosed(e);
 		}
-		private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
-		private const int WM_KEYDOWN = 0x0100;
-		private const int WM_KEYUP = 0x0101;
-		private const int WM_MOUSEMOVE = 0x0200;
-		private const int WM_LBUTTONDOWN = 0x0201;
-		private const int WM_LBUTTONUP = 0x0202;
-		private const int WM_RBUTTONDOWN = 0x0204;
-		private const int WM_RBUTTONUP = 0x0205;
-		private const int WM_MBUTTONDOWN = 0x0207;
-		private const int WM_MBUTTONUP = 0x0208;
-		private const int WM_MOUSEWHEEL = 0x020A;
-		private const int MK_LBUTTON = 0x0001;
-		private const int MK_RBUTTON = 0x0002;
-		private const int MK_SHIFT = 0x0004;
-		private const int MK_CONTROL = 0x0008;
-		private const int MK_MBUTTON = 0x0010;
-
-		[DllImport("user32.dll")]
-		private static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc callback, IntPtr lParam);
-
-		[DllImport("user32.dll")]
-		private static extern bool IsWindow(IntPtr hwnd);
-
-		[DllImport("user32.dll")]
-		private static extern IntPtr SetFocus(IntPtr hwnd);
-
-		[DllImport("user32.dll")]
-		private static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
-
-		[DllImport("user32.dll")]
-		private static extern uint MapVirtualKey(uint code, uint mapType);
+		private static Dictionary<string, object> AsDict(object value) => value as Dictionary<string, object> ?? new Dictionary<string, object>();
+		private static object[] AsArray(object value) => value as object[] ?? new object[0];
 
 		private static void BrowseFile(System.Windows.Controls.TextBox target, string filter)
 		{
 			var dialog = new OpenFileDialog { Filter = filter };
-			if (!string.IsNullOrWhiteSpace(target.Text))
-				dialog.InitialDirectory = File.Exists(target.Text) ? Path.GetDirectoryName(target.Text) : target.Text;
-			if (dialog.ShowDialog() == true)
-				target.Text = dialog.FileName;
+			if (!string.IsNullOrWhiteSpace(target.Text)) dialog.InitialDirectory = File.Exists(target.Text) ? Path.GetDirectoryName(target.Text) : target.Text;
+			if (dialog.ShowDialog() == true) target.Text = dialog.FileName;
 		}
 
 		private static void AddSwitch(StringBuilder builder, string name)
 		{
-			if (builder.Length != 0)
-				builder.Append(' ');
+			if (builder.Length != 0) builder.Append(' ');
 			builder.Append(name);
 		}
 
 		private static void AddArg(StringBuilder builder, string name, string value)
 		{
-			if (string.IsNullOrWhiteSpace(value))
-				return;
-			if (builder.Length != 0)
-				builder.Append(' ');
+			if (string.IsNullOrWhiteSpace(value)) return;
+			if (builder.Length != 0) builder.Append(' ');
 			builder.Append(name).Append(' ').Append('"').Append(value.Replace("\"", "\\\"")).Append('"');
-		}
-
-		private static int ParsePositiveInt(string value)
-		{
-			int parsed;
-			return int.TryParse(value, out parsed) && parsed > 0 ? parsed : 0;
 		}
 
 		private static string FindRepoRoot()
@@ -536,8 +541,7 @@ namespace OfflineReShade.UI
 			var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
 			while (dir != null)
 			{
-				if (File.Exists(Path.Combine(dir.FullName, "ReShade.sln")))
-					return dir.FullName;
+				if (File.Exists(Path.Combine(dir.FullName, "ReShade.sln"))) return dir.FullName;
 				dir = dir.Parent;
 			}
 			return Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", ".."));
@@ -546,18 +550,8 @@ namespace OfflineReShade.UI
 		private static string FindPrototypePath(string repoRoot)
 		{
 			var release = Path.Combine(repoRoot, "bin", "x64", "Release", "OfflineReShadePrototype.exe");
-			if (File.Exists(release))
-				return release;
+			if (File.Exists(release)) return release;
 			return Path.Combine(repoRoot, "bin", "x64", "Debug", "OfflineReShadePrototype.exe");
 		}
 	}
 }
-
-
-
-
-
-
-
-
-

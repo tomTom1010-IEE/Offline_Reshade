@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Offline ReShade prototype
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -12,16 +12,23 @@
 #include "reshade_api.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <regex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 
@@ -47,6 +54,7 @@ namespace
 		uint32_t height = 0;
 		uintptr_t parent_hwnd = 0;
 		uintptr_t overlay_hwnd = 0;
+		std::string control_pipe;
 		bool interactive = false;
 	};
 
@@ -62,7 +70,7 @@ namespace
 	void print_usage()
 	{
 		std::cout <<
-			"usage: OfflineReShadePrototype [--color <png>] [--depth <png>] [--effect-dir <dir>] [--preset <ini>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--interactive]\n";
+			"usage: OfflineReShadePrototype [--color <png>] [--depth <png>] [--effect-dir <dir>] [--preset <ini>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--control-pipe <name>] [--interactive]\n";
 	}
 
 	std::wstring widen_utf8(const std::string &value)
@@ -170,6 +178,12 @@ namespace
 			{
 				if (++i >= argc || !parse_hwnd_value(argv[i], opts.overlay_hwnd))
 					return false;
+			}
+			else if (arg == L"--control-pipe")
+			{
+				if (++i >= argc)
+					return false;
+				opts.control_pipe = narrow_utf8(argv[i]);
 			}
 			else if (arg == L"--interactive")
 			{
@@ -654,6 +668,608 @@ namespace
 		return result;
 	}
 
+	std::string json_escape(const std::string &value)
+	{
+		std::string result;
+		result.reserve(value.size() + 8);
+		for (const char c : value)
+		{
+			switch (c)
+			{
+			case '\\': result += "\\\\"; break;
+			case '"': result += "\\\""; break;
+			case '\n': result += "\\n"; break;
+			case '\r': result += "\\r"; break;
+			case '\t': result += "\\t"; break;
+			default:
+				if (static_cast<unsigned char>(c) < 0x20)
+					result += ' ';
+				else
+					result += c;
+				break;
+			}
+		}
+		return result;
+	}
+
+	std::string json_string(const std::string &value)
+	{
+		return "\"" + json_escape(value) + "\"";
+	}
+
+	bool json_get_raw_string(const std::string &json, const std::string &key, std::string &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+
+		value.clear();
+		const std::string raw = match[1].str();
+		for (size_t i = 0; i < raw.size(); ++i)
+		{
+			if (raw[i] == '\\' && i + 1 < raw.size())
+			{
+				const char escaped = raw[++i];
+				switch (escaped)
+				{
+				case 'n': value += '\n'; break;
+				case 'r': value += '\r'; break;
+				case 't': value += '\t'; break;
+				default: value += escaped; break;
+				}
+			}
+			else
+			{
+				value += raw[i];
+			}
+		}
+		return true;
+	}
+
+	bool json_get_int(const std::string &json, const std::string &key, int &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*(-?\\d+)");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+		value = std::stoi(match[1].str());
+		return true;
+	}
+
+	bool json_get_bool(const std::string &json, const std::string &key, bool &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*(true|false)");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+		value = match[1].str() == "true";
+		return true;
+	}
+
+	std::vector<std::string> json_get_string_array(const std::string &json, const std::string &key)
+	{
+		std::vector<std::string> values;
+		const std::regex array_pattern("\\\"" + key + "\\\"\\s*:\\s*\\[([^\\]]*)\\]");
+		std::smatch match;
+		if (!std::regex_search(json, match, array_pattern))
+			return values;
+
+		const std::string body = match[1].str();
+		const std::regex string_pattern("\\\"((?:\\\\.|[^\\\"])*)\\\"");
+		for (auto it = std::sregex_iterator(body.begin(), body.end(), string_pattern); it != std::sregex_iterator(); ++it)
+		{
+			std::string value;
+			json_get_raw_string("{\"v\":" + it->str() + "}", "v", value);
+			values.push_back(value);
+		}
+		return values;
+	}
+	std::vector<double> json_get_number_values(const std::string &json, const std::string &key)
+	{
+		std::vector<double> values;
+		const std::regex array_pattern("\\\"" + key + "\\\"\\s*:\\s*\\[([^\\]]*)\\]");
+		std::smatch match;
+		if (std::regex_search(json, match, array_pattern))
+		{
+			const std::string body = match[1].str();
+			const std::regex number_pattern("-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
+			for (auto it = std::sregex_iterator(body.begin(), body.end(), number_pattern); it != std::sregex_iterator(); ++it)
+				values.push_back(std::stod(it->str()));
+			return values;
+		}
+
+		const std::regex number_pattern("\\\"" + key + "\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)");
+		if (std::regex_search(json, match, number_pattern))
+			values.push_back(std::stod(match[1].str()));
+		return values;
+	}
+
+	std::string runtime_string(const std::function<void(char *, size_t *)> &getter)
+	{
+		size_t size = 0;
+		getter(nullptr, &size);
+		if (size == 0)
+			return {};
+		std::string value(size, '\0');
+		getter(value.data(), &size);
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value;
+	}
+
+	bool split_effect_id(const std::string &id, std::string &effect_name, std::string &name)
+	{
+		const size_t separator = id.find("::");
+		if (separator == std::string::npos)
+			return false;
+		effect_name = id.substr(0, separator);
+		name = id.substr(separator + 2);
+		return !effect_name.empty() && !name.empty();
+	}
+
+	std::string format_name(reshade::api::format format)
+	{
+		switch (format)
+		{
+		case reshade::api::format::r32_float: return "float";
+		case reshade::api::format::r32_sint: return "int";
+		case reshade::api::format::r32_uint: return "uint";
+		case reshade::api::format::r32_typeless: return "bool";
+		default: return "unknown";
+		}
+	}
+
+	std::string uniform_annotation_string(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name)
+	{
+		size_t size = 0;
+		if (!runtime->get_annotation_string_from_uniform_variable(variable, name, nullptr, &size) || size == 0)
+			return {};
+		std::string value(size, '\0');
+		if (!runtime->get_annotation_string_from_uniform_variable(variable, name, value.data(), &size))
+			return {};
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value;
+	}
+
+	bool uniform_annotation_bool(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name)
+	{
+		bool value = false;
+		return runtime->get_annotation_bool_from_uniform_variable(variable, name, &value, 1) && value;
+	}
+
+	bool uniform_annotation_float(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name, float &value)
+	{
+		return runtime->get_annotation_float_from_uniform_variable(variable, name, &value, 1);
+	}
+
+	struct technique_list_state
+	{
+		std::string result;
+		bool first = true;
+	};
+
+	std::string build_techniques_json(reshade::api::effect_runtime *runtime)
+	{
+		technique_list_state state;
+		state.result = "[";
+		runtime->enumerate_techniques(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_technique technique, void *user_data) {
+			auto &state = *static_cast<technique_list_state *>(user_data);
+			const std::string name = runtime_string([&](char *buffer, size_t *size) { runtime->get_technique_name(technique, buffer, size); });
+			const std::string effect_name = runtime_string([&](char *buffer, size_t *size) { runtime->get_technique_effect_name(technique, buffer, size); });
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"enabled\":" + (runtime->get_technique_state(technique) ? "true" : "false") + "}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
+	struct uniform_list_state
+	{
+		std::string result;
+		bool first = true;
+	};
+
+	std::string build_uniforms_json(reshade::api::effect_runtime *runtime)
+	{
+		uniform_list_state state;
+		state.result = "[";
+		runtime->enumerate_uniform_variables(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, void *user_data) {
+			auto &state = *static_cast<uniform_list_state *>(user_data);
+			if (uniform_annotation_bool(runtime, variable, "hidden"))
+				return;
+
+			reshade::api::format base_type = reshade::api::format::unknown;
+			uint32_t rows = 0, columns = 0, array_length = 0;
+			runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+			const uint32_t components = std::max(1u, rows) * std::max(1u, columns);
+			const std::string name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_name(variable, buffer, size); });
+			const std::string effect_name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_effect_name(variable, buffer, size); });
+			if (name.empty() || effect_name.empty())
+				return;
+
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"type\":" + json_string(format_name(base_type)) + ",\"rows\":" + std::to_string(rows) + ",\"columns\":" + std::to_string(columns) + ",\"arrayLength\":" + std::to_string(array_length);
+
+			const std::string label = uniform_annotation_string(runtime, variable, "ui_label");
+			const std::string category = uniform_annotation_string(runtime, variable, "ui_category");
+			const std::string ui_type = uniform_annotation_string(runtime, variable, "ui_type");
+			if (!label.empty()) state.result += ",\"label\":" + json_string(label);
+			if (!category.empty()) state.result += ",\"category\":" + json_string(category);
+			if (!ui_type.empty()) state.result += ",\"uiType\":" + json_string(ui_type);
+			float min_value = 0.0f, max_value = 0.0f, step_value = 0.0f;
+			if (uniform_annotation_float(runtime, variable, "ui_min", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
+			if (uniform_annotation_float(runtime, variable, "ui_max", max_value)) state.result += ",\"max\":" + std::to_string(max_value);
+			if (uniform_annotation_float(runtime, variable, "ui_step", step_value)) state.result += ",\"step\":" + std::to_string(step_value);
+
+			state.result += ",\"value\":[";
+			for (uint32_t i = 0; i < components; ++i)
+			{
+				if (i != 0)
+					state.result += ',';
+				if (base_type == reshade::api::format::r32_float)
+				{
+					float values[16] = {};
+					runtime->get_uniform_value_float(variable, values, components);
+					state.result += std::to_string(values[i]);
+				}
+				else if (base_type == reshade::api::format::r32_sint)
+				{
+					int32_t values[16] = {};
+					runtime->get_uniform_value_int(variable, values, components);
+					state.result += std::to_string(values[i]);
+				}
+				else if (base_type == reshade::api::format::r32_uint)
+				{
+					uint32_t values[16] = {};
+					runtime->get_uniform_value_uint(variable, values, components);
+					state.result += std::to_string(values[i]);
+				}
+				else
+				{
+					bool values[16] = {};
+					runtime->get_uniform_value_bool(variable, values, components);
+					state.result += values[i] ? "true" : "false";
+				}
+			}
+			state.result += "]}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
+
+	std::string make_response(int id, const std::string &result)
+	{
+		return "{\"id\":" + std::to_string(id) + ",\"ok\":true,\"result\":" + result + "}";
+	}
+
+	std::string make_error(int id, const std::string &code, const std::string &message)
+	{
+		return "{\"id\":" + std::to_string(id) + ",\"ok\":false,\"error\":{\"code\":" + json_string(code) + ",\"message\":" + json_string(message) + "}}";
+	}
+
+	struct control_command
+	{
+		int id = 0;
+		std::string method;
+		std::string params;
+		std::string response;
+		bool done = false;
+		std::mutex mutex;
+		std::condition_variable cv;
+	};
+
+	class control_server
+	{
+	public:
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path))
+		{
+		}
+
+		~control_server()
+		{
+			stop();
+		}
+
+		void start()
+		{
+			_running = true;
+			_thread = std::thread([this]() { pipe_thread(); });
+			std::cout << "CONTROL_PIPE=" << _pipe_name << std::endl;
+			std::cout << "CONTROL_READY=1" << std::endl;
+		}
+
+		void stop()
+		{
+			if (!_running.exchange(false))
+				return;
+			if (_pipe != INVALID_HANDLE_VALUE)
+			{
+				CancelIoEx(_pipe, nullptr);
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+			if (_thread.joinable())
+				_thread.join();
+		}
+
+		void process_pending()
+		{
+			for (;;)
+			{
+				std::shared_ptr<control_command> command;
+				{
+					std::lock_guard<std::mutex> lock(_queue_mutex);
+					if (_queue.empty())
+						break;
+					command = _queue.front();
+					_queue.pop_front();
+				}
+
+				std::string response = execute(*command);
+				{
+					std::lock_guard<std::mutex> lock(command->mutex);
+					command->response = std::move(response);
+					command->done = true;
+				}
+				command->cv.notify_one();
+			}
+		}
+
+	private:
+		void pipe_thread()
+		{
+			const std::wstring pipe_path = L"\\\\.\\pipe\\" + widen_utf8(_pipe_name);
+			while (_running)
+			{
+				_pipe = CreateNamedPipeW(pipe_path.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 1 << 20, 1 << 20, 0, nullptr);
+				if (_pipe == INVALID_HANDLE_VALUE)
+					return;
+
+				const BOOL connected = ConnectNamedPipe(_pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+				if (connected)
+					serve_client(_pipe);
+
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+		}
+
+		void serve_client(HANDLE pipe)
+		{
+			std::string pending;
+			char buffer[4096];
+			while (_running)
+			{
+				DWORD bytes_read = 0;
+				if (!ReadFile(pipe, buffer, sizeof(buffer), &bytes_read, nullptr) || bytes_read == 0)
+					break;
+				pending.append(buffer, buffer + bytes_read);
+				for (;;)
+				{
+					const size_t newline = pending.find('\n');
+					if (newline == std::string::npos)
+						break;
+					std::string line = pending.substr(0, newline);
+					pending.erase(0, newline + 1);
+					if (!line.empty() && line.back() == '\r')
+						line.pop_back();
+					const std::string response = handle_line(line);
+					DWORD bytes_written = 0;
+					const std::string output = response + "\n";
+					if (!WriteFile(pipe, output.data(), static_cast<DWORD>(output.size()), &bytes_written, nullptr))
+						break;
+				}
+			}
+		}
+
+		std::string handle_line(const std::string &line)
+		{
+			int id = 0;
+			std::string method;
+			if (!json_get_int(line, "id", id) || !json_get_raw_string(line, "method", method))
+				return make_error(0, "bad_request", "Request must include numeric id and string method.");
+
+			auto command = std::make_shared<control_command>();
+			command->id = id;
+			command->method = method;
+			command->params = line;
+			{
+				std::lock_guard<std::mutex> lock(_queue_mutex);
+				_queue.push_back(command);
+			}
+			std::unique_lock<std::mutex> lock(command->mutex);
+			command->cv.wait(lock, [&]() { return command->done || !_running; });
+			return command->done ? command->response : make_error(id, "stopped", "Control server stopped.");
+		}
+
+		std::string execute(control_command &command)
+		{
+			try
+			{
+				if (command.method == "get_runtime_info")
+				{
+					std::string preset = runtime_string([&](char *buffer, size_t *size) { _runtime->get_current_preset_path(buffer, size); });
+					return make_response(command.id, "{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"presetPath\":" + json_string(preset) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"outputPath\":" + json_string(path_utf8(_output_path)) + "}");
+				}
+				if (command.method == "list_state")
+				{
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":[]}");
+				}
+				if (command.method == "set_effects_state")
+				{
+					bool enabled = true;
+					if (!json_get_bool(command.params, "enabled", enabled))
+						return make_error(command.id, "bad_params", "Missing enabled.");
+					_runtime->set_effects_state(enabled);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_technique_state")
+				{
+					std::string id, effect_name, name;
+					bool enabled = false;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name) || !json_get_bool(command.params, "enabled", enabled))
+						return make_error(command.id, "bad_params", "Missing id or enabled.");
+					auto technique = _runtime->find_technique(effect_name.c_str(), name.c_str());
+					if (technique.handle == 0)
+						return make_error(command.id, "not_found", "Technique not found.");
+					_runtime->set_technique_state(technique, enabled);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_uniform")
+				{
+					std::string id, effect_name, name;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name))
+						return make_error(command.id, "bad_params", "Missing uniform id.");
+					auto variable = _runtime->find_uniform_variable(effect_name.c_str(), name.c_str());
+					if (variable.handle == 0)
+						return make_error(command.id, "not_found", "Uniform not found.");
+					reshade::api::format base_type = reshade::api::format::unknown;
+					uint32_t rows = 0, columns = 0, array_length = 0;
+					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+					const size_t count = std::max(1u, rows) * std::max(1u, columns);
+					if (base_type == reshade::api::format::r32_float)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						float values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<float>(numbers[std::min(i, numbers.size() - 1)]);
+						_runtime->set_uniform_value_float(variable, values, count);
+					}
+					else if (base_type == reshade::api::format::r32_sint)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						int32_t values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<int32_t>(numbers[std::min(i, numbers.size() - 1)]);
+						_runtime->set_uniform_value_int(variable, values, count);
+					}
+					else if (base_type == reshade::api::format::r32_uint)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						uint32_t values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<uint32_t>(std::max(0.0, numbers[std::min(i, numbers.size() - 1)]));
+						_runtime->set_uniform_value_uint(variable, values, count);
+					}
+					else
+					{
+						bool value = false;
+						if (!json_get_bool(command.params, "value", value))
+						{
+							auto numbers = json_get_number_values(command.params, "value");
+							if (numbers.empty()) return make_error(command.id, "bad_params", "Missing bool value.");
+							value = numbers[0] != 0.0;
+						}
+						bool values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = value;
+						_runtime->set_uniform_value_bool(variable, values, count);
+					}
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reset_uniform")
+				{
+					std::string id, effect_name, name;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name))
+						return make_error(command.id, "bad_params", "Missing uniform id.");
+					auto variable = _runtime->find_uniform_variable(effect_name.c_str(), name.c_str());
+					if (variable.handle == 0)
+						return make_error(command.id, "not_found", "Uniform not found.");
+					_runtime->reset_uniform_value(variable);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reorder_techniques")
+				{
+					auto ids = json_get_string_array(command.params, "ids");
+					std::vector<reshade::api::effect_technique> techniques;
+					for (const std::string &id : ids)
+					{
+						std::string effect_name, name;
+						if (!split_effect_id(id, effect_name, name))
+							return make_error(command.id, "bad_params", "Invalid technique id.");
+						auto technique = _runtime->find_technique(effect_name.c_str(), name.c_str());
+						if (technique.handle == 0)
+							return make_error(command.id, "not_found", "Technique not found.");
+						techniques.push_back(technique);
+					}
+					_runtime->reorder_techniques(techniques.size(), techniques.data());
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_preprocessor_definition")
+				{
+					std::string effect_name, name, value;
+					if (!json_get_raw_string(command.params, "name", name) || !json_get_raw_string(command.params, "value", value))
+						return make_error(command.id, "bad_params", "Missing preprocessor name or value.");
+					if (json_get_raw_string(command.params, "effectName", effect_name) && !effect_name.empty())
+					{
+						_runtime->set_preprocessor_definition_for_effect(effect_name.c_str(), name.c_str(), value.c_str());
+						_runtime->reload_effect_next_frame(effect_name.c_str());
+					}
+					else
+					{
+						_runtime->set_preprocessor_definition(name.c_str(), value.c_str());
+						_runtime->reload_effect_next_frame(nullptr);
+					}
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reload_effects")
+				{
+					std::string effect_name;
+					_runtime->reload_effect_next_frame(json_get_raw_string(command.params, "effectName", effect_name) && !effect_name.empty() ? effect_name.c_str() : nullptr);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "save_preset")
+				{
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "export_preset")
+				{
+					std::string path;
+					if (!json_get_raw_string(command.params, "path", path) || path.empty())
+						return make_error(command.id, "bad_params", "Missing export path.");
+					_runtime->export_current_preset(path.c_str());
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_preset")
+				{
+					std::string path;
+					if (!json_get_raw_string(command.params, "path", path) || path.empty())
+						return make_error(command.id, "bad_params", "Missing preset path.");
+					_runtime->set_current_preset_path(path.c_str());
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "save_screenshot")
+				{
+					_runtime->save_screenshot(nullptr);
+					return make_response(command.id, "{}");
+				}
+				return make_error(command.id, "unknown_method", "Unknown method.");
+			}
+			catch (const std::exception &ex)
+			{
+				return make_error(command.id, "exception", ex.what());
+			}
+		}
+
+		std::string _pipe_name;
+		reshade::api::effect_runtime *_runtime = nullptr;
+		uint32_t _width = 0;
+		uint32_t _height = 0;
+		std::filesystem::path _output_path;
+		std::atomic_bool _running = false;
+		std::thread _thread;
+		std::mutex _queue_mutex;
+		std::deque<std::shared_ptr<control_command>> _queue;
+		HANDLE _pipe = INVALID_HANDLE_VALUE;
+	};
 	void bind_semantics(reshade::api::effect_runtime *runtime, ID3D11ShaderResourceView *color_srv, ID3D11ShaderResourceView *depth_srv, ID3D11ShaderResourceView *motion_srv)
 	{
 		const reshade::api::resource_view color_view = { reinterpret_cast<uint64_t>(color_srv) };
@@ -810,6 +1426,15 @@ int wmain(int argc, wchar_t **argv)
 
 	bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
 
+	std::unique_ptr<control_server> control;
+	if (opts.interactive)
+	{
+		if (opts.control_pipe.empty())
+			opts.control_pipe = "OfflineReShade-" + std::to_string(GetCurrentProcessId());
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path);
+		control->start();
+	}
+
 	const HWND overlay_hwnd = reinterpret_cast<HWND>(opts.overlay_hwnd);
 	ComPtr<IDXGISwapChain> overlay_swapchain;
 	ComPtr<ID3D11RenderTargetView> overlay_rtv;
@@ -845,7 +1470,6 @@ int wmain(int argc, wchar_t **argv)
 
 	if (opts.interactive)
 	{
-		runtime->open_overlay(true, reshade::api::input_source::keyboard);
 		ShowWindow(hwnd, SW_SHOW);
 		MSG msg = {};
 		while (IsWindow(hwnd) && (opts.parent_hwnd == 0 || IsWindow(reinterpret_cast<HWND>(opts.parent_hwnd))))
@@ -864,6 +1488,9 @@ int wmain(int argc, wchar_t **argv)
 				if (GetClientRect(reinterpret_cast<HWND>(opts.parent_hwnd), &parent_rect))
 					SetWindowPos(hwnd, nullptr, 0, 0, parent_rect.right - parent_rect.left, parent_rect.bottom - parent_rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
 			}
+
+			if (control != nullptr)
+				control->process_pending();
 
 			if (!render_frame(true))
 			{
