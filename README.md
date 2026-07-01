@@ -34,6 +34,8 @@ DLLs, but should not include:
 - ReShade logs;
 - PDB/import-library developer files.
 
+If you have these, it means you are using a redistributed version from some unreliable source, delete it and re-download it from github.
+
 ## Required Game Plugins
 
 Offline ReShade does not capture the game by itself. The game must export
