@@ -69,6 +69,14 @@
           <StackPanel Spacing="12">
             <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
 
+            <TextBlock Text="Game" />
+            <ComboBox x:Name="DepthProfileBox"
+                      MinWidth="180"
+                      SelectionChanged="OnDepthProfileSelectionChanged">
+              <ComboBoxItem Content="Koikatsu Sunshine (KKS)" Tag="kks" />
+              <ComboBoxItem Content="Koikatsu (KK)" Tag="kk" />
+            </ComboBox>
+
             <TextBlock Text="Color PNG" />
             <Grid ColumnSpacing="8">
               <Grid.ColumnDefinitions>
@@ -85,6 +93,14 @@
                       SelectionChanged="OnDepthFormatSelectionChanged">
               <ComboBoxItem Content="Raw Float32 device depth (.rfloat)" Tag="raw" />
               <ComboBoxItem Content="RGBA8 packed device depth PNG" Tag="rgba" />
+            </ComboBox>
+
+            <TextBlock Text="Depth Downsample Filter" />
+            <ComboBox x:Name="DepthDownsampleBox"
+                      MinWidth="180"
+                      SelectionChanged="OnDepthDownsampleSelectionChanged">
+              <ComboBoxItem Content="Max 2x2" Tag="max2x2" />
+              <ComboBoxItem Content="Smooth Box 2x2" Tag="box" />
             </ComboBox>
 
             <TextBlock Text="Depth File" />

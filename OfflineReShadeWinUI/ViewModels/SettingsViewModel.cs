@@ -8,6 +8,8 @@ public sealed class SettingsViewModel : ObservableObject
     private string _colorPath;
     private string _depthPath;
     private string _depthFormat = "raw";
+    private string _depthProfile = "kks";
+    private string _depthDownsample = "max2x2";
     private string _effectDir;
     private string _presetPath = string.Empty;
     private string _outputPath;
@@ -30,6 +32,8 @@ public sealed class SettingsViewModel : ObservableObject
     public string ColorPath { get => _colorPath; set => SetProperty(ref _colorPath, value); }
     public string DepthPath { get => _depthPath; set => SetProperty(ref _depthPath, value); }
     public string DepthFormat { get => _depthFormat; set => SetProperty(ref _depthFormat, value); }
+    public string DepthProfile { get => _depthProfile; set => SetProperty(ref _depthProfile, value); }
+    public string DepthDownsample { get => _depthDownsample; set => SetProperty(ref _depthDownsample, value); }
     public string EffectDir { get => _effectDir; set => SetProperty(ref _effectDir, value); }
     public string PresetPath { get => _presetPath; set => SetProperty(ref _presetPath, value); }
     public string OutputPath { get => _outputPath; set => SetProperty(ref _outputPath, value); }

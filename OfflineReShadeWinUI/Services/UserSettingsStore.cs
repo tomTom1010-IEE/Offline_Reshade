@@ -59,6 +59,8 @@ public sealed class PersistedUiSettings
     public string? ColorPath { get; set; }
     public string? DepthPath { get; set; }
     public string? DepthFormat { get; set; }
+    public string? DepthProfile { get; set; }
+    public string? DepthDownsample { get; set; }
     public string? EffectDir { get; set; }
     public string? PresetPath { get; set; }
     public string? OutputPath { get; set; }
@@ -70,4 +72,16 @@ public sealed class PersistedUiSettings
     public string? GalleryBatchFrameDelay { get; set; }
     public bool? ShowFps { get; set; }
     public string? InputMode { get; set; }
+    public PersistedProfilePaths? KksPaths { get; set; }
+    public PersistedProfilePaths? KkPaths { get; set; }
+}
+
+public sealed class PersistedProfilePaths
+{
+    public string? ColorPath { get; set; }
+    public string? DepthPath { get; set; }
+    public string? DepthFormat { get; set; }
+    public string? OutputPath { get; set; }
+    public string? GalleryInputFolder { get; set; }
+    public string? GalleryOutputFolder { get; set; }
 }

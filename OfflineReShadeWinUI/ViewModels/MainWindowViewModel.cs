@@ -37,6 +37,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private uint _sharedPreviewHeight;
     private bool _isRestoringSettings;
     private bool _isDisposed;
+    private bool _hasPersistedDepthProfile;
+    private bool _isApplyingProfilePaths;
+    private string _currentDepthProfile = "kks";
+    private PersistedProfilePaths _kksPaths = new();
+    private PersistedProfilePaths _kkPaths = new();
 
     public MainWindowViewModel(AppPaths paths)
     {
@@ -44,9 +49,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _settingsStore = new UserSettingsStore(paths);
         Settings = new SettingsViewModel(paths);
         RestorePersistedSettings();
+        _currentDepthProfile = NormalizeDepthProfile(Settings.DepthProfile);
         Settings.PropertyChanged += OnSettingsPropertyChanged;
+        NormalizeDepthSettings();
+        InferDepthProfileIfNeeded(saveIfInferred: true);
+        InitializeProfilePathState();
         _prototype = new PrototypeProcessService(paths);
-        _prototype.OutputReceived += AppendLog;
+        _prototype.OutputReceived += OnPrototypeOutputReceived;
         _prototype.PreviewExited += OnPreviewExited;
         _previewFrames.FrameReceived += frame => PreviewFrameReceived?.Invoke(frame);
         _previewFrames.ErrorReceived += AppendLog;
@@ -172,6 +181,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ApplyIfNotNull(settings.ColorPath, value => Settings.ColorPath = value);
             ApplyIfNotNull(settings.DepthPath, value => Settings.DepthPath = value);
             ApplyIfNotNull(settings.DepthFormat, value => Settings.DepthFormat = value);
+            if (!string.IsNullOrWhiteSpace(settings.DepthProfile))
+            {
+                Settings.DepthProfile = settings.DepthProfile;
+                _hasPersistedDepthProfile = true;
+            }
+            ApplyIfNotNull(settings.DepthDownsample, value => Settings.DepthDownsample = value);
             ApplyIfNotNull(settings.EffectDir, value => Settings.EffectDir = value);
             ApplyIfNotNull(settings.PresetPath, value => Settings.PresetPath = value);
             ApplyIfNotNull(settings.OutputPath, value => Settings.OutputPath = value);
@@ -183,6 +198,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ApplyIfNotNull(settings.GalleryBatchFrameDelay, value => Settings.GalleryBatchFrameDelay = value);
             if (settings.ShowFps.HasValue)
                 Settings.ShowFps = settings.ShowFps.Value;
+            _kksPaths = settings.KksPaths ?? new PersistedProfilePaths();
+            _kkPaths = settings.KkPaths ?? new PersistedProfilePaths();
             if (string.Equals(settings.InputMode, "Gallery", StringComparison.OrdinalIgnoreCase))
                 _inputMode = "Gallery";
             else if (string.Equals(settings.InputMode, "RealTime", StringComparison.OrdinalIgnoreCase))
@@ -234,13 +251,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (!IsGalleryMode || !_rpc.IsConnected)
             return;
 
-        await _rpc.CallAsync("set_input_paths", new
+        var result = await _rpc.CallAsync("set_input_paths", new
         {
             colorPath = item.ColorPath,
             depthPath = item.DepthPath,
             depthFormat = item.DepthFormat,
+            depthProfile = EffectiveDepthProfile(item.DepthFormat),
+            depthDownsample = Settings.DepthDownsample,
             outputPath = item.OutputPath
         });
+        ApplyInputSwitchResult(result);
         AppendLog("Gallery item loaded: " + item.BaseName);
     }
 
@@ -281,13 +301,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
             else
             {
-                await _rpc.CallAsync("set_input_paths", new
+                var result = await _rpc.CallAsync("set_input_paths", new
                 {
                     colorPath = Settings.ColorPath,
                     depthPath = Settings.DepthPath,
                     depthFormat = Settings.DepthFormat,
+                    depthProfile = EffectiveDepthProfile(Settings.DepthFormat),
+                    depthDownsample = Settings.DepthDownsample,
                     outputPath = Settings.OutputPath
                 });
+                ApplyInputSwitchResult(result);
                 await _rpc.CallAsync("set_input_watch_enabled", new { enabled = true });
                 InputMode = "RealTime";
                 PreviewInfoText = "Full-res ReShade runtime - preview is scaled";
@@ -556,6 +579,41 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         ScheduleSettingsSave();
 
+        if (e.PropertyName == nameof(SettingsViewModel.DepthProfile))
+        {
+            _hasPersistedDepthProfile = true;
+            var nextProfile = NormalizeDepthProfile(Settings.DepthProfile);
+            if (!string.Equals(nextProfile, _currentDepthProfile, StringComparison.OrdinalIgnoreCase))
+            {
+                StoreCurrentProfilePaths(_currentDepthProfile);
+                _currentDepthProfile = nextProfile;
+                ApplyProfilePaths(nextProfile);
+            }
+
+            if (string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(Settings.DepthFormat, "raw", StringComparison.OrdinalIgnoreCase))
+            {
+                Settings.DepthFormat = "raw";
+                Settings.DepthPath = Path.Combine(Path.GetDirectoryName(Settings.DepthPath) ?? string.Empty, "depthoutput.rfloat");
+                AppendLog("KK depth profile uses raw .rfloat depth.");
+            }
+        }
+
+        if (e.PropertyName == nameof(SettingsViewModel.DepthFormat) &&
+            string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Settings.DepthFormat, "raw", StringComparison.OrdinalIgnoreCase))
+        {
+            Settings.DepthFormat = "raw";
+            AppendLog("KK depth profile only supports raw .rfloat depth.");
+        }
+
+        if (!_hasPersistedDepthProfile &&
+            (e.PropertyName == nameof(SettingsViewModel.ColorPath) ||
+             e.PropertyName == nameof(SettingsViewModel.DepthPath)))
+        {
+            InferDepthProfileIfNeeded(saveIfInferred: true);
+        }
+
         if (e.PropertyName == nameof(SettingsViewModel.ShowFps) && !Settings.ShowFps)
             FpsText = string.Empty;
         if (e.PropertyName == nameof(SettingsViewModel.GalleryInputFolder) ||
@@ -563,6 +621,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             RefreshGalleryItems();
         }
+
+        if (!_isRestoringSettings && !_isApplyingProfilePaths && IsProfilePathProperty(e.PropertyName))
+            StoreCurrentProfilePaths(_currentDepthProfile);
     }
 
     private void ScheduleSettingsSave()
@@ -607,11 +668,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private PersistedUiSettings CreatePersistedSettings()
     {
+        StoreCurrentProfilePaths(_currentDepthProfile);
+
         return new PersistedUiSettings
         {
             ColorPath = Settings.ColorPath,
             DepthPath = Settings.DepthPath,
             DepthFormat = Settings.DepthFormat,
+            DepthProfile = Settings.DepthProfile,
+            DepthDownsample = Settings.DepthDownsample,
             EffectDir = Settings.EffectDir,
             PresetPath = Settings.PresetPath,
             OutputPath = Settings.OutputPath,
@@ -622,7 +687,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             GalleryOutputFolder = Settings.GalleryOutputFolder,
             GalleryBatchFrameDelay = Settings.GalleryBatchFrameDelay,
             ShowFps = Settings.ShowFps,
-            InputMode = InputMode
+            InputMode = InputMode,
+            KksPaths = _kksPaths,
+            KkPaths = _kkPaths
         };
     }
 
@@ -667,6 +734,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             .Add("--color", ActiveColorPath)
             .Add("--depth", ActiveDepthPath)
             .Add("--depth-format", ActiveDepthFormat)
+            .Add("--depth-profile", ActiveDepthProfile)
+            .Add("--depth-downsample", Settings.DepthDownsample)
             .Add("--effect-dir", Settings.EffectDir)
             .Add("--preset", Settings.PresetPath);
     }
@@ -674,8 +743,215 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool UseCpuPreview => string.Equals(Settings.PreviewTransport, "CPU", StringComparison.OrdinalIgnoreCase);
     private string ActiveColorPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.ColorPath : Settings.ColorPath;
     private string ActiveDepthPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthPath : Settings.DepthPath;
-    private string ActiveDepthFormat => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthFormat : Settings.DepthFormat;
+    private string ActiveDepthFormat => string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase)
+        ? "raw"
+        : IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthFormat : Settings.DepthFormat;
+    private string ActiveDepthProfile => EffectiveDepthProfile(ActiveDepthFormat);
     private string ActiveOutputPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.OutputPath : Settings.OutputPath;
+
+    private string EffectiveDepthProfile(string depthFormat)
+    {
+        if (string.Equals(depthFormat, "rgba", StringComparison.OrdinalIgnoreCase))
+            return "kks";
+
+        return string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) ? "kk" : "kks";
+    }
+
+    private void NormalizeDepthSettings()
+    {
+        if (!string.Equals(Settings.DepthDownsample, "box", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Settings.DepthDownsample, "max2x2", StringComparison.OrdinalIgnoreCase))
+        {
+            Settings.DepthDownsample = "max2x2";
+        }
+
+        if (!string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Settings.DepthProfile, "kks", StringComparison.OrdinalIgnoreCase))
+        {
+            Settings.DepthProfile = "kks";
+        }
+
+        if (string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase))
+            Settings.DepthFormat = "raw";
+    }
+
+    private void InitializeProfilePathState()
+    {
+        _currentDepthProfile = NormalizeDepthProfile(Settings.DepthProfile);
+        if (HasAnyProfilePath(GetProfilePaths(_currentDepthProfile)))
+            ApplyProfilePaths(_currentDepthProfile);
+        else
+            StoreCurrentProfilePaths(_currentDepthProfile);
+    }
+
+    private void StoreCurrentProfilePaths(string profile)
+    {
+        var paths = new PersistedProfilePaths
+        {
+            ColorPath = Settings.ColorPath,
+            DepthPath = Settings.DepthPath,
+            DepthFormat = Settings.DepthFormat,
+            OutputPath = Settings.OutputPath,
+            GalleryInputFolder = Settings.GalleryInputFolder,
+            GalleryOutputFolder = Settings.GalleryOutputFolder
+        };
+
+        if (string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase))
+            _kkPaths = paths;
+        else
+            _kksPaths = paths;
+    }
+
+    private PersistedProfilePaths GetProfilePaths(string profile)
+    {
+        return string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase) ? _kkPaths : _kksPaths;
+    }
+
+    private void ApplyProfilePaths(string profile)
+    {
+        var normalized = NormalizeDepthProfile(profile);
+        var saved = GetProfilePaths(normalized);
+        var defaults = CreateDefaultProfilePaths(normalized);
+
+        _isApplyingProfilePaths = true;
+        try
+        {
+            Settings.ColorPath = FirstUsablePath(saved.ColorPath, defaults.ColorPath);
+            Settings.DepthPath = FirstUsablePath(saved.DepthPath, defaults.DepthPath);
+            Settings.OutputPath = FirstUsablePath(saved.OutputPath, defaults.OutputPath);
+            Settings.GalleryInputFolder = saved.GalleryInputFolder ?? string.Empty;
+            Settings.GalleryOutputFolder = saved.GalleryOutputFolder ?? string.Empty;
+
+            if (string.Equals(normalized, "kk", StringComparison.OrdinalIgnoreCase))
+                Settings.DepthFormat = "raw";
+            else
+                Settings.DepthFormat = NormalizeDepthFormat(saved.DepthFormat ?? defaults.DepthFormat);
+        }
+        finally
+        {
+            _isApplyingProfilePaths = false;
+        }
+
+        StoreCurrentProfilePaths(normalized);
+    }
+
+    private PersistedProfilePaths CreateDefaultProfilePaths(string profile)
+    {
+        if (string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase))
+        {
+            const string kkExportDir = @"D:\Program Files\Koikatu\UserData\cap\OfflineReShade";
+            return new PersistedProfilePaths
+            {
+                ColorPath = Path.Combine(kkExportDir, "coloroutput.png"),
+                DepthPath = Path.Combine(kkExportDir, "depthoutput.rfloat"),
+                DepthFormat = "raw",
+                OutputPath = Path.Combine(kkExportDir, "reshadeoutput.png"),
+                GalleryInputFolder = string.Empty,
+                GalleryOutputFolder = string.Empty
+            };
+        }
+
+        return new PersistedProfilePaths
+        {
+            ColorPath = _paths.DefaultColorPath,
+            DepthPath = _paths.DefaultDepthPath,
+            DepthFormat = "raw",
+            OutputPath = _paths.DefaultOutputPath,
+            GalleryInputFolder = string.Empty,
+            GalleryOutputFolder = string.Empty
+        };
+    }
+
+    private static string FirstUsablePath(string? savedPath, string? defaultPath)
+    {
+        return string.IsNullOrWhiteSpace(savedPath) ? defaultPath ?? string.Empty : savedPath;
+    }
+
+    private static bool HasAnyProfilePath(PersistedProfilePaths paths)
+    {
+        return !string.IsNullOrWhiteSpace(paths.ColorPath) ||
+            !string.IsNullOrWhiteSpace(paths.DepthPath) ||
+            !string.IsNullOrWhiteSpace(paths.OutputPath) ||
+            paths.GalleryInputFolder != null ||
+            paths.GalleryOutputFolder != null;
+    }
+
+    private static bool IsProfilePathProperty(string? propertyName)
+    {
+        return propertyName == nameof(SettingsViewModel.ColorPath) ||
+            propertyName == nameof(SettingsViewModel.DepthPath) ||
+            propertyName == nameof(SettingsViewModel.DepthFormat) ||
+            propertyName == nameof(SettingsViewModel.OutputPath) ||
+            propertyName == nameof(SettingsViewModel.GalleryInputFolder) ||
+            propertyName == nameof(SettingsViewModel.GalleryOutputFolder);
+    }
+
+    private static string NormalizeDepthProfile(string? profile)
+    {
+        return string.Equals(profile, "kk", StringComparison.OrdinalIgnoreCase) ? "kk" : "kks";
+    }
+
+    private static string NormalizeDepthFormat(string? format)
+    {
+        return string.Equals(format, "rgba", StringComparison.OrdinalIgnoreCase) ? "rgba" : "raw";
+    }
+
+    private void InferDepthProfileIfNeeded(bool saveIfInferred)
+    {
+        if (_hasPersistedDepthProfile)
+            return;
+
+        var inferred = InferDepthProfileFromPath(Settings.ColorPath) ?? InferDepthProfileFromPath(Settings.DepthPath);
+        if (string.IsNullOrEmpty(inferred))
+            return;
+
+        _currentDepthProfile = inferred;
+        Settings.DepthProfile = inferred;
+        _hasPersistedDepthProfile = true;
+
+        if (string.Equals(inferred, "kk", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(Settings.DepthFormat, "raw", StringComparison.OrdinalIgnoreCase))
+        {
+            Settings.DepthFormat = "raw";
+        }
+
+        if (saveIfInferred)
+            SaveSettingsNow();
+    }
+
+    private static string? InferDepthProfileFromPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        if (path.IndexOf("KoikatuSunshine", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "kks";
+
+        if (path.IndexOf("Koikatu", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "kk";
+
+        return null;
+    }
+
+    private void ApplyInputSwitchResult(JsonElement result)
+    {
+        if (result.ValueKind != JsonValueKind.Object)
+            return;
+
+        if (result.TryGetProperty("fallbackToKks", out var fallback) && fallback.ValueKind == JsonValueKind.True)
+        {
+            Settings.DepthProfile = "kks";
+            if (result.TryGetProperty("warning", out var warning) && warning.ValueKind == JsonValueKind.String)
+                AppendLog(warning.GetString());
+        }
+    }
+
+    private void OnPrototypeOutputReceived(string? message)
+    {
+        AppendLog(message);
+        if (message?.StartsWith("DEPTH_PROFILE_FALLBACK=KKS", StringComparison.OrdinalIgnoreCase) == true)
+            Settings.DepthProfile = "kks";
+    }
 
     private void EnsureGallerySelectionIfNeeded()
     {
@@ -719,7 +995,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var colorName = Path.GetFileNameWithoutExtension(colorPath);
             var baseName = colorName[..(colorName.Length - "-Color".Length)];
             var rawDepth = FindCaseInsensitiveFile(inputFolder, baseName + "-Depth.rfloat");
-            var rgbaDepth = FindCaseInsensitiveFile(inputFolder, baseName + "-Depth.png");
+            var rgbaDepth = IsKkDepthProfile ? null : FindCaseInsensitiveFile(inputFolder, baseName + "-Depth.png");
             var depthPath = rawDepth ?? rgbaDepth ?? string.Empty;
             var depthFormat = rawDepth != null ? "raw" : "rgba";
             var outputPath = Path.Combine(outputFolder, baseName + "-Reshade.png");
@@ -734,7 +1010,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             var baseName = Path.GetFileNameWithoutExtension(colorPath);
             var rawDepth = FindCaseInsensitiveFile(inputFolder, baseName + ".depth.rfloat");
-            var rgbaDepth = FindCaseInsensitiveFile(inputFolder, baseName + ".depth.png");
+            var rgbaDepth = IsKkDepthProfile ? null : FindCaseInsensitiveFile(inputFolder, baseName + ".depth.png");
             var depthPath = rawDepth ?? rgbaDepth ?? string.Empty;
             var depthFormat = rawDepth != null ? "raw" : "rgba";
             var outputPath = Path.Combine(outputFolder, baseName + ".reshade.png");
@@ -762,6 +1038,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             !name.EndsWith(".depth", StringComparison.OrdinalIgnoreCase) &&
             !name.EndsWith(".reshade", StringComparison.OrdinalIgnoreCase);
     }
+
+    private bool IsKkDepthProfile => string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase);
 
     private static string? FindCaseInsensitiveFile(string folder, string fileName)
     {
@@ -875,6 +1153,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         Settings.PropertyChanged -= OnSettingsPropertyChanged;
+        _prototype.OutputReceived -= OnPrototypeOutputReceived;
         StopFpsPolling();
         _rpc.Dispose();
         _previewFrames.Dispose();

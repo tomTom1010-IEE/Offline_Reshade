@@ -61,6 +61,14 @@ public sealed partial class MainWindow : Window
                 UpdatePreviewTransportView();
             if (args.PropertyName == nameof(SettingsViewModel.DepthFormat))
                 UpdateDepthFormatSelection();
+            if (args.PropertyName == nameof(SettingsViewModel.DepthProfile))
+            {
+                UpdateDepthProfileSelection();
+                UpdateDepthFormatAvailability();
+                UpdateDepthDownsampleAvailability();
+            }
+            if (args.PropertyName == nameof(SettingsViewModel.DepthDownsample))
+                UpdateDepthDownsampleSelection();
         };
         PreviewSurface.PointerWheelChanged += OnPreviewPointerWheelChanged;
         PreviewSurface.PointerPressed += OnPreviewPointerPressed;
@@ -83,6 +91,10 @@ public sealed partial class MainWindow : Window
         UpdateControlsPanelWidth();
         PreviewTransportBox.SelectedIndex = ViewModel.Settings.PreviewTransport == "CPU" ? 1 : 0;
         UpdateDepthFormatSelection();
+        UpdateDepthProfileSelection();
+        UpdateDepthFormatAvailability();
+        UpdateDepthDownsampleSelection();
+        UpdateDepthDownsampleAvailability();
         UpdateContentView();
         UpdateGalleryView();
         UpdateInputModeSwitch();
@@ -183,6 +195,13 @@ public sealed partial class MainWindow : Window
         if (ViewModel == null)
             return;
 
+        if (string.Equals(ViewModel.Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase))
+        {
+            ViewModel.Settings.DepthFormat = "raw";
+            UpdateDepthFormatSelection();
+            return;
+        }
+
         if (DepthFormatBox.SelectedItem is ComboBoxItem item && item.Tag is string format)
         {
             var oldFormat = ViewModel.Settings.DepthFormat;
@@ -191,11 +210,59 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnDepthProfileSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (ViewModel == null)
+            return;
+
+        if (DepthProfileBox.SelectedItem is ComboBoxItem item && item.Tag is string profile)
+            ViewModel.Settings.DepthProfile = profile;
+    }
+
+    private void OnDepthDownsampleSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (ViewModel == null)
+            return;
+
+        if (DepthDownsampleBox.SelectedItem is ComboBoxItem item && item.Tag is string filter)
+            ViewModel.Settings.DepthDownsample = filter;
+    }
+
     private void UpdateDepthFormatSelection()
     {
         var selectedIndex = string.Equals(ViewModel.Settings.DepthFormat, "rgba", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         if (DepthFormatBox.SelectedIndex != selectedIndex)
             DepthFormatBox.SelectedIndex = selectedIndex;
+        UpdateDepthFormatAvailability();
+    }
+
+    private void UpdateDepthFormatAvailability()
+    {
+        DepthFormatBox.IsEnabled = !string.Equals(ViewModel.Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void UpdateDepthProfileSelection()
+    {
+        var selectedIndex = string.Equals(ViewModel.Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        if (DepthProfileBox.SelectedIndex != selectedIndex)
+            DepthProfileBox.SelectedIndex = selectedIndex;
+    }
+
+    private void UpdateDepthDownsampleSelection()
+    {
+        var selectedIndex = ViewModel.Settings.DepthDownsample?.ToLowerInvariant() switch
+        {
+            "box" => 1,
+            _ => 0
+        };
+        if (DepthDownsampleBox.SelectedIndex != selectedIndex)
+            DepthDownsampleBox.SelectedIndex = selectedIndex;
+        UpdateDepthDownsampleAvailability();
+    }
+
+    private void UpdateDepthDownsampleAvailability()
+    {
+        DepthDownsampleBox.IsEnabled = string.Equals(ViewModel.Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateDepthPathForFormat(string oldFormat, string newFormat)

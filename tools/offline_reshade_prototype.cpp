@@ -52,6 +52,8 @@ namespace
 		std::filesystem::path color_path;
 		std::filesystem::path depth_path;
 		std::string depth_format = "raw";
+		std::string depth_profile = "kks";
+		std::string depth_downsample = "max2x2";
 		std::filesystem::path effect_dir;
 		std::filesystem::path preset_path;
 		std::filesystem::path output_path;
@@ -88,7 +90,7 @@ namespace
 	void print_usage()
 	{
 		std::cout <<
-			"usage: OfflineReShadePrototype [--color <png>] [--depth <png|rfloat>] [--depth-format <raw|rgba>] [--effect-dir <dir>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--control-pipe <name>] [--preview-pipe <name>] [--preview-shared] [--preview-width <w> --preview-height <h>] [--interactive] [--disable-input-watch]\n";
+			"usage: OfflineReShadePrototype [--color <png>] [--depth <png|rfloat>] [--depth-format <raw|rgba>] [--depth-profile <kks|kk>] [--depth-downsample <max2x2|box>] [--effect-dir <dir>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--control-pipe <name>] [--preview-pipe <name>] [--preview-shared] [--preview-width <w> --preview-height <h>] [--interactive] [--disable-input-watch]\n";
 	}
 
 	std::wstring widen_utf8(const std::string &value)
@@ -169,6 +171,24 @@ namespace
 				opts.depth_format = narrow_utf8(argv[i]);
 				std::transform(opts.depth_format.begin(), opts.depth_format.end(), opts.depth_format.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
 				if (opts.depth_format != "raw" && opts.depth_format != "rgba")
+					return false;
+			}
+			else if (arg == L"--depth-profile")
+			{
+				if (++i >= argc)
+					return false;
+				opts.depth_profile = narrow_utf8(argv[i]);
+				std::transform(opts.depth_profile.begin(), opts.depth_profile.end(), opts.depth_profile.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (opts.depth_profile != "kks" && opts.depth_profile != "kk")
+					return false;
+			}
+			else if (arg == L"--depth-downsample")
+			{
+				if (++i >= argc)
+					return false;
+				opts.depth_downsample = narrow_utf8(argv[i]);
+				std::transform(opts.depth_downsample.begin(), opts.depth_downsample.end(), opts.depth_downsample.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (opts.depth_downsample != "max2x2" && opts.depth_downsample != "box")
 					return false;
 			}
 			else if (arg == L"--effect-dir")
@@ -885,7 +905,13 @@ namespace
 		return result;
 	}
 
-	bool load_rfloat_depth(const std::filesystem::path &path, uint32_t width, uint32_t height, std::vector<float> &result)
+	struct depth_load_status
+	{
+		bool fallback_to_kks = false;
+		std::string warning;
+	};
+
+	bool load_rfloat_depth_exact(const std::filesystem::path &path, uint32_t width, uint32_t height, std::vector<float> &result)
 	{
 		const uint64_t expected_size = static_cast<uint64_t>(width) * height * sizeof(float);
 		std::error_code ec;
@@ -912,7 +938,39 @@ namespace
 		return true;
 	}
 
-	bool load_depth_data(IWICImagingFactory *wic_factory, const options &opts, uint32_t width, uint32_t height, std::vector<float> &result)
+	std::vector<float> downsample_depth_2x(const std::vector<float> &source, uint32_t width, uint32_t height, const std::string &filter)
+	{
+		const uint32_t source_width = width * 2;
+		const uint32_t source_height = height * 2;
+		std::vector<float> result(static_cast<size_t>(width) * height, 1.0f);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const int sx = static_cast<int>(x * 2);
+				const int sy = static_cast<int>(y * 2);
+				const float a = source[static_cast<size_t>(sy) * source_width + sx];
+				const float b = source[static_cast<size_t>(sy) * source_width + sx + 1];
+				const float c = source[static_cast<size_t>(sy + 1) * source_width + sx];
+				const float d = source[static_cast<size_t>(sy + 1) * source_width + sx + 1];
+
+				float value = 1.0f;
+				if (filter == "box")
+				{
+					value = (a + b + c + d) * 0.25f;
+				}
+				else
+				{
+					value = std::max(std::max(a, b), std::max(c, d));
+				}
+
+				result[static_cast<size_t>(y) * width + x] = value;
+			}
+		}
+		return result;
+	}
+
+	bool load_depth_data(IWICImagingFactory *wic_factory, const options &opts, uint32_t width, uint32_t height, std::vector<float> &result, depth_load_status *status = nullptr)
 	{
 		if (opts.depth_path.empty())
 		{
@@ -921,7 +979,41 @@ namespace
 		}
 
 		if (opts.depth_format == "raw")
-			return load_rfloat_depth(opts.depth_path, width, height, result);
+		{
+			const uint64_t one_x_size = static_cast<uint64_t>(width) * height * sizeof(float);
+			const uint64_t two_x_size = static_cast<uint64_t>(width) * 2 * height * 2 * sizeof(float);
+			std::error_code ec;
+			const uint64_t actual_size = std::filesystem::file_size(opts.depth_path, ec);
+			if (ec)
+				return false;
+
+			if (opts.depth_profile == "kk")
+			{
+				if (actual_size == two_x_size)
+				{
+					std::vector<float> high_res_depth;
+					if (!load_rfloat_depth_exact(opts.depth_path, width * 2, height * 2, high_res_depth))
+						return false;
+					result = downsample_depth_2x(high_res_depth, width, height, opts.depth_downsample);
+					return true;
+				}
+
+				if (actual_size == one_x_size)
+				{
+					return load_rfloat_depth_exact(opts.depth_path, width, height, result);
+				}
+
+				return false;
+			}
+
+			return actual_size == one_x_size && load_rfloat_depth_exact(opts.depth_path, width, height, result);
+		}
+
+		if (opts.depth_profile == "kk" && status != nullptr)
+		{
+			status->fallback_to_kks = true;
+			status->warning = "KK depth profile only supports raw .rfloat depth. Falling back to KKS profile for RGBA depth.";
+		}
 
 		image_rgba depth_image;
 		if (!load_png_rgba(wic_factory, opts.depth_path, depth_image))
@@ -1499,7 +1591,14 @@ namespace
 	class control_server
 	{
 	public:
-		using input_switch_callback = std::function<std::string(const std::filesystem::path &, const std::filesystem::path &, const std::string &, const std::filesystem::path &)>;
+		struct input_switch_result
+		{
+			std::string error;
+			bool fallback_to_kks = false;
+			std::string warning;
+		};
+
+		using input_switch_callback = std::function<input_switch_result(const std::filesystem::path &, const std::filesystem::path &, const std::string &, const std::string &, const std::string &, const std::filesystem::path &)>;
 		using save_output_callback = std::function<std::string()>;
 		using input_watch_callback = std::function<void(bool)>;
 
@@ -1773,7 +1872,7 @@ namespace
 				}
 				if (command.method == "set_input_paths")
 				{
-					std::string color_path, depth_path, depth_format, output_path;
+					std::string color_path, depth_path, depth_format, depth_profile, depth_downsample, output_path;
 					if (!json_get_raw_string(command.params, "colorPath", color_path) ||
 						!json_get_raw_string(command.params, "depthPath", depth_path) ||
 						!json_get_raw_string(command.params, "depthFormat", depth_format) ||
@@ -1782,14 +1881,24 @@ namespace
 					std::transform(depth_format.begin(), depth_format.end(), depth_format.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
 					if (depth_format != "raw" && depth_format != "rgba")
 						return make_error(command.id, "bad_params", "depthFormat must be raw or rgba.");
+					if (!json_get_raw_string(command.params, "depthProfile", depth_profile) || depth_profile.empty())
+						depth_profile = "kks";
+					if (!json_get_raw_string(command.params, "depthDownsample", depth_downsample) || depth_downsample.empty())
+						depth_downsample = "max2x2";
+					std::transform(depth_profile.begin(), depth_profile.end(), depth_profile.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					std::transform(depth_downsample.begin(), depth_downsample.end(), depth_downsample.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					if (depth_profile != "kks" && depth_profile != "kk")
+						return make_error(command.id, "bad_params", "depthProfile must be kks or kk.");
+					if (depth_downsample != "max2x2" && depth_downsample != "box")
+						return make_error(command.id, "bad_params", "depthDownsample must be max2x2 or box.");
 					if (!_input_switch)
 						return make_error(command.id, "not_supported", "Input switching is not available.");
 					std::filesystem::path output = std::filesystem::absolute(widen_utf8(output_path));
-					const std::string error = _input_switch(std::filesystem::absolute(widen_utf8(color_path)), std::filesystem::absolute(widen_utf8(depth_path)), depth_format, output);
-					if (!error.empty())
-						return make_error(command.id, "input_load_failed", error);
+					input_switch_result result = _input_switch(std::filesystem::absolute(widen_utf8(color_path)), std::filesystem::absolute(widen_utf8(depth_path)), depth_format, depth_profile, depth_downsample, output);
+					if (!result.error.empty())
+						return make_error(command.id, "input_load_failed", result.error);
 					_output_path = std::move(output);
-					return make_response(command.id, "{}");
+					return make_response(command.id, "{\"depthProfile\":" + json_string(result.fallback_to_kks ? "kks" : depth_profile) + ",\"fallbackToKks\":" + (result.fallback_to_kks ? "true" : "false") + ",\"warning\":" + json_string(result.warning) + "}");
 				}
 				if (command.method == "set_input_watch_enabled")
 				{
@@ -1939,10 +2048,16 @@ int wmain(int argc, wchar_t **argv)
 	const uint32_t height = opts.height != 0 ? opts.height : static_cast<uint32_t>(color_image.height);
 	color_image = resize_rgba(color_image, width, height);
 	std::vector<float> depth_data;
-	if (!load_depth_data(wic_factory.Get(), opts, width, height, depth_data))
+	depth_load_status initial_depth_status;
+	if (!load_depth_data(wic_factory.Get(), opts, width, height, depth_data, &initial_depth_status))
 	{
 		std::cerr << "Failed to load depth " << opts.depth_format << ": " << path_utf8(opts.depth_path) << '\n';
 		return 1;
+	}
+	if (initial_depth_status.fallback_to_kks)
+	{
+		opts.depth_profile = "kks";
+		std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << initial_depth_status.warning << std::endl;
 	}
 	const std::vector<float> motion_data(static_cast<size_t>(width) * height * 2, 0.0f);
 
@@ -2023,7 +2138,7 @@ int wmain(int argc, wchar_t **argv)
 		opts.preview_shared = false;
 	}
 
-	const auto load_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format) -> std::string {
+	const auto load_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::string &new_depth_profile, const std::string &new_depth_downsample, depth_load_status *depth_status = nullptr) -> std::string {
 		image_rgba new_color_image;
 		if (!load_png_rgba(wic_factory.Get(), new_color_path, new_color_image))
 			return "Failed to load color PNG: " + path_utf8(new_color_path);
@@ -2033,7 +2148,9 @@ int wmain(int argc, wchar_t **argv)
 		options input_opts = opts;
 		input_opts.depth_path = new_depth_path;
 		input_opts.depth_format = new_depth_format;
-		if (!load_depth_data(wic_factory.Get(), input_opts, width, height, new_depth_data))
+		input_opts.depth_profile = new_depth_profile;
+		input_opts.depth_downsample = new_depth_downsample;
+		if (!load_depth_data(wic_factory.Get(), input_opts, width, height, new_depth_data, depth_status))
 			return "Failed to load depth " + new_depth_format + ": " + path_utf8(new_depth_path);
 
 		ComPtr<ID3D11Texture2D> new_color_texture, new_depth_texture;
@@ -2051,6 +2168,8 @@ int wmain(int argc, wchar_t **argv)
 		opts.color_path = new_color_path;
 		opts.depth_path = new_depth_path;
 		opts.depth_format = new_depth_format;
+		opts.depth_profile = depth_status != nullptr && depth_status->fallback_to_kks ? "kks" : new_depth_profile;
+		opts.depth_downsample = new_depth_downsample;
 		color_write_time = file_write_time_or_min(opts.color_path);
 		depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
 		bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
@@ -2063,18 +2182,24 @@ int wmain(int argc, wchar_t **argv)
 		if (new_color_write_time == color_write_time && new_depth_write_time == depth_write_time)
 			return;
 
-		if (!load_input_paths(opts.color_path, opts.depth_path, opts.depth_format).empty())
+		depth_load_status depth_status;
+		if (!load_input_paths(opts.color_path, opts.depth_path, opts.depth_format, opts.depth_profile, opts.depth_downsample, &depth_status).empty())
 			return;
+		if (depth_status.fallback_to_kks)
+			std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << depth_status.warning << std::endl;
 		std::cout << "INPUTS_RELOADED=1" << std::endl;
 	};
 
-	const auto switch_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::filesystem::path &new_output_path) -> std::string {
-		const std::string error = load_input_paths(new_color_path, new_depth_path, new_depth_format);
+	const auto switch_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::string &new_depth_profile, const std::string &new_depth_downsample, const std::filesystem::path &new_output_path) -> control_server::input_switch_result {
+		depth_load_status depth_status;
+		const std::string error = load_input_paths(new_color_path, new_depth_path, new_depth_format, new_depth_profile, new_depth_downsample, &depth_status);
 		if (!error.empty())
-			return error;
+			return { error, false, {} };
 		opts.output_path = new_output_path;
+		if (depth_status.fallback_to_kks)
+			std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << depth_status.warning << std::endl;
 		std::cout << "INPUTS_SWITCHED=1 " << path_utf8(opts.color_path) << std::endl;
-		return {};
+		return { {}, depth_status.fallback_to_kks, depth_status.warning };
 	};
 
 	const auto save_current_output = [&]() -> std::string {
