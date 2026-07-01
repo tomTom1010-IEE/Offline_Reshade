@@ -36,9 +36,9 @@ public sealed class PrototypeProcessService : IDisposable
         };
 
         _previewProcess = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        _previewProcess.OutputDataReceived += (_, args) => { if (!string.IsNullOrWhiteSpace(args.Data)) OutputReceived?.Invoke(args.Data); };
-        _previewProcess.ErrorDataReceived += (_, args) => { if (!string.IsNullOrWhiteSpace(args.Data)) OutputReceived?.Invoke(args.Data); };
-        _previewProcess.Exited += (_, _) => PreviewExited?.Invoke();
+        _previewProcess.OutputDataReceived += OnOutputDataReceived;
+        _previewProcess.ErrorDataReceived += OnOutputDataReceived;
+        _previewProcess.Exited += OnPreviewProcessExited;
         _previewProcess.Start();
         _previewProcess.BeginOutputReadLine();
         _previewProcess.BeginErrorReadLine();
@@ -85,19 +85,33 @@ public sealed class PrototypeProcessService : IDisposable
 
         try
         {
+            process.OutputDataReceived -= OnOutputDataReceived;
+            process.ErrorDataReceived -= OnOutputDataReceived;
+            process.Exited -= OnPreviewProcessExited;
             if (!process.HasExited)
             {
-                process.Kill();
-                process.WaitForExit(2000);
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(250);
             }
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
         }
         finally
         {
             process.Dispose();
         }
+    }
+
+    private void OnOutputDataReceived(object sender, DataReceivedEventArgs args)
+    {
+        if (!string.IsNullOrWhiteSpace(args.Data))
+            OutputReceived?.Invoke(args.Data);
+    }
+
+    private void OnPreviewProcessExited(object? sender, EventArgs args)
+    {
+        PreviewExited?.Invoke();
     }
 
     public void Dispose()

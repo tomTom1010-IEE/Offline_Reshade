@@ -4,6 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
     mc:Ignorable="d"
     Title="Offline ReShade">
 
@@ -32,19 +33,39 @@
       </StackPanel>
 
       <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+        <Grid ColumnSpacing="8" VerticalAlignment="Center">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="52" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="Real Time" Foreground="#C9D1D9" VerticalAlignment="Center" />
+          <ToggleSwitch x:Name="InputModeSwitch"
+                        Grid.Column="1"
+                        Width="52"
+                        MinWidth="0"
+                        OffContent=""
+                        OnContent=""
+                        Toggled="OnInputModeSwitchToggled" />
+          <TextBlock Grid.Column="2" Text="Gallery" Foreground="#C9D1D9" VerticalAlignment="Center" />
+        </Grid>
+        <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Foreground="#C9D1D9" />
         <TextBlock Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="#C9D1D9" />
         <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" Foreground="White" FontWeight="SemiBold" />
       </StackPanel>
     </Grid>
 
-    <SplitView Grid.Row="1"
-               IsPaneOpen="{x:Bind ViewModel.IsSettingsOpen, Mode=TwoWay}"
-               DisplayMode="Overlay"
-               OpenPaneLength="420"
-               CompactPaneLength="0"
-               PaneBackground="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-      <SplitView.Pane>
-        <ScrollViewer Padding="18">
+    <Grid Grid.Row="1">
+      <ScrollViewer x:Name="SettingsContent"
+                    Visibility="Collapsed"
+                    Padding="18"
+                    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Border MaxWidth="760"
+                HorizontalAlignment="Left"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                Padding="18">
           <StackPanel Spacing="12">
             <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
 
@@ -58,7 +79,15 @@
               <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickColorCommand}" />
             </Grid>
 
-            <TextBlock Text="Depth PNG" />
+            <TextBlock Text="Depth Encoding" />
+            <ComboBox x:Name="DepthFormatBox"
+                      MinWidth="240"
+                      SelectionChanged="OnDepthFormatSelectionChanged">
+              <ComboBoxItem Content="Raw Float32 device depth (.rfloat)" Tag="raw" />
+              <ComboBoxItem Content="RGBA8 packed device depth PNG" Tag="rgba" />
+            </ComboBox>
+
+            <TextBlock Text="Depth File" />
             <Grid ColumnSpacing="8">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
@@ -98,6 +127,27 @@
               <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickOutputCommand}" />
             </Grid>
 
+            <TextBlock Text="Gallery" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
+            <TextBlock Text="Gallery Input Folder" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryInputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryInputFolderCommand}" />
+            </Grid>
+
+            <TextBlock Text="Gallery Output Folder" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryOutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryOutputFolderCommand}" />
+            </Grid>
+
             <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
             <TextBlock Text="Leave blank to use the color PNG size." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             <Grid ColumnSpacing="10">
@@ -114,14 +164,26 @@
                 <TextBox Text="{x:Bind ViewModel.Settings.RenderHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
               </StackPanel>
             </Grid>
-          </StackPanel>
-        </ScrollViewer>
-      </SplitView.Pane>
 
-      <Grid Padding="14" ColumnSpacing="14">
+            <TextBlock Text="Status" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
+            <TextBlock Text="Preview Transport" />
+            <ComboBox x:Name="PreviewTransportBox"
+                      MinWidth="180"
+                      SelectionChanged="OnPreviewTransportSelectionChanged">
+              <ComboBoxItem Content="GPU" Tag="GPU" />
+              <ComboBoxItem Content="CPU" Tag="CPU" />
+            </ComboBox>
+            <ToggleSwitch Header="Show FPS"
+                          IsOn="{x:Bind ViewModel.Settings.ShowFps, Mode=TwoWay}" />
+          </StackPanel>
+        </Border>
+      </ScrollViewer>
+
+      <Grid x:Name="MainContent" Padding="14" ColumnSpacing="14">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="430" />
           <ColumnDefinition Width="*" />
+          <ColumnDefinition x:Name="GalleryColumn" Width="0" />
         </Grid.ColumnDefinitions>
 
         <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
@@ -138,7 +200,9 @@
               <TextBlock Text="ReShade Controls" FontWeight="SemiBold" />
               <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
-            <ScrollViewer Grid.Row="1">
+            <ScrollViewer x:Name="ControlsScrollViewer"
+                          Grid.Row="1"
+                          HorizontalScrollBarVisibility="Disabled">
               <StackPanel Padding="12" Spacing="12">
                 <StackPanel x:Name="ControlsPanel" Spacing="10" />
                 <Expander Header="Log" IsExpanded="False">
@@ -163,10 +227,93 @@
             <Grid Grid.Row="0" Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
               <TextBlock Text="{x:Bind ViewModel.PreviewInfoText, Mode=OneWay}" FontWeight="SemiBold" />
             </Grid>
-            <Grid x:Name="PreviewSurface" Grid.Row="1" Background="Black" />
+            <Grid x:Name="PreviewSurface" Grid.Row="1" Background="Black">
+              <SwapChainPanel x:Name="PreviewSwapChainPanel" Visibility="Collapsed" />
+              <Image x:Name="PreviewImage" Stretch="Uniform">
+                <Image.RenderTransform>
+                  <CompositeTransform x:Name="PreviewTransform" />
+                </Image.RenderTransform>
+              </Image>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <Border x:Name="GalleryPanel"
+                Grid.Column="2"
+                Visibility="Collapsed"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock x:Name="GalleryTitle" Text="Gallery" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <Button Grid.Column="1"
+                      MinWidth="34"
+                      Padding="8,4"
+                      Content="&#xE70D;"
+                      FontFamily="Segoe MDL2 Assets"
+                      Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}" />
+            </Grid>
+
+            <Grid x:Name="GalleryExpandedContent" Grid.Row="1" RowSpacing="10" Padding="10">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+              </Grid.RowDefinitions>
+              <Button Content="Refresh" HorizontalAlignment="Stretch" Command="{x:Bind ViewModel.RefreshGalleryCommand}" />
+              <Grid Grid.Row="1" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="86" />
+                </Grid.ColumnDefinitions>
+                <Button Content="Batch Apply"
+                        HorizontalAlignment="Stretch"
+                        Command="{x:Bind ViewModel.BatchApplyCommand}" />
+                <TextBox Grid.Column="1"
+                         Header="Frame Delay"
+                         Text="{x:Bind ViewModel.Settings.GalleryBatchFrameDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         InputScope="Number" />
+              </Grid>
+              <ListView x:Name="GalleryList"
+                        Grid.Row="2"
+                        ItemsSource="{x:Bind ViewModel.GalleryItems, Mode=OneWay}"
+                        SelectionChanged="OnGallerySelectionChanged"
+                        HorizontalContentAlignment="Stretch"
+                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                        ScrollViewer.VerticalScrollMode="Enabled"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                        ScrollViewer.HorizontalScrollMode="Disabled">
+                <ListView.ItemTemplate>
+                  <DataTemplate x:DataType="vm:GalleryItemViewModel">
+                    <Grid ColumnSpacing="10" Padding="4">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="96" />
+                        <ColumnDefinition Width="*" />
+                      </Grid.ColumnDefinitions>
+                      <Border Width="96" Height="54" Background="Black">
+                        <Image Source="{x:Bind Thumbnail}" Stretch="UniformToFill" />
+                      </Border>
+                      <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind BaseName}" TextWrapping="WrapWholeWords" FontWeight="SemiBold" />
+                        <TextBlock Text="{x:Bind StatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                      </StackPanel>
+                    </Grid>
+                  </DataTemplate>
+                </ListView.ItemTemplate>
+              </ListView>
+            </Grid>
           </Grid>
         </Border>
       </Grid>
-    </SplitView>
+    </Grid>
   </Grid>
 </Window>

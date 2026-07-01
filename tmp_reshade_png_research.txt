@@ -1,0 +1,868 @@
+处理分辨率、预览窗
+
+可以实现，而且关键不是单纯“把 ReShade 窗口改成侧栏”，而是要把
+
+口分辨率和最终导出分辨率彻底解耦。我会按源码层面给你拆成可行架构和修改量。
+Thought for 28s
+
+可以实现，而且整体架构非常合理。
+
+它可以做成类似 Lightroom 的桌面软件：中央是可缩放、可平移的图像画布，右侧固定显示
+ReShade 效果与参数，后台则以原图分辨率或预览分辨率运行 .fx 。
+不过有一个关键点需要纠正：
+ReShade
+
+的效果处理分辨率不应该等于软件窗口分辨率。
+
+应当同时存在三种彼此独立的尺寸：
+原始图像分辨率
+例如 7680 × 4320
+效果处理分辨率
+预览时可能是 1920 × 1080
+最终输出时是 7680 × 4320
+软件窗口/画布分辨率
+例如窗口只有 1600 × 900
+
+中央画布只是把处理后的纹理缩放显示出来。放大、缩小和平移通常只改变显示纹理的
+UV，不必重新运行 ReShade。
+
+为什么原版 ReShade 不能直接这样做
+目前 ReShade 初始化时，会直接读取宿主程序 Swap Chain 的 Back Buffer 尺寸：
+C++
+const api::resource_desc back_buffer_desc =
+_device->get_resource_desc(_swapchain->get_back_buffer(0));
+_width
+
+= back_buffer_desc.texture.width;
+
+_height = back_buffer_desc.texture.height;
+
+随后它会用 _width 和 _height 创建效果纹理和 effect permutation。因此，原版
+ReShade 中：
+窗口 Back Buffer 分辨率
+=
+
+ReShade 处理分辨率
+=
+BUFFER_WIDTH / BUFFER_HEIGHT
+
+这是它不能在小窗口中自然处理超大图片的根本原因。ReShade 源码中的
+runtime::on_init() 确实直接以 Swap Chain Back Buffer 初始化 _width 、 _height ，
+
+并据此创建效果资源。
+
+GitHub
+
+ReShade FX 中的：
+hlsl
+BUFFER_WIDTH
+BUFFER_HEIGHT
+BUFFER_RCP_WIDTH
+BUFFER_RCP_HEIGHT
+
+也明确指向 Back Buffer 尺寸。大量模糊、AO、锐化、描边和 DOF Shader 都用这些值计
+算一个像素对应的 UV 大小。
+
+GitHub
+
+应当改成什么架构
+建议把它做成以下结构：
+┌──────────────────────────────────────────────┐
+│ 菜单栏
+
+│
+
+├─────────────────────────────┬────────────────┤
+│
+
+│ Effects
+
+│
+
+│
+
+│ ☑ MXAO
+
+│
+
+图像预览画布
+
+│
+
+│
+
+│ ☑ Tonemap
+
+│
+│
+
+│ ☑ Bloom
+
+可缩放 / 平移 / 对比
+
+│
+
+│
+
+│
+
+│
+
+│ Parameters
+
+│
+
+│
+
+│ Radius
+
+[0.8]
+
+│
+
+│
+
+│ Amount
+
+[1.2]
+
+│
+
+│
+
+│
+
+│
+
+├─────────────────────────────┴────────────────┤
+│ 25% | 3840×2160 | Preview Quality | GPU 8 ms │
+└──────────────────────────────────────────────┘
+
+底层渲染流程：
+coloroutput
+↓
+Color Input Texture ─────────────┐
+│
+depthoutput
+
+├→ ReShade FX Runtime
+
+↓
+
+│
+
+Depth Input Texture ─────────────┘
+↓
+Full-resolution Output Texture
+↓
+缩放显示到软件中央预览区域
+
+这里最重要的是：
+ReShade FX Runtime 的尺寸
+=
+离屏处理纹理尺寸
+而不是窗口尺寸
+
+需要修改 ReShade 的哪些部分
+1.
+
+将 Runtime 与 Swap Chain 尺寸解耦
+
+原版逻辑是：
+C++
+_width
+
+= back_buffer_desc.texture.width;
+
+_height = back_buffer_desc.texture.height;
+
+建议改为：
+C++
+_width
+
+= working_image_width;
+
+_height = working_image_height;
+
+更完整一点，可以增加一个离线初始化描述：
+C++
+struct offline_runtime_desc
+{
+uint32_t width;
+uint32_t height;
+reshade::api::format color_format;
+reshade::api::color_space color_space;
+reshade::api::resource_view color_input_srv;
+
+reshade::api::resource_view depth_input_srv;
+};
+
+然后增加类似：
+C++
+bool runtime::on_init_offline(
+const offline_runtime_desc &desc);
+
+此时 Swap Chain 只负责显示 UI，不再决定 ReShade 效果尺寸。
+
+2.
+
+将 COLOR 绑定到 coloroutput
+
+ReShade FX 中：
+hlsl
+texture2D ColorTexture : COLOR;
+
+原本绑定的是当前游戏 Back Buffer。官方语言参考也规定 COLOR 是只读的 Back Buffer 内
+容。
+
+GitHub
+
+离线版需要把它改为绑定你加载的颜色纹理：
+C++
+runtime->set_color_input(color_output_srv);
+
+逻辑上相当于：
+COLOR semantic
+↓
+coloroutput.png / EXR / DDS
+
+从 Shader 的角度看，它仍然认为自己在读取 ReShade 的 COLOR ，因此大多数 .fx 不需
+要修改。
+
+3.
+
+将 DEPTH 绑定到 depthoutput
+
+同理：
+hlsl
+
+texture2D DepthTexture : DEPTH;
+
+应绑定到：
+C++
+runtime->set_depth_input(depth_output_srv);
+
+官方定义中， DEPTH 是游戏深度信息。离线版本只需要让外部深度纹理占据这个
+semantic。
+
+GitHub
+
+不过最好不要直接把普通 8-bit PNG 当最终深度格式。内部加载后应转换成：
+R32_FLOAT
+
+或者至少：
+R16_FLOAT
+
+例如：
+C++
+Texture2D depth_texture:
+Width
+
+= image_width
+
+Height = image_height
+Format = DXGI_FORMAT_R32_FLOAT
+
+即使输入是 PNG，加载后也可以解码成浮点纹理。
+
+4.
+
+将 ReShade 输出到离屏 Render Target
+
+原版大致是：
+Back Buffer
+↓
+执行 effects
+↓
+写回 Back Buffer
+↓
+Present
+
+离线版本应改成：
+
+Input Color Texture
+↓
+Effect Ping-Pong A/B
+↓
+Final Output Texture
+
+例如：
+C++
+render_effects(
+command_list,
+offline_output_rtv,
+offline_output_srgb_rtv);
+
+最终输出纹理保持原图尺寸，比如：
+7680 × 4320 RGBA16F
+
+然后再用一个普通显示 Shader 将其缩放到中央画布：
+hlsl
+float4 PreviewPS(float2 uv : TEXCOORD) : SV_Target
+{
+return OutputTexture.Sample(LinearSampler, uv);
+}
+
+这样软件窗口即使只有 1600 × 900 ，后台也可以保存一张 7680 × 4320 的结果。
+
+放大缩小不会改变 ReShade 效果
+例如原图：
+8192 × 8192
+
+后台 ReShade 输出也是：
+8192 × 8192
+
+用户查看时：
+Fit：缩小至 900 × 900 显示
+100%：一个图片像素对应一个屏幕像素
+
+200%：一个图片像素显示为 2 × 2 屏幕像素
+
+缩放逻辑只是：
+C++
+display_uv_min
+display_uv_max
+zoom
+pan_offset
+
+例如使用 ImGui：
+C++
+ImGui::Image(
+output_srv,
+ImVec2(image_width * zoom, image_height * zoom),
+uv_min,
+uv_max);
+
+但更适合大型图片的是固定画布大小，通过 UV 裁剪显示当前区域，而不是创建一个数万像
+素大的 ImGui 控件。
+例如：
+C++
+float2 visible_size_uv =
+canvas_size_pixels / (image_size_pixels * zoom);
+float2 uv_min = pan_center - visible_size_uv * 0.5f;
+float2 uv_max = pan_center + visible_size_uv * 0.5f;
+
+这意味着：
+滚轮改变 zoom
+中键拖动改变 pan_center
+ReShade 结果纹理不变
+不需要重新执行效果
+只重新绘制预览
+
+固定侧栏 UI 是否需要保留原 ReShade 界面
+有两种做法。
+
+方案 A：修改 runtime_gui.cpp
+ReShade 的 UI 主要集中在：
+source/runtime_gui.cpp
+
+官方仓库也明确把这个文件描述为负责 Overlay 和所有 UI。
+可以把原来的浮动窗口改成固定侧栏：
+C++
+ImGui::SetNextWindowPos(
+ImVec2(window_width - sidebar_width, 0));
+ImGui::SetNextWindowSize(
+ImVec2(sidebar_width, window_height));
+ImGui::Begin(
+"Effects",
+nullptr,
+ImGuiWindowFlags_NoMove |
+ImGuiWindowFlags_NoResize |
+ImGuiWindowFlags_NoCollapse |
+ImGuiWindowFlags_NoTitleBar);
+
+优点：
+可以快速保留 ReShade 原来的效果列表；
+保留 technique 排序；
+保留 uniform 控件；
+保留 preset；
+Shader 注解 UI 基本自动工作。
+缺点：
+原 UI 仍带有很多游戏注入器逻辑；
+代码会比较难整理成 Lightroom 风格；
+后续同步上游 ReShade 比较麻烦。
+
+方案 B：自己写侧栏，只复用 ReShade Runtime
+这是更推荐的长期方案。
+ReShade .fx 中的 Uniform 本来就携带 UI 元数据，例如：
+
+GitHub
+
+hlsl
+uniform float Radius <
+ui_type = "slider";
+ui_min = 0.0;
+ui_max = 10.0;
+ui_label = "Radius";
+ui_category = "Ambient Occlusion";
+> = 1.0;
+
+官方语言参考支持：
+ui_type
+ui_min
+ui_max
+ui_step
+ui_items
+ui_label
+ui_tooltip
+ui_category
+hidden
+noedit
+nosave
+
+这些信息足以让你的程序自动生成 Lightroom 式参数面板。
+你的 UI 层可以读取 Uniform 元数据，再生成：
+Exposure
+├── Exposure
+
+[-1.00]
+
+├── Contrast
+
+[ 0.20]
+
+└── Saturation
+
+[ 1.10]
+
+Depth of Field
+├── Focus Depth
+
+[ 0.35]
+
+├── Focus Range
+
+[ 0.10]
+
+└── Bokeh Size
+
+[ 4.00]
+
+这样 UI 不需要复制 ReShade 原始布局，只使用其效果数据。
+
+最合理的软件模块划分
+Application
+├── UI
+│
+
+├── Main Window
+
+GitHub
+
+│
+
+├── Image Canvas
+
+│
+
+├── Effect Sidebar
+
+│
+
+├── Histogram
+
+│
+
+└── Export Dialog
+
+│
+├── Image IO
+│
+
+├── PNG
+
+│
+
+├── EXR
+
+│
+
+├── DDS
+
+│
+
+└── TIFF
+
+│
+├── Offline ReShade Runtime
+│
+
+├── ReShade FX Compiler
+
+│
+
+├── Effect Loader
+
+│
+
+├── Uniform Manager
+
+│
+
+├── Technique Manager
+
+│
+
+├── Texture Semantic Binding
+
+│
+
+└── Render Graph
+
+│
+├── Graphics Backend
+│
+
+├── D3D11 Device
+
+│
+
+├── Offscreen Textures
+
+│
+
+├── Preview Renderer
+
+│
+
+└── GPU Readback
+
+│
+└── Project/Preset
+├── Effect Order
+├── Uniform Values
+├── Depth Metadata
+└── Export Settings
+
+用 D3D11 还是 D3D12
+第一版建议只支持：
+Windows + Direct3D 11
+
+原因是这种软件主要做：
+全屏三角形；
+多 Pass Pixel Shader；
+纹理 ping-pong；
+Compute Shader；
+GPU readback。
+D3D11 足够完成，而且资源状态管理简单得多。
+
+ReShade 本身跨 D3D9、D3D10、D3D11、D3D12、OpenGL 和 Vulkan，但离线软件没
+有必要一开始保留所有后端。官方项目确实包含多个图形 API 的运行时和独立 ReShade
+FX 编译器。
+
+GitHub
+
+预览和最终输出应当分成两种模式
+对于大型图像，建议采用 Lightroom 类似的两级渲染。
+
+实时预览模式
+例如原图为：
+8192 × 8192
+
+当前窗口画布只有：
+1200 × 900
+
+参数拖动时，可以把图片临时缩小到：
+2048 × 2048
+
+然后运行效果：
+低分辨率 Input
+↓
+ReShade Preview
+↓
+立即更新 UI
+
+这样调节参数很流畅。
+
+完整质量模式
+用户停止拖动一段很短的时间后，重新执行：
+8192 × 8192 Input
+↓
+ReShade Full Resolution
+↓
+更新最终纹理
+
+导出时永远使用完整分辨率。
+推荐提供：
+
+Preview Quality
+○ Fit to viewport
+○ 1/4 resolution
+○ 1/2 resolution
+● Full resolution
+
+但预览分辨率改变会影响部分效果
+下面这些效果对分辨率非常敏感：
+Sharpen
+Blur
+Bloom
+MXAO/SSAO
+Depth of Field
+Film Grain
+Outline
+Chromatic Aberration
+例如 Shader 使用：
+hlsl
+float2 pixelSize =
+float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT);
+
+如果原图是 8K，但预览是 2K，固定的 5 像素模糊半径在两种模式下视觉大小不同。
+可以采用两种策略。
+
+兼容原 ReShade 的策略
+让预览 Shader 认为：
+BUFFER_WIDTH = 预览纹理宽度
+
+此时和游戏中改变分辨率的表现一致，但预览与最终输出可能略有不同。
+
+物理尺度一致的策略
+额外提供：
+hlsl
+OFFLINE_SOURCE_WIDTH
+OFFLINE_SOURCE_HEIGHT
+
+OFFLINE_PREVIEW_SCALE
+
+并对兼容 Shader 做适配：
+hlsl
+float adjustedRadius =
+Radius * OFFLINE_PREVIEW_SCALE;
+
+但这样需要修改某些 .fx ，不能完全做到任意 Shader 零修改。
+第一版可以接受预览与最终输出的小幅差异，在用户停止调节后再自动显示完整质量结果。
+
+超大图片的显存问题
+一张 8192 × 8192 RGBA16F 纹理大约需要：
+8192 × 8192 × 8 bytes
+≈ 512 MiB
+
+如果一个 ReShade 效果链包含：
+输入颜色；
+两张 ping-pong；
+多张 Bloom 金字塔；
+AO 中间缓冲；
+DOF 中间缓冲；
+深度纹理；
+很容易占用数 GB 显存。
+因此最好支持：
+纹理池复用；
+pooled = true ；
+
+不使用的中间纹理及时释放；
+半精度格式；
+预览代理纹理；
+显存预算提示。
+ReShade FX 本身支持多种内部纹理格式，并允许用 pooled 注解复用相同尺寸和格式的
+纹理。
+
+GitHub
+
+能不能用分块 Tile 处理超大图
+
+不能对所有 ReShade 效果透明分块。
+
+可以，但
+
+颜色调整通常很容易：
+Exposure
+Contrast
+LUT
+Color Balance
+Tonemap
+
+这些效果每个像素基本独立，可以直接 Tile。
+但下面这些需要邻域：
+Blur
+Bloom
+Sharpen
+AO
+DOF
+Outline
+
+分块时要加入重叠区域：
+Tile 512 × 512
+Border 64 pixels
+实际处理 640 × 640
+最后只保留中央 512 × 512
+
+下面这些很难可靠分块：
+大半径 Bloom；
+超大散景 DOF；
+屏幕空间 AO；
+使用全局平均亮度的自动曝光；
+多帧 temporal effects；
+使用前一帧 history texture 的效果；
+使用鼠标和动态时间的效果。
+所以第一版更适合：
+单张完整 GPU 纹理
++
+限制最大分辨率
++
+代理预览
+
+之后再为可分块效果添加 Tile Export。
+
+Depth
+
+必须增加元数据面板
+
+仅有 depth PNG 通常还不够。软件最好让用户指定：
+Depth Encoding
+○ Linear 0–1
+○ Hardware depth
+○ Reversed-Z
+○ View-space distance
+○ World-space distance
+Near Plane
+0.1
+Far Plane
+1000.0
+Depth Direction
+○ Near = black
+○ Near = white
+
+内部再统一转换成一个规范格式，例如：
+R32_FLOAT
+0 = near
+1 = far
+线性深度
+
+不过要注意，一些现成 ReShade Shader 自己会调用 ReShade 的深度线性化逻辑。如果输
+入已经线性化，就不能再重复线性化。最好提供兼容模式：
+Depth Compatibility
+○ Emulate raw game depth
+○ Supply normalized linear depth
+
+哪些 ReShade 效果需要特殊处理
+可以较好支持
+
+Color grading
+LUT
+Curves
+
+Exposure
+Bloom
+Sharpen
+SMAA/FXAA
+Vignette
+Film grain
+Depth-based fog
+Depth-based outline
+DOF
+MXAO 类效果
+
+需要模拟时间
+有些 Shader 使用：
+hlsl
+source = "timer"
+source = "frametime"
+source = "framecount"
+
+离线软件需要决定：
+timer = 用户时间轴
+frametime = 16.67 ms
+framecount = 0 或递增
+
+这些 runtime source 是 ReShade FX 正式支持的功能。
+
+GitHub
+
+不能自然支持
+
+依赖运动矢量；
+依赖游戏法线/材质缓冲；
+依赖上一帧画面；
+依赖相机抖动；
+针对 HUD 分离的 Shader；
+通过 Add-on 提取游戏内部 Render Target 的 Shader；
+依赖特定游戏数据的效果。
+
+是直接 Fork ReShade，还是只取编译器
+推荐的第一阶段：Fork Runtime
+
+自定义 D3D11 宿主程序
++
+修改后的 ReShade runtime
++
+保留 ReShade FX 编译器和效果管理
+
+优点：
+对现有 .fx 兼容性最高；
+Technique、Pass、Uniform、Preset 已经存在；
+不需要重写整个 ReShade FX runtime；
+可以较快做到可用原型。
+主要修改：
+runtime.cpp
+runtime_gui.cpp
+runtime_effects.cpp
+D3D11 后端少量代码
+语义纹理绑定部分
+截图/导出部分
+
+长期方案：独立 Offline FX Runtime
+ReShade 官方明确说明 ReShade FX 编译器是独立组件，可以把 source/effect_*.* 集
+成进其他项目。
+
+GitHub
+
+但编译器只负责：
+解析 .fx
+预处理
+编译 Shader
+
+你仍然需要自己实现：
+Pass 顺序；
+Technique；
+Render Target；
+Texture Pool；
+Sampler；
+Uniform；
+Preset；
+Resource Barrier；
+COLOR/DEPTH semantic；
+UI 元数据；
+Ping-pong；
+
+Screenshot/export。
+因此长期会更干净，但第一版工作量明显更大。
+
+我最推荐的最终设计
+Offline ReShade Studio
+左侧/中央：
+原始图像和效果结果
+Fit / 25% / 50% / 100% / 200%
+鼠标滚轮缩放
+中键平移
+Before/After
+Depth Preview
+Split View
+右侧固定栏：
+Technique 列表
+拖动调整顺序
+Shader 参数
+搜索
+Preset
+Depth 设置
+后台：
+D3D11
+Source-resolution offscreen runtime
+Proxy preview
+Full-resolution idle render
+PNG/EXR/TIFF 导出
+
+结论
+这个项目在技术上完全可行，而且并不需要推翻 ReShade：
+1. 保留 ReShade FX 编译器、效果解析、Technique、Pass 和 Uniform 系统；
+2. 把 Runtime 的尺寸来源从 Swap Chain 改为离屏工作纹理；
+3. 把 COLOR 和 DEPTH 绑定到用户导入的纹理；
+4. 把效果结果写入独立的全分辨率纹理；
+5. 软件窗口只负责缩放和平移显示该纹理；
+6. 原 ReShade Overlay 可以改成固定侧栏，但长期更适合根据 Uniform 注解重写一套侧
+栏 UI。
+**真正困难的部分不是缩放查看，也不是固定侧栏，而是让 ReShade Runtime 从“处理
+Swap Chain”转变为“处理任意离屏纹理”，同时维持对现有 .fx 的兼容性。**一旦这层完
+
+成，Lightroom 式交互、原图导出、Before/After、缩放和平移都属于比较标准的图像软件功
+能。
+
+

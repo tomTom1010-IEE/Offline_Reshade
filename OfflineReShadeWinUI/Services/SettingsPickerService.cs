@@ -22,6 +22,16 @@ public sealed class SettingsPickerService
         return file?.Path;
     }
 
+    public async Task<string?> PickDepthAsync()
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
+        picker.FileTypeFilter.Add(".rfloat");
+        picker.FileTypeFilter.Add(".png");
+        var file = await picker.PickSingleFileAsync();
+        return file?.Path;
+    }
+
     public async Task<string?> PickIniAsync()
     {
         var picker = new FileOpenPicker();

@@ -29,6 +29,10 @@ public sealed class AsyncRelayCommand : ICommand
         {
             await _execute();
         }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(ex);
+        }
         finally
         {
             _isRunning = false;
