@@ -37,6 +37,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private uint _sharedPreviewHeight;
     private bool _isRestoringSettings;
     private bool _isDisposed;
+    private bool _controlStatePopulated;
+    private bool _isRefreshingControlState;
     private bool _hasPersistedDepthProfile;
     private bool _isApplyingProfilePaths;
     private string _currentDepthProfile = "kks";
@@ -368,6 +370,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (updateStatus)
             StatusText = "Preview stopped";
         ControlStatusText = "Disconnected";
+        _controlStatePopulated = false;
         FpsText = string.Empty;
         SharedPreviewHandle = 0;
         SharedPreviewWidth = 0;
@@ -484,35 +487,48 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task RefreshControlStateAsync()
     {
-        JsonElement state = default;
-        for (var attempt = 0; attempt < 20; ++attempt)
+        if (_isRefreshingControlState)
+            return;
+
+        _isRefreshingControlState = true;
+        try
         {
-            state = await _rpc.CallAsync("list_state");
-            if ((state.TryGetProperty("techniques", out var techniques) && techniques.GetArrayLength() != 0) ||
-                (state.TryGetProperty("uniforms", out var uniforms) && uniforms.GetArrayLength() != 0))
+            JsonElement state = default;
+            for (var attempt = 0; attempt < 240; ++attempt)
             {
-                break;
+                state = await _rpc.CallAsync("list_state");
+                if ((state.TryGetProperty("techniques", out var techniques) && techniques.GetArrayLength() != 0) ||
+                    (state.TryGetProperty("uniforms", out var uniforms) && uniforms.GetArrayLength() != 0))
+                {
+                    break;
+                }
+
+                ControlStatusText = "Loading effects";
+                await Task.Delay(250);
             }
 
-            await Task.Delay(250);
+            var techniquesList = JsonStateParser.ParseTechniques(state);
+            var uniformsList = JsonStateParser.ParseUniforms(state);
+            var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
+            EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
+
+            Techniques.Clear();
+            foreach (var technique in techniquesList)
+                Techniques.Add(technique);
+
+            Effects.Clear();
+            foreach (var effect in JsonStateParser.BuildEffects(techniquesList, uniformsList, definitionsList))
+                Effects.Add(effect);
+
+            _controlStatePopulated = techniquesList.Count != 0 || uniformsList.Count != 0 || definitionsList.Count != 0;
+            ControlStatusText = _controlStatePopulated ? "Ready" : "No effects";
+            RaiseControlCommandStates();
+            ControlsChanged?.Invoke();
         }
-
-        var techniquesList = JsonStateParser.ParseTechniques(state);
-        var uniformsList = JsonStateParser.ParseUniforms(state);
-        var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
-        EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
-
-        Techniques.Clear();
-        foreach (var technique in techniquesList)
-            Techniques.Add(technique);
-
-        Effects.Clear();
-        foreach (var effect in JsonStateParser.BuildEffects(techniquesList, uniformsList, definitionsList))
-            Effects.Add(effect);
-
-        ControlStatusText = "Ready";
-        RaiseControlCommandStates();
-        ControlsChanged?.Invoke();
+        finally
+        {
+            _isRefreshingControlState = false;
+        }
     }
 
     private void StartFpsPolling()
@@ -552,6 +568,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     SharedPreviewWidth = info.TryGetProperty("sharedPreviewWidth", out var previewWidth) ? previewWidth.GetUInt32() : 0;
                     SharedPreviewHeight = info.TryGetProperty("sharedPreviewHeight", out var previewHeight) ? previewHeight.GetUInt32() : 0;
                     FpsText = string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS");
+                    if (!_controlStatePopulated && !_isRefreshingControlState)
+                        _ = RefreshControlStateAsync();
                 }
             }
             catch (OperationCanceledException)

@@ -19,6 +19,7 @@ public sealed partial class MainWindow : Window
     private bool _isPreviewDragging;
     private bool _updatingInputModeSwitch;
     private Point _lastPreviewDragPoint;
+    private XamlRoot? _previewXamlRoot;
     private double _previewZoom = 1.0;
     private double _previewPanX;
     private double _previewPanY;
@@ -76,12 +77,15 @@ public sealed partial class MainWindow : Window
         PreviewSurface.PointerReleased += OnPreviewPointerReleased;
         PreviewSurface.PointerCanceled += OnPreviewPointerReleased;
         PreviewSurface.DoubleTapped += (_, _) => ResetPreviewView();
+        PreviewSurface.Loaded += (_, _) => AttachPreviewXamlRootChanged();
         PreviewSurface.SizeChanged += (_, _) => UpdatePreviewClipAndTransform();
         ControlsScrollViewer.SizeChanged += (_, _) => UpdateControlsPanelWidth();
         _gpuPreviewTimer.Interval = TimeSpan.FromMilliseconds(16);
         _gpuPreviewTimer.Tick += (_, _) => RenderGpuPreviewFrame();
         Closed += (_, _) =>
         {
+            if (_previewXamlRoot is not null)
+                _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
             _previewHost.Dispose();
             _d3dPreview.Dispose();
             ViewModel.Dispose();
@@ -99,6 +103,26 @@ public sealed partial class MainWindow : Window
         UpdateGalleryView();
         UpdateInputModeSwitch();
         UpdatePreviewTransportView();
+    }
+
+    private double PreviewRasterizationScale => PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0;
+
+    private void AttachPreviewXamlRootChanged()
+    {
+        var root = PreviewSurface.XamlRoot;
+        if (root is null || ReferenceEquals(root, _previewXamlRoot))
+            return;
+
+        if (_previewXamlRoot is not null)
+            _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
+
+        _previewXamlRoot = root;
+        _previewXamlRoot.Changed += OnPreviewXamlRootChanged;
+    }
+
+    private void OnPreviewXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        UpdatePreviewClipAndTransform();
     }
 
     private void UpdateContentView()
@@ -421,8 +445,9 @@ public sealed partial class MainWindow : Window
             ViewModel.SharedPreviewHeight == 0)
             return;
 
-        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * (PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0)));
-        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * (PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0)));
+        var rasterizationScale = PreviewRasterizationScale;
+        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * rasterizationScale));
+        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * rasterizationScale));
         _d3dPreview.EnsureCreated(PreviewSwapChainPanel, width, height);
         UpdateGpuPreviewViewTransform();
         _d3dPreview.Render(ViewModel.SharedPreviewHandle, ViewModel.SharedPreviewWidth, ViewModel.SharedPreviewHeight);
@@ -433,8 +458,9 @@ public sealed partial class MainWindow : Window
         if (!_d3dPreview.IsCreated)
             return;
 
-        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * (PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0)));
-        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * (PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0)));
+        var rasterizationScale = PreviewRasterizationScale;
+        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * rasterizationScale));
+        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * rasterizationScale));
         _d3dPreview.Resize(width, height);
         UpdateGpuPreviewViewTransform();
     }
@@ -447,8 +473,11 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var panelWidth = Math.Max(1.0, PreviewSurface.ActualWidth);
-        var panelHeight = Math.Max(1.0, PreviewSurface.ActualHeight);
+        var rasterizationScale = PreviewRasterizationScale;
+        var panelWidth = Math.Max(1.0, PreviewSurface.ActualWidth * rasterizationScale);
+        var panelHeight = Math.Max(1.0, PreviewSurface.ActualHeight * rasterizationScale);
+        var panX = _previewPanX * rasterizationScale;
+        var panY = _previewPanY * rasterizationScale;
         var sourceAspect = (double)ViewModel.SharedPreviewWidth / ViewModel.SharedPreviewHeight;
         var panelAspect = panelWidth / panelHeight;
 
@@ -472,11 +501,11 @@ public sealed partial class MainWindow : Window
         }
 
         var zoom = Math.Max(1.0, _previewZoom);
-        var originX = ((0.0 - _previewPanX) / zoom - fitX) / fitWidth;
-        var originY = ((0.0 - _previewPanY) / zoom - fitY) / fitHeight;
-        var scaleX = (panelWidth / zoom) / fitWidth;
-        var scaleY = (panelHeight / zoom) / fitHeight;
-        _d3dPreview.SetViewTransform(originX, originY, scaleX, scaleY);
+        var destX = fitX * zoom + panX;
+        var destY = fitY * zoom + panY;
+        var destWidth = fitWidth * zoom;
+        var destHeight = fitHeight * zoom;
+        _d3dPreview.SetViewTransform(destX, destY, destWidth, destHeight);
     }
 
     private void RenderGpuPreviewFrame()

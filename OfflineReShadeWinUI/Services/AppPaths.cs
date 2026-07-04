@@ -9,12 +9,12 @@ public sealed class AppPaths
         UserSettingsPath = Path.Combine(AppDirectory, "OfflineReShadeWinUI.settings.json");
 
         var packagedPrototypePath = Path.Combine(AppDirectory, "OfflineReShadePrototype.exe");
-        var packagedEffectDir = Path.Combine(AppDirectory, "OfflinePrototype", "Effects");
         var developmentOutputDir = Path.Combine(RepositoryRoot, "bin", "x64", "Release");
         if (File.Exists(packagedPrototypePath))
         {
             PrototypePath = packagedPrototypePath;
-            DefaultEffectDir = packagedEffectDir;
+            DefaultEffectDir = "Effects";
+            TryCreateDirectory(Path.Combine(AppDirectory, DefaultEffectDir));
         }
         else
         {
@@ -36,6 +36,17 @@ public sealed class AppPaths
     public string DefaultDepthPath { get; }
     public string DefaultOutputPath { get; }
     public string DefaultEffectDir { get; }
+
+    private static void TryCreateDirectory(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
 
     private static string? FindRepositoryRoot()
     {

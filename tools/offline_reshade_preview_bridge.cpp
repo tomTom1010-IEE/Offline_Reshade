@@ -65,10 +65,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID)
 
 float4 ps_main(VSOut input) : SV_TARGET
 {
-	float2 uv = uv_transform.xy + input.uv * uv_transform.zw;
-	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
-		return float4(0.0, 0.0, 0.0, 1.0);
-	return source_texture.Sample(source_sampler, uv);
+	return source_texture.Sample(source_sampler, input.uv);
 }
 )";
 
@@ -237,9 +234,18 @@ extern "C" __declspec(dllexport) HRESULT __stdcall ORPreview_RenderShared(
 	const float clear_color[4] = { 0, 0, 0, 1 };
 	bridge->context->ClearRenderTargetView(rtv.Get(), clear_color);
 
+	const float dest_x = origin_x;
+	const float dest_y = origin_y;
+	const float dest_width = scale_x;
+	const float dest_height = scale_y;
+	if (dest_width <= 0.0f || dest_height <= 0.0f)
+		return bridge->swapchain->Present(0, 0);
+
 	D3D11_VIEWPORT viewport = {};
-	viewport.Width = static_cast<float>(bridge->width);
-	viewport.Height = static_cast<float>(bridge->height);
+	viewport.TopLeftX = dest_x;
+	viewport.TopLeftY = dest_y;
+	viewport.Width = dest_width;
+	viewport.Height = dest_height;
 	viewport.MinDepth = 0.0f;
 	viewport.MaxDepth = 1.0f;
 

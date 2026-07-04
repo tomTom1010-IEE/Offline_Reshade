@@ -2022,7 +2022,7 @@ int wmain(int argc, wchar_t **argv)
 		opts.output_path = default_input_dir / L"reshadeoutput.png";
 	if (opts.effect_dir.empty())
 	{
-		opts.effect_dir = prototype_directory() / L"Effects";
+		opts.effect_dir = L"Effects";
 		std::filesystem::create_directories(opts.effect_dir);
 	}
 
