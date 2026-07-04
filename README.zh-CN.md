@@ -1,5 +1,9 @@
 # Offline ReShade 中文使用说明
 
+<p align="center">
+  <img src="offlineReshadelogo.png" alt="Offline ReShade logo" width="480">
+</p>
+
 > 这是使用者说明，只覆盖安装、导出、客户端使用和排错。开发、构建和架构细节请看英文 README。
 
 Offline ReShade 是一个 Windows 工具，用于把 ReShade FX 效果应用到已经导出的静态图片或视频帧序列。它面向 Koikatu (KK) 和 Koikatsu Sunshine (KKS) 的离线截图流程：

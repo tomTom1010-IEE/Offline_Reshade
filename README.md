@@ -2,6 +2,10 @@
 
 # Offline ReShade
 
+<p align="center">
+  <img src="offlineReshadelogo.png" alt="Offline ReShade logo" width="480">
+</p>
+
 Offline ReShade is a Windows tool for applying ReShade FX effects to still
 images or exported frame sequences. It is designed for Koikatu (KK) and
 Koikatsu Sunshine (KKS) offline capture workflows:
