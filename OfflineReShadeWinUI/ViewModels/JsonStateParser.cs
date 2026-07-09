@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
 
 namespace OfflineReShade.WinUI.ViewModels;
 
@@ -101,6 +102,74 @@ public static class JsonStateParser
     public static bool ParseEffectsEnabled(JsonElement state)
     {
         return !state.TryGetProperty("runtime", out var runtime) || !runtime.TryGetProperty("effectsEnabled", out var enabled) || enabled.GetBoolean();
+    }
+
+    public static string ParseAddonUiDebugText(JsonElement state)
+    {
+        var capture = state;
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addonUi", out var addonUi) &&
+            addonUi.ValueKind == JsonValueKind.Object)
+        {
+            capture = addonUi;
+        }
+
+        if (capture.ValueKind != JsonValueKind.Object)
+            return "No ImGui controls captured yet.";
+
+        var builder = new StringBuilder();
+        var enabled = capture.TryGetProperty("enabled", out var enabledValue) && enabledValue.ValueKind == JsonValueKind.True;
+        var frame = capture.TryGetProperty("frame", out var frameValue) && frameValue.ValueKind == JsonValueKind.Number ? frameValue.GetInt32() : -1;
+        builder.Append("Capture: ").Append(enabled ? "enabled" : "disabled").Append(", frame ").Append(frame).AppendLine();
+
+        if (capture.TryGetProperty("requestedVersions", out var versions) && versions.ValueKind == JsonValueKind.Array)
+        {
+            var versionText = string.Join(", ", versions.EnumerateArray()
+                .Where(static item => item.ValueKind == JsonValueKind.Number)
+                .Select(static item => item.GetUInt32().ToString(CultureInfo.InvariantCulture)));
+            builder.Append("ImGui table versions: ").Append(string.IsNullOrWhiteSpace(versionText) ? "(none)" : versionText).AppendLine();
+        }
+
+        if (!capture.TryGetProperty("controls", out var controls) || controls.ValueKind != JsonValueKind.Array || controls.GetArrayLength() == 0)
+        {
+            builder.AppendLine("No standard ImGui widgets captured yet.");
+            return builder.ToString();
+        }
+
+        string currentGroup = string.Empty;
+        foreach (var control in controls.EnumerateArray())
+        {
+            var addon = GetString(control, "addon");
+            var overlay = GetString(control, "overlay");
+            var group = addon + " / " + overlay;
+            if (!string.Equals(group, currentGroup, StringComparison.Ordinal))
+            {
+                if (builder.Length != 0)
+                    builder.AppendLine();
+                builder.AppendLine(group);
+                currentGroup = group;
+            }
+
+            var kind = GetString(control, "kind");
+            var label = GetString(control, "label");
+            var value = GetString(control, "value");
+            var minimum = GetString(control, "min");
+            var maximum = GetString(control, "max");
+            var changed = GetBool(control, "changed");
+
+            builder.Append("  - ").Append(kind);
+            if (!string.IsNullOrWhiteSpace(label))
+                builder.Append(": ").Append(label);
+            if (!string.IsNullOrWhiteSpace(value))
+                builder.Append(" = ").Append(value);
+            if (!string.IsNullOrWhiteSpace(minimum) || !string.IsNullOrWhiteSpace(maximum))
+                builder.Append(" [").Append(minimum).Append("..").Append(maximum).Append(']');
+            if (changed)
+                builder.Append(" *changed*");
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
     }
 
     public static IReadOnlyList<EffectControlViewModel> BuildEffects(IReadOnlyList<TechniqueViewModel> techniques, IReadOnlyList<UniformViewModel> uniforms, IReadOnlyList<PreprocessorDefinitionViewModel> definitions)

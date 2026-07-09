@@ -78,6 +78,8 @@ namespace
 		void (*update_and_present_runtime)(reshade::api::effect_runtime *) = nullptr;
 		void (*set_external_overlay_target)(reshade::api::effect_runtime *, void *, uint32_t, uint32_t) = nullptr;
 		bool (*get_addon_overlay_state_json)(char *, size_t *) = nullptr;
+		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
+		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
 	};
 
 	struct shared_preview_state
@@ -571,6 +573,8 @@ namespace
 		result.update_and_present_runtime = reinterpret_cast<decltype(result.update_and_present_runtime)>(GetProcAddress(result.module, "ReShadeUpdateAndPresentEffectRuntime"));
 		result.set_external_overlay_target = reinterpret_cast<decltype(result.set_external_overlay_target)>(GetProcAddress(result.module, "ReShadeSetExternalOverlayTarget"));
 		result.get_addon_overlay_state_json = reinterpret_cast<decltype(result.get_addon_overlay_state_json)>(GetProcAddress(result.module, "ReShadeGetAddonOverlayStateJson"));
+		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
+		result.get_addon_imgui_capture_json = reinterpret_cast<decltype(result.get_addon_imgui_capture_json)>(GetProcAddress(result.module, "ReShadeGetAddonImGuiCaptureJson"));
 		return result;
 	}
 
@@ -1791,9 +1795,10 @@ namespace
 		using save_screenshot_callback = std::function<std::string()>;
 		using input_watch_callback = std::function<void(bool)>;
 		using addon_state_callback = std::function<std::string()>;
+		using addon_imgui_state_callback = std::function<std::string()>;
 
-		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state) :
-			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state))
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state))
 		{
 		}
 
@@ -1927,11 +1932,15 @@ namespace
 				}
 				if (command.method == "list_state")
 				{
-					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + "}");
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
 				}
 				if (command.method == "list_addons" || command.method == "list_addon_overlays")
 				{
 					return make_response(command.id, _addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}");
+				}
+				if (command.method == "list_addon_imgui_capture")
+				{
+					return make_response(command.id, _addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}");
 				}
 				if (command.method == "set_effects_state")
 				{
@@ -2168,6 +2177,7 @@ namespace
 		save_screenshot_callback _save_screenshot;
 		input_watch_callback _input_watch;
 		addon_state_callback _addon_state;
+		addon_imgui_state_callback _addon_imgui_state;
 		std::atomic_bool _running = false;
 		std::thread _thread;
 		std::mutex _queue_mutex;
@@ -2513,10 +2523,15 @@ int wmain(int argc, wchar_t **argv)
 	{
 		if (opts.control_pipe.empty())
 			opts.control_pipe = "OfflineReShade-" + std::to_string(GetCurrentProcessId());
+		if (reshade.set_addon_imgui_capture_enabled != nullptr)
+			reshade.set_addon_imgui_capture_enabled(true);
 		const auto addon_state = [&]() {
 			return exported_json_string(reshade.get_addon_overlay_state_json, "{\"available\":false,\"allLoaded\":false,\"addons\":[]}");
 		};
-		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state);
+		const auto addon_imgui_state = [&]() {
+			return exported_json_string(reshade.get_addon_imgui_capture_json, "{\"available\":false,\"enabled\":false,\"controls\":[]}");
+		};
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state);
 		control->start();
 	}
 

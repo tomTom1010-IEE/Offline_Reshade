@@ -25,6 +25,13 @@
 
 extern bool resolve_path(std::filesystem::path &path, std::error_code &ec, const std::filesystem::path &base = g_reshade_base_path);
 
+namespace reshade::imgui_capture
+{
+	bool is_enabled();
+	void begin_overlay(const char *addon, const char *overlay, bool settings);
+	void end_overlay();
+}
+
 static bool string_contains(const std::string_view text, const std::string_view filter)
 {
 	return filter.empty() ||
@@ -1421,6 +1428,60 @@ void reshade::runtime::draw_gui()
 			ImGui::End();
 		}
 	}
+
+#if RESHADE_ADDON
+	if (reshade::imgui_capture::is_enabled() && !_show_overlay)
+	{
+		constexpr ImGuiWindowFlags capture_window_flags =
+			ImGuiWindowFlags_NoDecoration |
+			ImGuiWindowFlags_NoDocking |
+			ImGuiWindowFlags_NoInputs |
+			ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoSavedSettings |
+			ImGuiWindowFlags_NoFocusOnAppearing |
+			ImGuiWindowFlags_NoBringToFrontOnFocus |
+			ImGuiWindowFlags_NoBackground;
+
+		for (const addon_info &info : addon_loaded_info)
+		{
+			if (info.handle == nullptr)
+				continue;
+
+			const auto draw_capture_window = [&](const char *overlay_title, bool settings, void(*callback)(api::effect_runtime *)) {
+				if (callback == nullptr)
+					return;
+
+				std::string window_name = "OfflineAddonCapture:";
+				window_name += info.name;
+				window_name += ':';
+				window_name += settings ? "Settings" : overlay_title;
+				window_name += "###offline_addon_capture";
+				window_name += std::to_string(reinterpret_cast<uintptr_t>(callback));
+
+				ImGui::SetNextWindowPos(ImVec2(-100000.0f, -100000.0f), ImGuiCond_Always);
+				ImGui::SetNextWindowSize(ImVec2(720.0f, 480.0f), ImGuiCond_Always);
+				if (ImGui::Begin(window_name.c_str(), nullptr, capture_window_flags))
+				{
+					reshade::imgui_capture::begin_overlay(info.name.c_str(), overlay_title, settings);
+					callback(this);
+					reshade::imgui_capture::end_overlay();
+				}
+				ImGui::End();
+			};
+
+			draw_capture_window("Settings", true, info.settings_overlay_callback);
+
+			for (const addon_info::overlay_callback &widget : info.overlay_callbacks)
+			{
+				if (widget.title == "OSD")
+					continue;
+
+				draw_capture_window(widget.title.c_str(), false, widget.callback);
+			}
+		}
+	}
+#endif
 
 #if RESHADE_ADDON == 1
 	if (addon_enabled)

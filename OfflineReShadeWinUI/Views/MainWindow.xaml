@@ -238,9 +238,20 @@
               </TabViewItem>
               <TabViewItem Header="Add-ons">
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-                  <StackPanel x:Name="AddonsPanel"
-                              Padding="12"
-                              Spacing="10" />
+                  <StackPanel Padding="12"
+                              Spacing="10">
+                    <StackPanel x:Name="AddonsPanel"
+                                Spacing="10" />
+                    <Expander Header="ImGui Capture Debug"
+                              IsExpanded="True">
+                      <TextBox Text="{x:Bind ViewModel.AddonDebugText, Mode=OneWay}"
+                               IsReadOnly="True"
+                               AcceptsReturn="True"
+                               TextWrapping="NoWrap"
+                               FontFamily="Consolas"
+                               MinHeight="260" />
+                    </Expander>
+                  </StackPanel>
                 </ScrollViewer>
               </TabViewItem>
             </TabView>

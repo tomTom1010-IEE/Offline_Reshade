@@ -29,6 +29,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _previewInfoText = "Full-res ReShade preview";
     private string _fpsText = string.Empty;
     private string _logText = string.Empty;
+    private string _addonDebugText = "No ImGui controls captured yet.";
     private string _inputMode = "RealTime";
     private bool _isGalleryPanelOpen = true;
     private GalleryItemViewModel? _selectedGalleryItem;
@@ -136,6 +137,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public string PreviewInfoText { get => _previewInfoText; private set => SetProperty(ref _previewInfoText, value); }
     public string FpsText { get => _fpsText; private set => SetProperty(ref _fpsText, value); }
     public string LogText { get => _logText; private set => SetProperty(ref _logText, value); }
+    public string AddonDebugText { get => _addonDebugText; private set => SetProperty(ref _addonDebugText, value); }
     public string InputMode
     {
         get => _inputMode;
@@ -457,6 +459,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Techniques.Clear();
         Effects.Clear();
         Addons.Clear();
+        AddonDebugText = "No ImGui controls captured yet.";
         ControlsChanged?.Invoke();
     }
 
@@ -613,6 +616,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var uniformsList = JsonStateParser.ParseUniforms(state);
             var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
             var addonsList = JsonStateParser.ParseAddons(state);
+            AddonDebugText = JsonStateParser.ParseAddonUiDebugText(state);
             EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
 
             Techniques.Clear();
@@ -675,6 +679,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     SharedPreviewWidth = info.TryGetProperty("sharedPreviewWidth", out var previewWidth) ? previewWidth.GetUInt32() : 0;
                     SharedPreviewHeight = info.TryGetProperty("sharedPreviewHeight", out var previewHeight) ? previewHeight.GetUInt32() : 0;
                     FpsText = string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS");
+                    var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
+                    AddonDebugText = JsonStateParser.ParseAddonUiDebugText(addonUi);
                     if (!_controlStatePopulated && !_isRefreshingControlState)
                         _ = RefreshControlStateAsync();
                 }
