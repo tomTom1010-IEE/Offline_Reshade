@@ -17,6 +17,7 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, CancellationTokenSource> _uniformUpdateSources = new();
     private readonly Dictionary<string, CancellationTokenSource> _addonControlUpdateSources = new();
     private readonly PreviewHostService _previewHost;
+    private readonly PreviewHostService _addonOverlayHost;
     private readonly D3DPreviewBridge _d3dPreview = new();
     private readonly DispatcherTimer _gpuPreviewTimer = new();
     private bool _isPreviewDragging;
@@ -38,7 +39,8 @@ public sealed partial class MainWindow : Window
         var paths = new AppPaths();
         ViewModel = new MainWindowViewModel(paths);
         _previewHost = new PreviewHostService(windowHandle, PreviewSurface);
-        ViewModel.Initialize(new SettingsPickerService(() => windowHandle), () => _previewHost.EnsureHandle());
+        _addonOverlayHost = new PreviewHostService(windowHandle, AddonNativeSurface);
+        ViewModel.Initialize(new SettingsPickerService(() => windowHandle), () => _previewHost.EnsureHandle(), () => _addonOverlayHost.EnsureHandle());
         ViewModel.ControlsChanged += BuildControls;
         ViewModel.AddonControlsChanged += BuildAddonControls;
         ViewModel.PreviewFrameReceived += frame => PreviewImage.Source = frame;
@@ -92,6 +94,7 @@ public sealed partial class MainWindow : Window
             if (_previewXamlRoot is not null)
                 _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
             _previewHost.Dispose();
+            _addonOverlayHost.Dispose();
             _d3dPreview.Dispose();
             ViewModel.AddonControlsChanged -= BuildAddonControls;
             ViewModel.ControlsChanged -= BuildControls;
@@ -111,6 +114,7 @@ public sealed partial class MainWindow : Window
         UpdateGalleryView();
         UpdateInputModeSwitch();
         UpdatePreviewTransportView();
+        UpdateAddonOverlayHostVisibility();
     }
 
     private double PreviewRasterizationScale => PreviewSurface.XamlRoot?.RasterizationScale ?? 1.0;
@@ -140,6 +144,17 @@ public sealed partial class MainWindow : Window
         SettingsContent.Visibility = showSettings ? Visibility.Visible : Visibility.Collapsed;
         UpdateGalleryView();
         UpdatePreviewTransportView();
+        UpdateAddonOverlayHostVisibility();
+    }
+
+    private void OnControlsTabSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        UpdateAddonOverlayHostVisibility();
+    }
+
+    private void UpdateAddonOverlayHostVisibility()
+    {
+        _addonOverlayHost.SetVisible(!ViewModel.IsSettingsOpen && ControlsTabView.SelectedIndex == 1);
     }
 
     private void UpdatePreviewTransportView()

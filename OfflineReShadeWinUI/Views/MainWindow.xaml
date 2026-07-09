@@ -216,10 +216,12 @@
               <TextBlock Text="ReShade Controls" FontWeight="SemiBold" />
               <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
-            <TabView Grid.Row="1"
+            <TabView x:Name="ControlsTabView"
+                     Grid.Row="1"
                      IsAddTabButtonVisible="False"
                      CanDragTabs="False"
-                     TabWidthMode="Equal">
+                     TabWidthMode="Equal"
+                     SelectionChanged="OnControlsTabSelectionChanged">
               <TabViewItem Header="FX">
                 <ScrollViewer x:Name="ControlsScrollViewer"
                               HorizontalScrollBarVisibility="Disabled">
@@ -240,6 +242,17 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Padding="12"
                               Spacing="10">
+                    <Border Height="280"
+                            Background="Black"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1">
+                      <Grid x:Name="AddonNativeSurface">
+                        <TextBlock Text="Native add-on panel"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
                     <StackPanel x:Name="AddonsPanel"
                                 Spacing="10" />
                     <Expander Header="WinUI Add-on Controls"

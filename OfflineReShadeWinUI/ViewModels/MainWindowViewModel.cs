@@ -20,6 +20,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _settingsSaveCancellation;
     private SettingsPickerService? _picker;
     private Func<IntPtr>? _previewHostHandleProvider;
+    private Func<IntPtr>? _addonOverlayHostHandleProvider;
     private bool _isPreviewRunning;
     private bool _isSettingsOpen;
     private bool _isBatchApplying;
@@ -172,10 +173,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public uint SharedPreviewWidth { get => _sharedPreviewWidth; private set => SetProperty(ref _sharedPreviewWidth, value); }
     public uint SharedPreviewHeight { get => _sharedPreviewHeight; private set => SetProperty(ref _sharedPreviewHeight, value); }
 
-    public void Initialize(SettingsPickerService picker, Func<IntPtr>? previewHostHandleProvider = null)
+    public void Initialize(SettingsPickerService picker, Func<IntPtr>? previewHostHandleProvider = null, Func<IntPtr>? addonOverlayHostHandleProvider = null)
     {
         _picker = picker;
         _previewHostHandleProvider = previewHostHandleProvider;
+        _addonOverlayHostHandleProvider = addonOverlayHostHandleProvider;
     }
 
     private void RestorePersistedSettings()
@@ -885,6 +887,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             arguments.AddSwitch("--preview-shared");
         }
+
+        var overlayHwnd = _addonOverlayHostHandleProvider?.Invoke() ?? IntPtr.Zero;
+        if (overlayHwnd != IntPtr.Zero)
+            arguments.Add("--overlay-hwnd", overlayHwnd.ToInt64().ToString(CultureInfo.InvariantCulture));
 
         return arguments.ToString();
     }
