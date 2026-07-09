@@ -12,6 +12,35 @@
 #include "ini_file.hpp"
 #include <cstring> // std::strlen
 
+namespace
+{
+	std::string reshade_json_escape(const std::string &value)
+	{
+		std::string result;
+		result.reserve(value.size() + 8);
+		for (const char c : value)
+		{
+			switch (c)
+			{
+			case '\\': result += "\\\\"; break;
+			case '"': result += "\\\""; break;
+			case '\n': result += "\\n"; break;
+			case '\r': result += "\\r"; break;
+			case '\t': result += "\\t"; break;
+			default:
+				result += static_cast<unsigned char>(c) < 0x20 ? ' ' : c;
+				break;
+			}
+		}
+		return result;
+	}
+
+	std::string reshade_json_string(const std::string &value)
+	{
+		return "\"" + reshade_json_escape(value) + "\"";
+	}
+}
+
 void ReShadeLogMessage([[maybe_unused]] void *module, int level, const char *message)
 {
 #if RESHADE_ADDON
@@ -112,6 +141,63 @@ void ReShadeSetConfigArray(void *, reshade::api::effect_runtime *runtime, const 
 	{
 		config.remove_key(section != nullptr ? section : std::string(), key != nullptr ? key : std::string());
 	}
+}
+
+bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
+{
+	if (size == nullptr)
+		return false;
+
+	std::string json = "{\"available\":true,\"allLoaded\":";
+	json += reshade::addon_all_loaded ? "true" : "false";
+	json += ",\"addons\":[";
+
+	bool first_addon = true;
+	for (const reshade::addon_info &info : reshade::addon_loaded_info)
+	{
+		if (!first_addon)
+			json += ',';
+		first_addon = false;
+
+		json += "{\"name\":" + reshade_json_string(info.name);
+		json += ",\"description\":" + reshade_json_string(info.description);
+		json += ",\"file\":" + reshade_json_string(info.file);
+		json += ",\"author\":" + reshade_json_string(info.author);
+		json += ",\"website\":" + reshade_json_string(info.website_url);
+		json += ",\"issues\":" + reshade_json_string(info.issues_url);
+		json += ",\"apiVersion\":" + std::to_string(info.api_version);
+		json += ",\"external\":" + std::string(info.external ? "true" : "false");
+		json += ",\"loaded\":" + std::string(info.handle != nullptr ? "true" : "false");
+#if RESHADE_GUI
+		json += ",\"hasSettingsOverlay\":" + std::string(info.settings_overlay_callback != nullptr ? "true" : "false");
+		json += ",\"overlays\":[";
+		bool first_overlay = true;
+		for (const reshade::addon_info::overlay_callback &overlay : info.overlay_callbacks)
+		{
+			if (!first_overlay)
+				json += ',';
+			first_overlay = false;
+			json += reshade_json_string(overlay.title);
+		}
+		json += "]";
+#else
+		json += ",\"hasSettingsOverlay\":false,\"overlays\":[]";
+#endif
+		json += "}";
+	}
+
+	json += "]}";
+
+	const size_t required_size = json.size() + 1;
+	if (value == nullptr || *size < required_size)
+	{
+		*size = required_size;
+		return value == nullptr;
+	}
+
+	std::memcpy(value, json.c_str(), required_size);
+	*size = required_size;
+	return true;
 }
 
 #include "d3d9/d3d9_impl_device.hpp"
@@ -215,6 +301,8 @@ bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_devic
 		return false;
 	}
 
+	reshade::load_addons();
+
 	const auto runtime = new reshade::runtime(swapchain_impl, graphics_queue_impl, std::filesystem::u8path(config_path), false);
 	if (!runtime->on_init())
 	{
@@ -238,6 +326,8 @@ void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime)
 	static_cast<reshade::runtime *>(runtime)->on_reset();
 
 	delete static_cast<reshade::runtime *>(runtime);
+
+	reshade::unload_addons();
 
 	switch (device->get_api())
 	{

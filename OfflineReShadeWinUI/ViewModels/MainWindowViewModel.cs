@@ -90,6 +90,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public SettingsViewModel Settings { get; }
     public ObservableCollection<TechniqueViewModel> Techniques { get; } = new();
     public ObservableCollection<EffectControlViewModel> Effects { get; } = new();
+    public ObservableCollection<AddonViewModel> Addons { get; } = new();
     public ObservableCollection<GalleryItemViewModel> GalleryItems { get; } = new();
 
     public AsyncRelayCommand StartPreviewCommand { get; }
@@ -455,6 +456,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         RaiseControlCommandStates();
         Techniques.Clear();
         Effects.Clear();
+        Addons.Clear();
         ControlsChanged?.Invoke();
     }
 
@@ -610,6 +612,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var techniquesList = JsonStateParser.ParseTechniques(state);
             var uniformsList = JsonStateParser.ParseUniforms(state);
             var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
+            var addonsList = JsonStateParser.ParseAddons(state);
             EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
 
             Techniques.Clear();
@@ -619,6 +622,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Effects.Clear();
             foreach (var effect in JsonStateParser.BuildEffects(techniquesList, uniformsList, definitionsList))
                 Effects.Add(effect);
+
+            Addons.Clear();
+            foreach (var addon in addonsList)
+                Addons.Add(addon);
 
             _controlStatePopulated = techniquesList.Count != 0 || uniformsList.Count != 0 || definitionsList.Count != 0;
             ControlStatusText = _controlStatePopulated ? "Ready" : "No effects";

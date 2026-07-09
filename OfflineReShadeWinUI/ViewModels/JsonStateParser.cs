@@ -70,6 +70,34 @@ public static class JsonStateParser
         return result;
     }
 
+    public static IReadOnlyList<AddonViewModel> ParseAddons(JsonElement state)
+    {
+        var result = new List<AddonViewModel>();
+        if (!state.TryGetProperty("addons", out var addonState) || addonState.ValueKind != JsonValueKind.Object)
+            return result;
+        if (!addonState.TryGetProperty("addons", out var addons) || addons.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var item in addons.EnumerateArray())
+        {
+            var name = GetString(item, "name");
+            if (string.IsNullOrWhiteSpace(name))
+                name = GetString(item, "file");
+
+            result.Add(new AddonViewModel(
+                name,
+                GetString(item, "description"),
+                GetString(item, "file"),
+                GetString(item, "author"),
+                GetBool(item, "loaded"),
+                GetBool(item, "external"),
+                GetBool(item, "hasSettingsOverlay"),
+                GetStringArray(item, "overlays")));
+        }
+
+        return result;
+    }
+
     public static bool ParseEffectsEnabled(JsonElement state)
     {
         return !state.TryGetProperty("runtime", out var runtime) || !runtime.TryGetProperty("effectsEnabled", out var enabled) || enabled.GetBoolean();

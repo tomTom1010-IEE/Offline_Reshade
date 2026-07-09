@@ -522,6 +522,7 @@ public sealed partial class MainWindow : Window
     private void BuildControls()
     {
         ControlsPanel.Children.Clear();
+        AddonsPanel.Children.Clear();
         UpdateControlsPanelWidth();
 
         var effectsEnabled = new CheckBox
@@ -568,6 +569,74 @@ public sealed partial class MainWindow : Window
                 Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Gray),
                 TextWrapping = TextWrapping.Wrap
             });
+        }
+
+        BuildAddons();
+    }
+
+    private void BuildAddons()
+    {
+        AddonsPanel.Children.Clear();
+
+        if (ViewModel.Addons.Count == 0)
+        {
+            AddonsPanel.Children.Add(new TextBlock
+            {
+                Text = "No add-ons are loaded. Check AddonPath in OfflinePrototype\\ReShade.ini and restart preview.",
+                Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var addon in ViewModel.Addons)
+        {
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = addon.StatusText + " - " + addon.OverlayText,
+                Foreground = new SolidColorBrush(addon.IsLoaded ? Microsoft.UI.Colors.LightGreen : Microsoft.UI.Colors.Orange),
+                TextWrapping = TextWrapping.Wrap
+            });
+
+            if (!string.IsNullOrWhiteSpace(addon.SourceText))
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = addon.SourceText,
+                    Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            if (!string.IsNullOrWhiteSpace(addon.Description))
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = addon.Description,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            if (addon.HasSettingsOverlay)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Settings overlay registered",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                });
+            }
+
+            foreach (var overlay in addon.Overlays)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Overlay: " + overlay,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            AddonsPanel.Children.Add(CreateSectionExpander(addon.Name, false, panel));
         }
     }
 

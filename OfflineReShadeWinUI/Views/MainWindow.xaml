@@ -216,21 +216,34 @@
               <TextBlock Text="ReShade Controls" FontWeight="SemiBold" />
               <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
-            <ScrollViewer x:Name="ControlsScrollViewer"
-                          Grid.Row="1"
-                          HorizontalScrollBarVisibility="Disabled">
-              <StackPanel Padding="12" Spacing="12">
-                <StackPanel x:Name="ControlsPanel" Spacing="10" />
-                <Expander Header="Log" IsExpanded="False">
-                  <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
-                           IsReadOnly="True"
-                           AcceptsReturn="True"
-                           TextWrapping="Wrap"
-                           FontFamily="Consolas"
-                           MinHeight="180" />
-                </Expander>
-              </StackPanel>
-            </ScrollViewer>
+            <TabView Grid.Row="1"
+                     IsAddTabButtonVisible="False"
+                     CanDragTabs="False"
+                     TabWidthMode="Equal">
+              <TabViewItem Header="FX">
+                <ScrollViewer x:Name="ControlsScrollViewer"
+                              HorizontalScrollBarVisibility="Disabled">
+                  <StackPanel Padding="12" Spacing="12">
+                    <StackPanel x:Name="ControlsPanel" Spacing="10" />
+                    <Expander Header="Log" IsExpanded="False">
+                      <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
+                               IsReadOnly="True"
+                               AcceptsReturn="True"
+                               TextWrapping="Wrap"
+                               FontFamily="Consolas"
+                               MinHeight="180" />
+                    </Expander>
+                  </StackPanel>
+                </ScrollViewer>
+              </TabViewItem>
+              <TabViewItem Header="Add-ons">
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                  <StackPanel x:Name="AddonsPanel"
+                              Padding="12"
+                              Spacing="10" />
+                </ScrollViewer>
+              </TabViewItem>
+            </TabView>
           </Grid>
         </Border>
 
