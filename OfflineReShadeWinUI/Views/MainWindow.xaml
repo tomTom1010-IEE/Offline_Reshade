@@ -242,6 +242,11 @@
                               Spacing="10">
                     <StackPanel x:Name="AddonsPanel"
                                 Spacing="10" />
+                    <Expander Header="WinUI Add-on Controls"
+                              IsExpanded="True">
+                      <StackPanel x:Name="AddonControlsPanel"
+                                  Spacing="10" />
+                    </Expander>
                     <Expander Header="ImGui Capture Debug"
                               IsExpanded="True">
                       <TextBox Text="{x:Bind ViewModel.AddonDebugText, Mode=OneWay}"

@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using System.Globalization;
 using OfflineReShade.WinUI.Services;
 using OfflineReShade.WinUI.ViewModels;
 using WinRT.Interop;
@@ -14,6 +15,7 @@ namespace OfflineReShade.WinUI.Views;
 public sealed partial class MainWindow : Window
 {
     private readonly Dictionary<string, CancellationTokenSource> _uniformUpdateSources = new();
+    private readonly Dictionary<string, CancellationTokenSource> _addonControlUpdateSources = new();
     private readonly PreviewHostService _previewHost;
     private readonly D3DPreviewBridge _d3dPreview = new();
     private readonly DispatcherTimer _gpuPreviewTimer = new();
@@ -38,6 +40,7 @@ public sealed partial class MainWindow : Window
         _previewHost = new PreviewHostService(windowHandle, PreviewSurface);
         ViewModel.Initialize(new SettingsPickerService(() => windowHandle), () => _previewHost.EnsureHandle());
         ViewModel.ControlsChanged += BuildControls;
+        ViewModel.AddonControlsChanged += BuildAddonControls;
         ViewModel.PreviewFrameReceived += frame => PreviewImage.Source = frame;
         ViewModel.PropertyChanged += (_, args) =>
         {
@@ -90,10 +93,13 @@ public sealed partial class MainWindow : Window
                 _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
             _previewHost.Dispose();
             _d3dPreview.Dispose();
+            ViewModel.AddonControlsChanged -= BuildAddonControls;
+            ViewModel.ControlsChanged -= BuildControls;
             ViewModel.Dispose();
         };
 
         BuildControls();
+        BuildAddonControls();
         UpdateControlsPanelWidth();
         PreviewTransportBox.SelectedIndex = ViewModel.Settings.PreviewTransport == "CPU" ? 1 : 0;
         UpdateDepthFormatSelection();
@@ -523,6 +529,7 @@ public sealed partial class MainWindow : Window
     {
         ControlsPanel.Children.Clear();
         AddonsPanel.Children.Clear();
+        AddonControlsPanel.Children.Clear();
         UpdateControlsPanelWidth();
 
         var effectsEnabled = new CheckBox
@@ -572,6 +579,7 @@ public sealed partial class MainWindow : Window
         }
 
         BuildAddons();
+        BuildAddonControls();
     }
 
     private void BuildAddons()
@@ -638,6 +646,177 @@ public sealed partial class MainWindow : Window
 
             AddonsPanel.Children.Add(CreateSectionExpander(addon.Name, false, panel));
         }
+    }
+
+    private void BuildAddonControls()
+    {
+        AddonControlsPanel.Children.Clear();
+
+        if (ViewModel.AddonImGuiControls.Count == 0)
+        {
+            AddonControlsPanel.Children.Add(new TextBlock
+            {
+                Text = "No standard add-on ImGui controls captured yet. Complex custom draw-list UI still needs the native panel fallback.",
+                Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var group in ViewModel.AddonImGuiControls.GroupBy(static control => control.GroupKey))
+        {
+            var panel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            foreach (var control in group)
+                panel.Children.Add(BuildAddonControlEditor(control));
+
+            AddonControlsPanel.Children.Add(CreateSectionExpander(group.Key, true, panel));
+        }
+    }
+
+    private FrameworkElement BuildAddonControlEditor(AddonImGuiControlViewModel control)
+    {
+        if (control.IsButton)
+        {
+            var button = new Button
+            {
+                Content = control.Label,
+                Tag = control,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)button.Tag, "click"));
+            return button;
+        }
+
+        if (control.IsCheckbox)
+        {
+            var checkBox = new CheckBox
+            {
+                Content = control.Label,
+                IsChecked = control.BoolValue,
+                Tag = control
+            };
+            checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)checkBox.Tag, "true"));
+            checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)checkBox.Tag, "false"));
+            return checkBox;
+        }
+
+        if (control.IsNumeric || control.IsCombo)
+        {
+            return BuildAddonNumericEditor(control);
+        }
+
+        return new TextBlock
+        {
+            Text = control.Label,
+            TextWrapping = TextWrapping.Wrap
+        };
+    }
+
+    private FrameworkElement BuildAddonNumericEditor(AddonImGuiControlViewModel control)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+
+        var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
+
+        var numericValue = control.NumericValue;
+        var hasMinimum = TryParseFirstNumber(control.Minimum, out var minimum);
+        var hasMaximum = TryParseFirstNumber(control.Maximum, out var maximum);
+        var hasRange = hasMinimum &&
+            hasMaximum &&
+            maximum > minimum;
+
+        var textBox = new TextBox
+        {
+            Text = control.Value,
+            Tag = control,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+
+        if (hasRange && control.Components <= 1 && !control.IsCombo)
+        {
+            var slider = new Slider
+            {
+                Minimum = minimum,
+                Maximum = maximum,
+                Value = Math.Clamp(numericValue, minimum, maximum),
+                StepFrequency = control.Kind.Contains("int", StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.001,
+                Tag = control,
+                MinWidth = 120,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            slider.ValueChanged += (_, _) =>
+            {
+                var value = slider.Value.ToString("0.######", CultureInfo.InvariantCulture);
+                textBox.Text = value;
+                QueueAddonControlUpdate(control, value);
+            };
+            row.Children.Add(slider);
+        }
+        else
+        {
+            row.Children.Add(new TextBlock
+            {
+                Text = control.Kind,
+                Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+
+        textBox.KeyDown += async (_, args) =>
+        {
+            if (args.Key == Windows.System.VirtualKey.Enter)
+                await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, textBox.Text));
+        };
+        textBox.LostFocus += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, textBox.Text));
+
+        Grid.SetColumn(textBox, 1);
+        row.Children.Add(textBox);
+        panel.Children.Add(row);
+        return panel;
+    }
+
+    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value)
+    {
+        if (_addonControlUpdateSources.TryGetValue(control.Id, out var oldSource))
+            oldSource.Cancel();
+
+        var source = new CancellationTokenSource();
+        _addonControlUpdateSources[control.Id] = source;
+        _ = SendAddonControlUpdateAsync(control, value, source);
+    }
+
+    private async Task SendAddonControlUpdateAsync(AddonImGuiControlViewModel control, string value, CancellationTokenSource source)
+    {
+        try
+        {
+            await Task.Delay(16, source.Token);
+            await ViewModel.SetAddonImGuiValueAsync(control, value);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (_addonControlUpdateSources.TryGetValue(control.Id, out var current) && ReferenceEquals(current, source))
+                _addonControlUpdateSources.Remove(control.Id);
+            source.Dispose();
+        }
+    }
+
+    private static bool TryParseFirstNumber(string text, out double value)
+    {
+        foreach (var token in text.Split(new[] { ',', ';', ' ', '\t', '(', ')' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                return true;
+        }
+
+        value = 0.0;
+        return false;
     }
 
     private FrameworkElement CreateEffectHeader(EffectControlViewModel effect)

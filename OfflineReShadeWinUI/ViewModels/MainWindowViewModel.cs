@@ -92,6 +92,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ObservableCollection<TechniqueViewModel> Techniques { get; } = new();
     public ObservableCollection<EffectControlViewModel> Effects { get; } = new();
     public ObservableCollection<AddonViewModel> Addons { get; } = new();
+    public ObservableCollection<AddonImGuiControlViewModel> AddonImGuiControls { get; } = new();
     public ObservableCollection<GalleryItemViewModel> GalleryItems { get; } = new();
 
     public AsyncRelayCommand StartPreviewCommand { get; }
@@ -115,6 +116,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand PickGalleryOutputFolderCommand { get; }
 
     public event Action? ControlsChanged;
+    public event Action? AddonControlsChanged;
     public event Action<WriteableBitmap>? PreviewFrameReceived;
 
     public bool IsPreviewRunning
@@ -323,6 +325,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await RefreshControlStateAsync();
     }
 
+    public async Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value)
+    {
+        await _rpc.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
+    }
+
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
     {
         if (item == null || !item.IsValid)
@@ -459,8 +466,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Techniques.Clear();
         Effects.Clear();
         Addons.Clear();
+        AddonImGuiControls.Clear();
         AddonDebugText = "No ImGui controls captured yet.";
         ControlsChanged?.Invoke();
+        AddonControlsChanged?.Invoke();
     }
 
     private async Task SavePngAsync()
@@ -616,7 +625,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var uniformsList = JsonStateParser.ParseUniforms(state);
             var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
             var addonsList = JsonStateParser.ParseAddons(state);
-            AddonDebugText = JsonStateParser.ParseAddonUiDebugText(state);
+            ApplyAddonUiState(state);
             EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
 
             Techniques.Clear();
@@ -660,6 +669,22 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         cancellation.Dispose();
     }
 
+    private void ApplyAddonUiState(JsonElement state)
+    {
+        AddonDebugText = JsonStateParser.ParseAddonUiDebugText(state);
+
+        var controls = JsonStateParser.ParseAddonImGuiControls(state);
+        var oldSignature = string.Join('\n', AddonImGuiControls.Select(static control => control.Id + "=" + control.Value));
+        var newSignature = string.Join('\n', controls.Select(static control => control.Id + "=" + control.Value));
+        if (string.Equals(oldSignature, newSignature, StringComparison.Ordinal))
+            return;
+
+        AddonImGuiControls.Clear();
+        foreach (var control in controls)
+            AddonImGuiControls.Add(control);
+        AddonControlsChanged?.Invoke();
+    }
+
     private async Task PollFpsAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -680,7 +705,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     SharedPreviewHeight = info.TryGetProperty("sharedPreviewHeight", out var previewHeight) ? previewHeight.GetUInt32() : 0;
                     FpsText = string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS");
                     var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
-                    AddonDebugText = JsonStateParser.ParseAddonUiDebugText(addonUi);
+                    ApplyAddonUiState(addonUi);
                     if (!_controlStatePopulated && !_isRefreshingControlState)
                         _ = RefreshControlStateAsync();
                 }

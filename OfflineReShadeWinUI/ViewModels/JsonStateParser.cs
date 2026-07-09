@@ -172,6 +172,64 @@ public static class JsonStateParser
         return builder.ToString();
     }
 
+    public static IReadOnlyList<AddonImGuiControlViewModel> ParseAddonImGuiControls(JsonElement state)
+    {
+        var capture = state;
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addonUi", out var addonUi) &&
+            addonUi.ValueKind == JsonValueKind.Object)
+        {
+            capture = addonUi;
+        }
+
+        if (capture.ValueKind != JsonValueKind.Object ||
+            !capture.TryGetProperty("controls", out var controls) ||
+            controls.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<AddonImGuiControlViewModel>();
+        }
+
+        var result = new List<AddonImGuiControlViewModel>();
+        foreach (var control in controls.EnumerateArray())
+        {
+            var kind = GetString(control, "kind");
+            if (!IsRedrawableAddonControl(kind))
+                continue;
+
+            var id = GetString(control, "id");
+            if (string.IsNullOrWhiteSpace(id))
+                continue;
+
+            result.Add(new AddonImGuiControlViewModel(
+                id,
+                GetString(control, "addon"),
+                GetString(control, "overlay"),
+                GetString(control, "window"),
+                kind,
+                GetString(control, "label"),
+                GetString(control, "value"),
+                GetString(control, "min"),
+                GetString(control, "max"),
+                GetInt(control, "components")));
+        }
+
+        return result;
+    }
+
+    private static bool IsRedrawableAddonControl(string kind)
+    {
+        return kind == "button" ||
+            kind == "checkbox" ||
+            kind == "combo" ||
+            kind == "slider_float" ||
+            kind == "slider_int" ||
+            kind == "drag_float" ||
+            kind == "drag_int" ||
+            kind == "input_float" ||
+            kind == "input_int" ||
+            kind == "color";
+    }
+
     public static IReadOnlyList<EffectControlViewModel> BuildEffects(IReadOnlyList<TechniqueViewModel> techniques, IReadOnlyList<UniformViewModel> uniforms, IReadOnlyList<PreprocessorDefinitionViewModel> definitions)
     {
         var enabledEffectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -235,6 +293,11 @@ public static class JsonStateParser
     private static bool GetBool(JsonElement item, string name)
     {
         return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+    }
+
+    private static int GetInt(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetInt32() : 0;
     }
 
     private static double? GetNullableDouble(JsonElement item, string name)

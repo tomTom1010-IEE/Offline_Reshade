@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -50,6 +52,7 @@ namespace reshade::imgui_capture
 	struct widget
 	{
 		int frame = 0;
+		std::string id;
 		std::string addon;
 		std::string overlay;
 		std::string window;
@@ -67,11 +70,13 @@ namespace reshade::imgui_capture
 	static int s_frame = -1;
 	static std::vector<widget> s_widgets;
 	static std::vector<uint32_t> s_requested_versions;
+	static std::vector<std::pair<std::string, std::string>> s_pending_inputs;
 
 	static thread_local bool s_active = false;
 	static thread_local std::string s_current_addon;
 	static thread_local std::string s_current_overlay;
 	static thread_local std::vector<std::string> s_window_stack;
+	static thread_local std::vector<std::pair<std::string, uint32_t>> s_widget_occurrences;
 
 	static std::string json_escape(const std::string &value)
 	{
@@ -102,6 +107,22 @@ namespace reshade::imgui_capture
 	static std::string string_or_empty(const char *value)
 	{
 		return value != nullptr ? value : "";
+	}
+
+	static std::string make_widget_id(const std::string &kind, const std::string &label)
+	{
+		const std::string base = s_current_addon + "|" + s_current_overlay + "|" + (s_window_stack.empty() ? s_current_overlay : s_window_stack.back()) + "|" + kind + "|" + label;
+		for (auto &occurrence : s_widget_occurrences)
+		{
+			if (occurrence.first != base)
+				continue;
+
+			++occurrence.second;
+			return base + "|" + std::to_string(occurrence.second);
+		}
+
+		s_widget_occurrences.emplace_back(base, 1);
+		return base + "|1";
 	}
 
 	static std::string format_float(float value)
@@ -147,6 +168,43 @@ namespace reshade::imgui_capture
 		return result;
 	}
 
+	static std::vector<double> parse_number_values(const std::string &value)
+	{
+		std::vector<double> result;
+		const char *current = value.c_str();
+		while (*current != '\0')
+		{
+			char *end = nullptr;
+			const double parsed = std::strtod(current, &end);
+			if (end == current)
+			{
+				++current;
+				continue;
+			}
+
+			result.push_back(parsed);
+			current = end;
+		}
+		return result;
+	}
+
+	static bool parse_bool_value(const std::string &value, bool &result)
+	{
+		std::string normalized = value;
+		std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		if (normalized == "true" || normalized == "1" || normalized == "on" || normalized == "yes")
+		{
+			result = true;
+			return true;
+		}
+		if (normalized == "false" || normalized == "0" || normalized == "off" || normalized == "no")
+		{
+			result = false;
+			return true;
+		}
+		return false;
+	}
+
 	static std::string format_text_v(const char *fmt, va_list args)
 	{
 		if (fmt == nullptr)
@@ -177,7 +235,22 @@ namespace reshade::imgui_capture
 		}
 	}
 
-	static void add_widget(std::string kind, std::string label, std::string value = {}, std::string minimum = {}, std::string maximum = {}, int components = 0, bool changed = false)
+	static bool consume_input(const std::string &id, std::string &value)
+	{
+		std::lock_guard<std::mutex> lock(s_mutex);
+		for (auto it = s_pending_inputs.begin(); it != s_pending_inputs.end(); ++it)
+		{
+			if (it->first != id)
+				continue;
+
+			value = std::move(it->second);
+			s_pending_inputs.erase(it);
+			return true;
+		}
+		return false;
+	}
+
+	static void add_widget(std::string kind, std::string label, std::string value = {}, std::string minimum = {}, std::string maximum = {}, int components = 0, bool changed = false, std::string id = {})
 	{
 		if (!s_enabled || !s_active)
 			return;
@@ -189,6 +262,7 @@ namespace reshade::imgui_capture
 
 		widget item;
 		item.frame = s_frame;
+		item.id = id.empty() ? make_widget_id(kind, label) : std::move(id);
 		item.addon = s_current_addon;
 		item.overlay = s_current_overlay;
 		item.window = s_window_stack.empty() ? s_current_overlay : s_window_stack.back();
@@ -209,8 +283,30 @@ namespace reshade::imgui_capture
 		if (!enabled)
 		{
 			s_widgets.clear();
+			s_pending_inputs.clear();
 			s_frame = -1;
 		}
+	}
+
+	bool inject_value(const char *id, const char *value)
+	{
+		if (id == nullptr || *id == '\0' || value == nullptr)
+			return false;
+
+		std::lock_guard<std::mutex> lock(s_mutex);
+		for (auto &pending : s_pending_inputs)
+		{
+			if (pending.first == id)
+			{
+				pending.second = value;
+				return true;
+			}
+		}
+
+		if (s_pending_inputs.size() >= 128)
+			s_pending_inputs.erase(s_pending_inputs.begin());
+		s_pending_inputs.emplace_back(id, value);
+		return true;
 	}
 
 	bool is_enabled()
@@ -235,6 +331,7 @@ namespace reshade::imgui_capture
 		s_current_addon = string_or_empty(addon);
 		s_current_overlay = settings ? "Settings" : string_or_empty(overlay);
 		s_window_stack.clear();
+		s_widget_occurrences.clear();
 		add_widget(settings ? "settings_overlay" : "overlay", s_current_overlay);
 	}
 
@@ -244,6 +341,7 @@ namespace reshade::imgui_capture
 		s_current_addon.clear();
 		s_current_overlay.clear();
 		s_window_stack.clear();
+		s_widget_occurrences.clear();
 	}
 
 	std::string to_json()
@@ -266,6 +364,7 @@ namespace reshade::imgui_capture
 				json += ',';
 			const widget &item = s_widgets[i];
 			json += "{\"frame\":" + std::to_string(item.frame);
+			json += ",\"id\":" + json_string(item.id);
 			json += ",\"addon\":" + json_string(item.addon);
 			json += ",\"overlay\":" + json_string(item.overlay);
 			json += ",\"window\":" + json_string(item.window);
@@ -280,6 +379,42 @@ namespace reshade::imgui_capture
 		}
 		json += "]}";
 		return json;
+	}
+
+	static bool apply_float_input(const std::string &id, float *values, int components)
+	{
+		if (values == nullptr || components <= 0)
+			return false;
+
+		std::string injected;
+		if (!consume_input(id, injected))
+			return false;
+
+		const auto parsed = parse_number_values(injected);
+		if (parsed.empty())
+			return false;
+
+		for (int i = 0; i < components; ++i)
+			values[i] = static_cast<float>(parsed[std::min<size_t>(static_cast<size_t>(i), parsed.size() - 1)]);
+		return true;
+	}
+
+	static bool apply_int_input(const std::string &id, int *values, int components)
+	{
+		if (values == nullptr || components <= 0)
+			return false;
+
+		std::string injected;
+		if (!consume_input(id, injected))
+			return false;
+
+		const auto parsed = parse_number_values(injected);
+		if (parsed.empty())
+			return false;
+
+		for (int i = 0; i < components; ++i)
+			values[i] = static_cast<int>(parsed[std::min<size_t>(static_cast<size_t>(i), parsed.size() - 1)]);
+		return true;
 	}
 
 	static bool capture_begin(const char *name, bool *p_open, ImGuiWindowFlags flags)
@@ -322,23 +457,34 @@ namespace reshade::imgui_capture
 
 	static bool capture_button(const char *label, const ImVec2 &size)
 	{
+		const std::string id = make_widget_id("button", string_or_empty(label));
+		std::string injected;
+		const bool injected_click = consume_input(id, injected);
 		const bool result = g_imgui_function_table_19250.Button(label, size);
-		add_widget("button", string_or_empty(label), result ? "clicked" : "", {}, {}, 0, result);
-		return result;
+		add_widget("button", string_or_empty(label), (result || injected_click) ? "clicked" : "", {}, {}, 0, result || injected_click, id);
+		return result || injected_click;
 	}
 
 	static bool capture_small_button(const char *label)
 	{
+		const std::string id = make_widget_id("button", string_or_empty(label));
+		std::string injected;
+		const bool injected_click = consume_input(id, injected);
 		const bool result = g_imgui_function_table_19250.SmallButton(label);
-		add_widget("button", string_or_empty(label), result ? "clicked" : "", {}, {}, 0, result);
-		return result;
+		add_widget("button", string_or_empty(label), (result || injected_click) ? "clicked" : "", {}, {}, 0, result || injected_click, id);
+		return result || injected_click;
 	}
 
 	static bool capture_checkbox(const char *label, bool *v)
 	{
+		const std::string id = make_widget_id("checkbox", string_or_empty(label));
+		std::string injected;
+		bool injected_changed = false;
+		if (v != nullptr && consume_input(id, injected))
+			injected_changed = parse_bool_value(injected, *v);
 		const bool result = g_imgui_function_table_19250.Checkbox(label, v);
-		add_widget("checkbox", string_or_empty(label), v != nullptr ? format_bool(*v) : "", {}, {}, 1, result);
-		return result;
+		add_widget("checkbox", string_or_empty(label), v != nullptr ? format_bool(*v) : "", {}, {}, 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_radio_button(const char *label, bool active)
@@ -364,201 +510,257 @@ namespace reshade::imgui_capture
 
 	static bool capture_combo(const char *label, int *current_item, const char *const items[], int items_count, int popup_max_height_in_items)
 	{
+		const std::string id = make_widget_id("combo", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, current_item, 1);
 		const bool result = g_imgui_function_table_19250.Combo(label, current_item, items, items_count, popup_max_height_in_items);
 		std::string value = current_item != nullptr ? std::to_string(*current_item) : "";
 		if (current_item != nullptr && items != nullptr && *current_item >= 0 && *current_item < items_count && items[*current_item] != nullptr)
 			value += " (" + std::string(items[*current_item]) + ")";
-		add_widget("combo", string_or_empty(label), value, "0", std::to_string(std::max(0, items_count - 1)), 1, result);
-		return result;
+		add_widget("combo", string_or_empty(label), value, "0", std::to_string(std::max(0, items_count - 1)), 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_combo2(const char *label, int *current_item, const char *items_separated_by_zeros, int popup_max_height_in_items)
 	{
+		const std::string id = make_widget_id("combo", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, current_item, 1);
 		const bool result = g_imgui_function_table_19250.Combo2(label, current_item, items_separated_by_zeros, popup_max_height_in_items);
-		add_widget("combo", string_or_empty(label), current_item != nullptr ? std::to_string(*current_item) : "", {}, {}, 1, result);
-		return result;
+		add_widget("combo", string_or_empty(label), current_item != nullptr ? std::to_string(*current_item) : "", {}, {}, 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_float(const char *label, float *v, float v_speed, float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.DragFloat(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", format_float(v_min), format_float(v_max), 1, result);
-		return result;
+		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", format_float(v_min), format_float(v_max), 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_float2(const char *label, float v[2], float v_speed, float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.DragFloat2(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", format_float(v_min), format_float(v_max), 2, result);
-		return result;
+		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", format_float(v_min), format_float(v_max), 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_float3(const char *label, float v[3], float v_speed, float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.DragFloat3(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", format_float(v_min), format_float(v_max), 3, result);
-		return result;
+		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", format_float(v_min), format_float(v_max), 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_float4(const char *label, float v[4], float v_speed, float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.DragFloat4(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", format_float(v_min), format_float(v_max), 4, result);
-		return result;
+		add_widget("drag_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", format_float(v_min), format_float(v_max), 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_int(const char *label, int *v, float v_speed, int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.DragInt(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", std::to_string(v_min), std::to_string(v_max), 1, result);
-		return result;
+		add_widget("drag_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", std::to_string(v_min), std::to_string(v_max), 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_int2(const char *label, int v[2], float v_speed, int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.DragInt2(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", std::to_string(v_min), std::to_string(v_max), 2, result);
-		return result;
+		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", std::to_string(v_min), std::to_string(v_max), 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_int3(const char *label, int v[3], float v_speed, int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.DragInt3(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", std::to_string(v_min), std::to_string(v_max), 3, result);
-		return result;
+		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", std::to_string(v_min), std::to_string(v_max), 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_drag_int4(const char *label, int v[4], float v_speed, int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("drag_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.DragInt4(label, v, v_speed, v_min, v_max, format, flags);
-		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", std::to_string(v_min), std::to_string(v_max), 4, result);
-		return result;
+		add_widget("drag_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", std::to_string(v_min), std::to_string(v_max), 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_float(const char *label, float *v, float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.SliderFloat(label, v, v_min, v_max, format, flags);
-		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", format_float(v_min), format_float(v_max), 1, result);
-		return result;
+		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", format_float(v_min), format_float(v_max), 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_float2(const char *label, float v[2], float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.SliderFloat2(label, v, v_min, v_max, format, flags);
-		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", format_float(v_min), format_float(v_max), 2, result);
-		return result;
+		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", format_float(v_min), format_float(v_max), 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_float3(const char *label, float v[3], float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.SliderFloat3(label, v, v_min, v_max, format, flags);
-		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", format_float(v_min), format_float(v_max), 3, result);
-		return result;
+		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", format_float(v_min), format_float(v_max), 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_float4(const char *label, float v[4], float v_min, float v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.SliderFloat4(label, v, v_min, v_max, format, flags);
-		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", format_float(v_min), format_float(v_max), 4, result);
-		return result;
+		add_widget("slider_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", format_float(v_min), format_float(v_max), 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_int(const char *label, int *v, int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.SliderInt(label, v, v_min, v_max, format, flags);
-		add_widget("slider_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", std::to_string(v_min), std::to_string(v_max), 1, result);
-		return result;
+		add_widget("slider_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", std::to_string(v_min), std::to_string(v_max), 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_int2(const char *label, int v[2], int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.SliderInt2(label, v, v_min, v_max, format, flags);
-		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", std::to_string(v_min), std::to_string(v_max), 2, result);
-		return result;
+		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", std::to_string(v_min), std::to_string(v_max), 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_int3(const char *label, int v[3], int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.SliderInt3(label, v, v_min, v_max, format, flags);
-		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", std::to_string(v_min), std::to_string(v_max), 3, result);
-		return result;
+		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", std::to_string(v_min), std::to_string(v_max), 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_slider_int4(const char *label, int v[4], int v_min, int v_max, const char *format, ImGuiSliderFlags flags)
 	{
+		const std::string id = make_widget_id("slider_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.SliderInt4(label, v, v_min, v_max, format, flags);
-		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", std::to_string(v_min), std::to_string(v_max), 4, result);
-		return result;
+		add_widget("slider_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", std::to_string(v_min), std::to_string(v_max), 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_float(const char *label, float *v, float step, float step_fast, const char *format, ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.InputFloat(label, v, step, step_fast, format, flags);
-		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", {}, {}, 1, result);
-		return result;
+		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float(*v) : "", {}, {}, 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_float2(const char *label, float v[2], const char *format, ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.InputFloat2(label, v, format, flags);
-		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", {}, {}, 2, result);
-		return result;
+		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 2) : "", {}, {}, 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_float3(const char *label, float v[3], const char *format, ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.InputFloat3(label, v, format, flags);
-		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", {}, {}, 3, result);
-		return result;
+		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 3) : "", {}, {}, 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_float4(const char *label, float v[4], const char *format, ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_float", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.InputFloat4(label, v, format, flags);
-		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", {}, {}, 4, result);
-		return result;
+		add_widget("input_float", string_or_empty(label), v != nullptr ? format_float_array(v, 4) : "", {}, {}, 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_int(const char *label, int *v, int step, int step_fast, ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 1);
 		const bool result = g_imgui_function_table_19250.InputInt(label, v, step, step_fast, flags);
-		add_widget("input_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", {}, {}, 1, result);
-		return result;
+		add_widget("input_int", string_or_empty(label), v != nullptr ? std::to_string(*v) : "", {}, {}, 1, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_int2(const char *label, int v[2], ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 2);
 		const bool result = g_imgui_function_table_19250.InputInt2(label, v, flags);
-		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", {}, {}, 2, result);
-		return result;
+		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 2) : "", {}, {}, 2, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_int3(const char *label, int v[3], ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 3);
 		const bool result = g_imgui_function_table_19250.InputInt3(label, v, flags);
-		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", {}, {}, 3, result);
-		return result;
+		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 3) : "", {}, {}, 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_input_int4(const char *label, int v[4], ImGuiInputTextFlags flags)
 	{
+		const std::string id = make_widget_id("input_int", string_or_empty(label));
+		const bool injected_changed = apply_int_input(id, v, 4);
 		const bool result = g_imgui_function_table_19250.InputInt4(label, v, flags);
-		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", {}, {}, 4, result);
-		return result;
+		add_widget("input_int", string_or_empty(label), v != nullptr ? format_int_array(v, 4) : "", {}, {}, 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_color_edit3(const char *label, float col[3], ImGuiColorEditFlags flags)
 	{
+		const std::string id = make_widget_id("color", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, col, 3);
 		const bool result = g_imgui_function_table_19250.ColorEdit3(label, col, flags);
-		add_widget("color", string_or_empty(label), col != nullptr ? format_float_array(col, 3) : "", {}, {}, 3, result);
-		return result;
+		add_widget("color", string_or_empty(label), col != nullptr ? format_float_array(col, 3) : "", {}, {}, 3, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_color_edit4(const char *label, float col[4], ImGuiColorEditFlags flags)
 	{
+		const std::string id = make_widget_id("color", string_or_empty(label));
+		const bool injected_changed = apply_float_input(id, col, 4);
 		const bool result = g_imgui_function_table_19250.ColorEdit4(label, col, flags);
-		add_widget("color", string_or_empty(label), col != nullptr ? format_float_array(col, 4) : "", {}, {}, 4, result);
-		return result;
+		add_widget("color", string_or_empty(label), col != nullptr ? format_float_array(col, 4) : "", {}, {}, 4, result || injected_changed, id);
+		return result || injected_changed;
 	}
 
 	static bool capture_tree_node(const char *label)
@@ -694,6 +896,11 @@ extern "C" __declspec(dllexport) bool ReShadeGetAddonImGuiCaptureJson(char *valu
 	std::memcpy(value, json.c_str(), required_size);
 	*size = required_size;
 	return true;
+}
+
+extern "C" __declspec(dllexport) bool ReShadeInjectAddonImGuiValue(const char *id, const char *value)
+{
+	return reshade::imgui_capture::inject_value(id, value);
 }
 
 extern "C" __declspec(dllexport) const void *ReShadeGetImGuiFunctionTable(uint32_t version)

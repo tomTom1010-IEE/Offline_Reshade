@@ -80,6 +80,7 @@ namespace
 		bool (*get_addon_overlay_state_json)(char *, size_t *) = nullptr;
 		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
 		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
+		bool (*inject_addon_imgui_value)(const char *, const char *) = nullptr;
 	};
 
 	struct shared_preview_state
@@ -575,6 +576,7 @@ namespace
 		result.get_addon_overlay_state_json = reinterpret_cast<decltype(result.get_addon_overlay_state_json)>(GetProcAddress(result.module, "ReShadeGetAddonOverlayStateJson"));
 		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
 		result.get_addon_imgui_capture_json = reinterpret_cast<decltype(result.get_addon_imgui_capture_json)>(GetProcAddress(result.module, "ReShadeGetAddonImGuiCaptureJson"));
+		result.inject_addon_imgui_value = reinterpret_cast<decltype(result.inject_addon_imgui_value)>(GetProcAddress(result.module, "ReShadeInjectAddonImGuiValue"));
 		return result;
 	}
 
@@ -1796,9 +1798,10 @@ namespace
 		using input_watch_callback = std::function<void(bool)>;
 		using addon_state_callback = std::function<std::string()>;
 		using addon_imgui_state_callback = std::function<std::string()>;
+		using addon_imgui_input_callback = std::function<bool(const std::string &, const std::string &)>;
 
-		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state) :
-			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state))
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input))
 		{
 		}
 
@@ -1941,6 +1944,17 @@ namespace
 				if (command.method == "list_addon_imgui_capture")
 				{
 					return make_response(command.id, _addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}");
+				}
+				if (command.method == "set_addon_imgui_value")
+				{
+					std::string id, value;
+					if (!json_get_raw_string(command.params, "id", id) || !json_get_raw_string(command.params, "value", value))
+						return make_error(command.id, "bad_params", "Missing add-on ImGui control id or value.");
+					if (!_addon_imgui_input)
+						return make_error(command.id, "not_supported", "Add-on ImGui input injection is not available.");
+					if (!_addon_imgui_input(id, value))
+						return make_error(command.id, "inject_failed", "Add-on ImGui input injection was not accepted.");
+					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_effects_state")
 				{
@@ -2178,6 +2192,7 @@ namespace
 		input_watch_callback _input_watch;
 		addon_state_callback _addon_state;
 		addon_imgui_state_callback _addon_imgui_state;
+		addon_imgui_input_callback _addon_imgui_input;
 		std::atomic_bool _running = false;
 		std::thread _thread;
 		std::mutex _queue_mutex;
@@ -2531,7 +2546,10 @@ int wmain(int argc, wchar_t **argv)
 		const auto addon_imgui_state = [&]() {
 			return exported_json_string(reshade.get_addon_imgui_capture_json, "{\"available\":false,\"enabled\":false,\"controls\":[]}");
 		};
-		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state);
+		const auto addon_imgui_input = [&](const std::string &id, const std::string &value) {
+			return reshade.inject_addon_imgui_value != nullptr && reshade.inject_addon_imgui_value(id.c_str(), value.c_str());
+		};
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input);
 		control->start();
 	}
 

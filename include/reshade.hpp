@@ -45,6 +45,7 @@ RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlayForAddon(void *module, con
 RESHADE_API_LIBRARY_DECL bool ReShadeGetAddonOverlayStateJson(char *value, size_t *value_size);
 RESHADE_API_LIBRARY_DECL void ReShadeSetAddonImGuiCaptureEnabled(bool enabled);
 RESHADE_API_LIBRARY_DECL bool ReShadeGetAddonImGuiCaptureJson(char *value, size_t *value_size);
+RESHADE_API_LIBRARY_DECL bool ReShadeInjectAddonImGuiValue(const char *id, const char *value);
 
 RESHADE_API_LIBRARY_DECL bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_device, void *opaque_command_queue, void *opaque_swapchain, const char *config_path, reshade::api::effect_runtime **out_runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime);
