@@ -1956,6 +1956,11 @@ namespace
 						return make_error(command.id, "inject_failed", "Add-on ImGui input injection was not accepted.");
 					return make_response(command.id, "{}");
 				}
+				if (command.method == "open_native_addon_panel")
+				{
+					_runtime->open_overlay(true, reshade::api::input_source::none);
+					return make_response(command.id, "{}");
+				}
 				if (command.method == "set_effects_state")
 				{
 					bool enabled = true;

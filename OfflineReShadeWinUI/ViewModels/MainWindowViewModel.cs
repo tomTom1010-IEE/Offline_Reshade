@@ -330,6 +330,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await _rpc.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
     }
 
+    public async Task OpenNativeAddonPanelAsync()
+    {
+        await _rpc.CallAsync("open_native_addon_panel");
+    }
+
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
     {
         if (item == null || !item.IsValid)

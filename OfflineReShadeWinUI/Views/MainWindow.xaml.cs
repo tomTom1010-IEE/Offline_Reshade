@@ -597,6 +597,20 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var nativePanelButton = new Button
+        {
+            Content = "Open native add-on panel",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        nativePanelButton.Click += async (_, _) => await RunUiCommandAsync(ViewModel.OpenNativeAddonPanelAsync);
+        AddonsPanel.Children.Add(nativePanelButton);
+        AddonsPanel.Children.Add(new TextBlock
+        {
+            Text = "Use this fallback for complex add-on UI that cannot be represented by standard WinUI controls yet.",
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+            TextWrapping = TextWrapping.Wrap
+        });
+
         foreach (var addon in ViewModel.Addons)
         {
             var panel = new StackPanel { Spacing = 8 };
