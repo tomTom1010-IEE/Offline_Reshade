@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using OfflineReShade.WinUI.Services;
 using OfflineReShade.WinUI.ViewModels;
@@ -18,6 +19,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _gpuPreviewTimer = new();
     private bool _isPreviewDragging;
     private bool _updatingInputModeSwitch;
+    private string? _draggedEffectName;
     private Point _lastPreviewDragPoint;
     private XamlRoot? _previewXamlRoot;
     private double _previewZoom = 1.0;
@@ -549,7 +551,11 @@ public sealed partial class MainWindow : Window
 
         foreach (var effect in ViewModel.Effects)
         {
-            var expander = CreateSectionExpander(effect.Name, false, BuildEffectPanel(effect), new Thickness(0, 0, 0, 0));
+            var expander = CreateSectionExpander(CreateEffectHeader(effect), false, BuildEffectPanel(effect), new Thickness(0, 0, 0, 0));
+            expander.Tag = effect.Name;
+            expander.AllowDrop = true;
+            expander.DragOver += OnEffectDragOver;
+            expander.Drop += OnEffectDrop;
             expander.Margin = new Thickness(0, 0, 0, 6);
             ControlsPanel.Children.Add(expander);
         }
@@ -563,6 +569,84 @@ public sealed partial class MainWindow : Window
                 TextWrapping = TextWrapping.Wrap
             });
         }
+    }
+
+    private FrameworkElement CreateEffectHeader(EffectControlViewModel effect)
+    {
+        var headerGrid = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition());
+
+        var gripIcon = new TextBlock
+        {
+            Text = "\uE700",
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            FontSize = 13,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var grip = new Border
+        {
+            Width = 28,
+            Height = 28,
+            CornerRadius = new CornerRadius(4),
+            Background = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(1, 255, 255, 255)),
+            Child = gripIcon,
+            Tag = effect.Name,
+            CanDrag = true
+        };
+        grip.DragStarting += OnEffectDragStarting;
+        grip.Tapped += (_, args) => args.Handled = true;
+        ToolTipService.SetToolTip(grip, "Drag to reorder");
+        headerGrid.Children.Add(grip);
+
+        var title = new TextBlock
+        {
+            Text = effect.Name,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        Grid.SetColumn(title, 1);
+        headerGrid.Children.Add(title);
+
+        return headerGrid;
+    }
+
+    private void OnEffectDragStarting(UIElement sender, DragStartingEventArgs args)
+    {
+        if (sender is not FrameworkElement { Tag: string effectName })
+            return;
+
+        _draggedEffectName = effectName;
+        args.Data.RequestedOperation = DataPackageOperation.Move;
+        args.Data.SetText(effectName);
+    }
+
+    private void OnEffectDragOver(object sender, DragEventArgs args)
+    {
+        if (!string.IsNullOrEmpty(_draggedEffectName))
+            args.AcceptedOperation = DataPackageOperation.Move;
+        args.Handled = true;
+    }
+
+    private async void OnEffectDrop(object sender, DragEventArgs args)
+    {
+        args.Handled = true;
+        if (sender is not FrameworkElement { Tag: string targetEffectName } target ||
+            string.IsNullOrEmpty(_draggedEffectName) ||
+            string.Equals(_draggedEffectName, targetEffectName, StringComparison.OrdinalIgnoreCase))
+        {
+            _draggedEffectName = null;
+            return;
+        }
+
+        var draggedEffectName = _draggedEffectName;
+        _draggedEffectName = null;
+        var insertAfter = args.GetPosition(target).Y > target.ActualHeight * 0.5;
+
+        var orderedEffectNames = ViewModel.MoveEffect(draggedEffectName, targetEffectName, insertAfter);
+        BuildControls();
+        await RunUiCommandAsync(() => ViewModel.ReorderEnabledEffectsAsync(orderedEffectNames));
     }
 
     private void UpdateControlsPanelWidth()

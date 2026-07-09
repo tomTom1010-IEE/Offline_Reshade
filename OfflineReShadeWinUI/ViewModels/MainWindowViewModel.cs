@@ -72,7 +72,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ToggleInputModeCommand = new AsyncRelayCommand(ToggleInputModeAsync);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems);
-        BatchApplyCommand = new AsyncRelayCommand(BatchApplyGalleryAsync, () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
+        BatchApplySavePngCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
+        BatchApplyReShadeShotCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
         PickColorCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.ColorPath = path, picker => picker.PickPngAsync()));
         PickDepthCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.DepthPath = path, picker => picker.PickDepthAsync()));
@@ -100,7 +101,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand ToggleInputModeCommand { get; }
     public RelayCommand ToggleGalleryPanelCommand { get; }
     public RelayCommand RefreshGalleryCommand { get; }
-    public AsyncRelayCommand BatchApplyCommand { get; }
+    public AsyncRelayCommand BatchApplySavePngCommand { get; }
+    public AsyncRelayCommand BatchApplyReShadeShotCommand { get; }
     public RelayCommand ToggleSettingsCommand { get; }
     public AsyncRelayCommand PickColorCommand { get; }
     public AsyncRelayCommand PickDepthCommand { get; }
@@ -142,7 +144,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 OnPropertyChanged(nameof(IsGalleryMode));
                 OnPropertyChanged(nameof(InputModeButtonText));
-                BatchApplyCommand.RaiseCanExecuteChanged();
+                RaiseBatchApplyCanExecuteChanged();
                 ScheduleSettingsSave();
             }
         }
@@ -156,7 +158,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set
         {
             if (SetProperty(ref _isBatchApplying, value))
-                BatchApplyCommand.RaiseCanExecuteChanged();
+                RaiseBatchApplyCanExecuteChanged();
         }
     }
     public bool IsGalleryPanelOpen { get => _isGalleryPanelOpen; set => SetProperty(ref _isGalleryPanelOpen, value); }
@@ -228,6 +230,81 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         technique.IsEnabled = enabled;
         await _rpc.CallAsync("set_technique_state", new { id = technique.Id, enabled });
         await RefreshControlStateAsync();
+    }
+
+    public async Task ReorderTechniquesAsync(IReadOnlyList<TechniqueViewModel> techniques)
+    {
+        if (!_rpc.IsConnected || techniques.Count == 0)
+            return;
+
+        var ids = new string[techniques.Count];
+        for (var i = 0; i < techniques.Count; ++i)
+            ids[i] = techniques[i].Id;
+
+        try
+        {
+            await _rpc.CallAsync("reorder_techniques", new { ids });
+        }
+        catch
+        {
+            await RefreshControlStateAsync();
+            throw;
+        }
+    }
+
+    public IReadOnlyList<string> MoveEffect(string draggedEffectName, string targetEffectName, bool insertAfter)
+    {
+        var effects = Effects.ToList();
+        var from = effects.FindIndex(effect => string.Equals(effect.Name, draggedEffectName, StringComparison.OrdinalIgnoreCase));
+        var to = effects.FindIndex(effect => string.Equals(effect.Name, targetEffectName, StringComparison.OrdinalIgnoreCase));
+        if (from < 0 || to < 0 || from == to)
+            return effects.Select(static effect => effect.Name).ToArray();
+
+        var moving = effects[from];
+        effects.RemoveAt(from);
+        if (from < to)
+            --to;
+        if (insertAfter)
+            ++to;
+
+        to = Math.Clamp(to, 0, effects.Count);
+        effects.Insert(to, moving);
+
+        Effects.Clear();
+        foreach (var effect in effects)
+            Effects.Add(effect);
+
+        return effects.Select(static effect => effect.Name).ToArray();
+    }
+
+    public async Task ReorderEnabledEffectsAsync(IReadOnlyList<string> orderedEffectNames)
+    {
+        if (!_rpc.IsConnected || orderedEffectNames.Count == 0)
+            return;
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var orderedTechniques = new List<TechniqueViewModel>();
+
+        foreach (var effectName in orderedEffectNames)
+        {
+            foreach (var technique in Techniques)
+            {
+                if (!technique.IsEnabled ||
+                    !string.Equals(technique.EffectName, effectName, StringComparison.OrdinalIgnoreCase) ||
+                    !ids.Add(technique.Id))
+                    continue;
+
+                orderedTechniques.Add(technique);
+            }
+        }
+
+        foreach (var technique in Techniques)
+        {
+            if (technique.IsEnabled && ids.Add(technique.Id))
+                orderedTechniques.Add(technique);
+        }
+
+        await ReorderTechniquesAsync(orderedTechniques);
     }
 
     public async Task SetUniformAsync(UniformViewModel uniform, object value)
@@ -386,11 +463,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         try
         {
             StatusText = "Saving";
-            LogText = string.Empty;
             var outputDir = Path.GetDirectoryName(ActiveOutputPath);
             if (!string.IsNullOrWhiteSpace(outputDir))
                 Directory.CreateDirectory(outputDir);
-            AppendLog(await _prototype.RunExportAsync(BuildExportArguments()));
+
+            if (_rpc.IsConnected)
+            {
+                if (IsGalleryMode && SelectedGalleryItem != null)
+                    await SelectGalleryItemAsync(SelectedGalleryItem);
+                await _rpc.CallAsync("save_output");
+                AppendLog("Saved live preview output: " + ActiveOutputPath);
+            }
+            else
+            {
+                LogText = string.Empty;
+                AppendLog(await _prototype.RunExportAsync(BuildExportArguments()));
+            }
+
             RefreshOutputInfo();
             StatusText = "Saved";
         }
@@ -403,13 +492,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task ReShadeShotAsync()
     {
-        if (IsGalleryMode && SelectedGalleryItem != null && _rpc.IsConnected)
-            await SelectGalleryItemAsync(SelectedGalleryItem);
-        await _rpc.CallAsync("save_screenshot");
-        AppendLog("Screenshot requested.");
+        try
+        {
+            StatusText = "Saving";
+            if (IsGalleryMode && SelectedGalleryItem != null && _rpc.IsConnected)
+                await SelectGalleryItemAsync(SelectedGalleryItem);
+            await _rpc.CallAsync("save_screenshot");
+            AppendLog("ReShade screenshot saved: " + ActiveOutputPath);
+            RefreshOutputInfo();
+            StatusText = "Saved";
+        }
+        catch (Exception ex)
+        {
+            AppendLog(ex.Message);
+            StatusText = "Failed";
+        }
     }
 
-    private async Task BatchApplyGalleryAsync()
+    private async Task BatchApplyGalleryAsync(string saveMethod, string label)
     {
         if (!IsGalleryMode)
         {
@@ -438,7 +538,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var frameDelay = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
             var delay = await BuildFrameDelayAsync(frameDelay);
 
-            AppendLog($"Batch apply started: {items.Length} item(s), frame delay {frameDelay}.");
+            AppendLog($"Batch {label} started: {items.Length} item(s), frame delay {frameDelay}.");
             for (var i = 0; i < items.Length; ++i)
             {
                 var item = items[i];
@@ -451,15 +551,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 if (delay > TimeSpan.Zero)
                     await Task.Delay(delay);
 
-                await _rpc.CallAsync("save_screenshot");
-                AppendLog($"Batch saved: {item.OutputPath}");
+                await _rpc.CallAsync(saveMethod);
+                AppendLog($"Batch {label} saved: {item.OutputPath}");
             }
 
             if (originalItem?.IsValid == true)
                 await SelectGalleryItemAsync(originalItem);
 
             StatusText = "Batch complete";
-            AppendLog("Batch apply complete.");
+            AppendLog($"Batch {label} complete.");
         }
         catch (Exception ex)
         {
@@ -1121,7 +1221,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ReShadeShotCommand.RaiseCanExecuteChanged();
         ReloadCommand.RaiseCanExecuteChanged();
         SavePresetCommand.RaiseCanExecuteChanged();
-        BatchApplyCommand.RaiseCanExecuteChanged();
+        RaiseBatchApplyCanExecuteChanged();
+    }
+
+    private void RaiseBatchApplyCanExecuteChanged()
+    {
+        BatchApplySavePngCommand.RaiseCanExecuteChanged();
+        BatchApplyReShadeShotCommand.RaiseCanExecuteChanged();
     }
 
     private async Task<TimeSpan> BuildFrameDelayAsync(int frames)

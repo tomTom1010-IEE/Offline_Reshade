@@ -405,7 +405,7 @@ namespace
 			bgra[i + 0] = pixels[i + 2];
 			bgra[i + 1] = pixels[i + 1];
 			bgra[i + 2] = pixels[i + 0];
-			bgra[i + 3] = pixels[i + 3];
+			bgra[i + 3] = 0xFF;
 		}
 
 		if (FAILED(frame->WritePixels(height, width * 4, static_cast<UINT>(bgra.size()), bgra.data())))
@@ -468,10 +468,62 @@ namespace
 		preset << "TechniqueSorting=\n";
 		return preset_path;
 	}
+
+	std::filesystem::path existing_directory(const std::filesystem::path &path)
+	{
+		std::error_code ec;
+		if (!std::filesystem::exists(path, ec) || !std::filesystem::is_directory(path, ec))
+			return {};
+
+		auto normalized = std::filesystem::weakly_canonical(path, ec);
+		return ec ? path.lexically_normal() : normalized;
+	}
+
+	void add_unique_directory(std::vector<std::filesystem::path> &paths, const std::filesystem::path &path)
+	{
+		auto existing = existing_directory(path);
+		if (existing.empty())
+			return;
+
+		const std::wstring value = existing.native();
+		for (const auto &candidate : paths)
+			if (_wcsicmp(candidate.native().c_str(), value.c_str()) == 0)
+				return;
+
+		paths.push_back(std::move(existing));
+	}
+
+	std::string join_search_paths(const std::vector<std::filesystem::path> &paths, bool recursive)
+	{
+		std::string result;
+		for (const auto &path : paths)
+		{
+			if (!result.empty())
+				result += ',';
+			result += path_utf8(path);
+			if (recursive)
+				result += "\\**";
+		}
+		return result;
+	}
+
 	std::filesystem::path make_config(const options &opts, const std::filesystem::path &work_dir, const std::filesystem::path &preset_path)
 	{
 		const std::filesystem::path config_path = work_dir / L"ReShade.ini";
-		const std::filesystem::path texture_dir = opts.effect_dir.parent_path() / L"Textures";
+		const std::filesystem::path program_dir = executable_directory();
+		const std::filesystem::path screenshot_dir = work_dir / L"ReShadeShotTemp";
+		std::filesystem::create_directories(screenshot_dir);
+
+		std::vector<std::filesystem::path> texture_dirs;
+		add_unique_directory(texture_dirs, opts.effect_dir / L"Textures");
+		add_unique_directory(texture_dirs, opts.effect_dir.parent_path() / L"Textures");
+		add_unique_directory(texture_dirs, program_dir / L"Textures");
+		if (texture_dirs.empty())
+			add_unique_directory(texture_dirs, opts.effect_dir);
+
+		std::filesystem::path addon_dir = existing_directory(opts.effect_dir / L"Addons");
+		if (addon_dir.empty())
+			addon_dir = existing_directory(program_dir / L"Addons");
 
 		std::ofstream config(config_path, std::ios::binary);
 		config << "[GENERAL]\n";
@@ -481,23 +533,19 @@ namespace
 		config << "PerformanceMode=0\n";
 		config << "SkipLoadingDisabledEffects=0\n";
 		config << "EffectSearchPaths=" << path_utf8(opts.effect_dir) << "\\**\n";
-		if (std::filesystem::exists(texture_dir))
-			config << "TextureSearchPaths=" << path_utf8(texture_dir) << "\\**\n";
-		else
-			config << "TextureSearchPaths=" << path_utf8(opts.effect_dir) << "\\**\n";
+		config << "TextureSearchPaths=" << join_search_paths(texture_dirs, true) << "\n";
 		config << "PresetPath=" << path_utf8(preset_path) << "\n";
 		config << "PreprocessorDefinitions=OFFLINE_RESHADE=1\n";
+		config << "\n[ADDON]\n";
+		config << "AddonPath=" << (addon_dir.empty() ? std::string() : path_utf8(addon_dir)) << "\n";
 		config << "\n[INPUT]\n";
 		config << "KeyEffects=0,0,0,0\n";
 		config << "KeyOverlay=" << (opts.interactive ? "36,0,0,0" : "0,0,0,0") << "\n";
 		config << "KeyReload=0,0,0,0\n";
 		config << "KeyScreenshot=" << (opts.interactive ? "44,0,0,0" : "0,0,0,0") << "\n";
 		config << "\n[SCREENSHOT]\n";
-		if (!opts.output_path.empty())
-			config << "SavePath=" << path_utf8(opts.output_path.parent_path()) << "\n";
-		else
-			config << "SavePath=.\\\\\n";
-		config << "FileNaming=%AppName%_%Date%_%Time%_%Count%\n";
+		config << "SavePath=" << path_utf8(screenshot_dir) << "\n";
+		config << "FileNaming=ReShadeShot_%Date%_%Time%_%Count%\n";
 		config << "FileFormat=1\n";
 		config << "ClearAlpha=1\n";
 		config << "SaveOverlayShot=0\n";
@@ -733,6 +781,38 @@ namespace
 		return true;
 	}
 
+	bool ensure_private_capture_texture(ID3D11Device *device, IDXGISwapChain *swapchain, ComPtr<ID3D11Texture2D> &texture, uint32_t &capture_width, uint32_t &capture_height)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (device == nullptr || swapchain == nullptr || FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return false;
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		backbuffer->GetDesc(&desc);
+		capture_width = desc.Width;
+		capture_height = desc.Height;
+
+		if (texture != nullptr)
+		{
+			D3D11_TEXTURE2D_DESC existing = {};
+			texture->GetDesc(&existing);
+			if (existing.Width == desc.Width &&
+				existing.Height == desc.Height &&
+				existing.Format == desc.Format &&
+				existing.SampleDesc.Count == desc.SampleDesc.Count &&
+				existing.SampleDesc.Quality == desc.SampleDesc.Quality)
+				return true;
+		}
+
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = 0;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = 0;
+
+		texture.Reset();
+		return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture));
+	}
+
 	bool copy_rgba_to_backbuffer(ID3D11DeviceContext *context, IDXGISwapChain *swapchain, uint32_t width, uint32_t height, const std::vector<uint8_t> &pixels)
 	{
 		ComPtr<ID3D11Texture2D> backbuffer;
@@ -743,14 +823,13 @@ namespace
 		return true;
 	}
 
-	std::vector<uint8_t> read_backbuffer(ID3D11Device *device, ID3D11DeviceContext *context, IDXGISwapChain *swapchain, uint32_t width, uint32_t height)
+	std::vector<uint8_t> read_texture_rgba(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture, uint32_t width, uint32_t height)
 	{
-		ComPtr<ID3D11Texture2D> backbuffer;
-		if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+		if (texture == nullptr)
 			return {};
 
 		D3D11_TEXTURE2D_DESC desc = {};
-		backbuffer->GetDesc(&desc);
+		texture->GetDesc(&desc);
 		desc.Usage = D3D11_USAGE_STAGING;
 		desc.BindFlags = 0;
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -760,19 +839,107 @@ namespace
 		if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging)))
 			return {};
 
-		context->CopyResource(staging.Get(), backbuffer.Get());
+		context->CopyResource(staging.Get(), texture);
 		context->Flush();
 
 		D3D11_MAPPED_SUBRESOURCE mapped = {};
 		if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
 			return {};
 
+		width = std::min(width, desc.Width);
+		height = std::min(height, desc.Height);
 		std::vector<uint8_t> result(static_cast<size_t>(width) * height * 4);
 		for (uint32_t y = 0; y < height; ++y)
 			std::copy_n(static_cast<const uint8_t *>(mapped.pData) + static_cast<size_t>(mapped.RowPitch) * y, width * 4, result.data() + static_cast<size_t>(width) * y * 4);
 
 		context->Unmap(staging.Get(), 0);
 		return result;
+	}
+
+	std::vector<uint8_t> read_backbuffer(ID3D11Device *device, ID3D11DeviceContext *context, IDXGISwapChain *swapchain, uint32_t width, uint32_t height)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return {};
+
+		return read_texture_rgba(device, context, backbuffer.Get(), width, height);
+	}
+
+	bool is_screenshot_file(const std::filesystem::path &path)
+	{
+		const std::wstring ext = path.extension().wstring();
+		return _wcsicmp(ext.c_str(), L".png") == 0 ||
+			_wcsicmp(ext.c_str(), L".bmp") == 0 ||
+			_wcsicmp(ext.c_str(), L".jpg") == 0 ||
+			_wcsicmp(ext.c_str(), L".jpeg") == 0 ||
+			_wcsicmp(ext.c_str(), L".jxl") == 0;
+	}
+
+	void clear_screenshot_temp_dir(const std::filesystem::path &dir)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(dir, ec))
+		{
+			if (!entry.is_regular_file(ec) || !is_screenshot_file(entry.path()))
+				continue;
+			std::filesystem::remove(entry.path(), ec);
+		}
+	}
+
+	std::filesystem::path newest_screenshot_file(const std::filesystem::path &dir)
+	{
+		std::filesystem::path newest;
+		std::filesystem::file_time_type newest_time = std::filesystem::file_time_type::min();
+		std::error_code ec;
+		for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(dir, ec))
+		{
+			if (!entry.is_regular_file(ec) || !is_screenshot_file(entry.path()))
+				continue;
+
+			const std::filesystem::file_time_type write_time = entry.last_write_time(ec);
+			if (!ec && (newest.empty() || write_time > newest_time))
+			{
+				newest = entry.path();
+				newest_time = write_time;
+			}
+		}
+		return newest;
+	}
+
+	std::filesystem::path wait_for_screenshot_file(const std::filesystem::path &dir, std::chrono::milliseconds timeout)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + timeout;
+		std::filesystem::path candidate;
+		uintmax_t last_size = std::numeric_limits<uintmax_t>::max();
+		int stable_count = 0;
+		std::error_code ec;
+
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			const std::filesystem::path newest = newest_screenshot_file(dir);
+			if (!newest.empty())
+			{
+				const uintmax_t size = std::filesystem::file_size(newest, ec);
+				if (!ec && size > 0)
+				{
+					if (newest == candidate && size == last_size)
+					{
+						if (++stable_count >= 2)
+							return newest;
+					}
+					else
+					{
+						candidate = newest;
+						last_size = size;
+						stable_count = 0;
+					}
+				}
+			}
+			Sleep(50);
+		}
+
+		return {};
 	}
 
 	class async_backbuffer_reader
@@ -1600,10 +1767,11 @@ namespace
 
 		using input_switch_callback = std::function<input_switch_result(const std::filesystem::path &, const std::filesystem::path &, const std::string &, const std::string &, const std::string &, const std::filesystem::path &)>;
 		using save_output_callback = std::function<std::string()>;
+		using save_screenshot_callback = std::function<std::string()>;
 		using input_watch_callback = std::function<void(bool)>;
 
-		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, input_watch_callback input_watch) :
-			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _input_watch(std::move(input_watch))
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch))
 		{
 		}
 
@@ -1843,7 +2011,6 @@ namespace
 						techniques.push_back(technique);
 					}
 					_runtime->reorder_techniques(techniques.size(), techniques.data());
-					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_preprocessor_definition")
@@ -1931,11 +2098,21 @@ namespace
 					_runtime->set_current_preset_path(path.c_str());
 					return make_response(command.id, "{}");
 				}
-				if (command.method == "save_screenshot")
+				if (command.method == "save_output")
 				{
 					if (_save_output)
 					{
 						const std::string error = _save_output();
+						if (!error.empty())
+							return make_error(command.id, "save_failed", error);
+					}
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "save_screenshot")
+				{
+					if (_save_screenshot)
+					{
+						const std::string error = _save_screenshot();
 						if (!error.empty())
 							return make_error(command.id, "screenshot_failed", error);
 					}
@@ -1962,6 +2139,7 @@ namespace
 		const shared_preview_state *_shared_preview = nullptr;
 		input_switch_callback _input_switch;
 		save_output_callback _save_output;
+		save_screenshot_callback _save_screenshot;
 		input_watch_callback _input_watch;
 		std::atomic_bool _running = false;
 		std::thread _thread;
@@ -2137,6 +2315,7 @@ int wmain(int argc, wchar_t **argv)
 		std::cerr << "Failed to create shared preview texture.\n";
 		opts.preview_shared = false;
 	}
+	bool output_capture_valid = false;
 
 	const auto load_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::string &new_depth_profile, const std::string &new_depth_downsample, depth_load_status *depth_status = nullptr) -> std::string {
 		image_rgba new_color_image;
@@ -2173,6 +2352,7 @@ int wmain(int argc, wchar_t **argv)
 		color_write_time = file_write_time_or_min(opts.color_path);
 		depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
 		bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
+		output_capture_valid = false;
 		return {};
 	};
 
@@ -2202,30 +2382,12 @@ int wmain(int argc, wchar_t **argv)
 		return { {}, depth_status.fallback_to_kks, depth_status.warning };
 	};
 
-	const auto save_current_output = [&]() -> std::string {
-		std::vector<uint8_t> output = read_backbuffer(device.Get(), context.Get(), swapchain.Get(), width, height);
-		if (output.empty())
-			return "Failed to read backbuffer.";
-		std::error_code ec;
-		std::filesystem::create_directories(opts.output_path.parent_path(), ec);
-		if (!save_png_rgba(wic_factory.Get(), opts.output_path, width, height, output))
-			return "Failed to save output PNG: " + path_utf8(opts.output_path);
-		std::cout << "Wrote " << path_utf8(opts.output_path) << " (" << width << "x" << height << ")\n";
-		return {};
-	};
 	const auto set_input_watch_enabled = [&](bool enabled) {
 		opts.disable_input_watch = !enabled;
 		std::cout << "INPUT_WATCH=" << (enabled ? "1" : "0") << std::endl;
 	};
 
 	std::unique_ptr<control_server> control;
-	if (opts.interactive)
-	{
-		if (opts.control_pipe.empty())
-			opts.control_pipe = "OfflineReShade-" + std::to_string(GetCurrentProcessId());
-		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, set_input_watch_enabled);
-		control->start();
-	}
 
 	std::unique_ptr<preview_stream_server> preview_stream;
 	const uint32_t preview_width = opts.preview_width != 0 ? opts.preview_width : width;
@@ -2247,8 +2409,11 @@ int wmain(int argc, wchar_t **argv)
 	ComPtr<ID3D11RenderTargetView> overlay_rtv;
 	uint32_t overlay_width = 0;
 	uint32_t overlay_height = 0;
+	ComPtr<ID3D11Texture2D> output_capture_texture;
+	uint32_t output_capture_width = 0;
+	uint32_t output_capture_height = 0;
 
-	const auto render_frame = [&](bool present) -> bool {
+	const auto render_frame = [&](bool present, const std::function<bool()> &before_present = {}) -> bool {
 		if (!copy_rgba_to_backbuffer(context.Get(), swapchain.Get(), width, height, color_image.pixels))
 			return false;
 
@@ -2268,12 +2433,62 @@ int wmain(int argc, wchar_t **argv)
 
 		reshade.update_and_present_runtime(runtime);
 
+		if (before_present && !before_present())
+			return false;
+
 		if (present && FAILED(swapchain->Present(0, 0)))
 			return false;
 		if (present && overlay_swapchain != nullptr && FAILED(overlay_swapchain->Present(0, 0)))
 			return false;
 		return true;
 	};
+
+	const auto save_current_output = [&]() -> std::string {
+		if (!output_capture_valid || output_capture_texture == nullptr || output_capture_width == 0 || output_capture_height == 0)
+			return "No captured preview frame is available yet.";
+
+		std::vector<uint8_t> output = read_texture_rgba(device.Get(), context.Get(), output_capture_texture.Get(), output_capture_width, output_capture_height);
+
+		if (output.empty())
+			return "Failed to read last captured preview texture.";
+		std::error_code ec;
+		std::filesystem::create_directories(opts.output_path.parent_path(), ec);
+		if (!save_png_rgba(wic_factory.Get(), opts.output_path, output_capture_width, output_capture_height, output))
+			return "Failed to save output PNG: " + path_utf8(opts.output_path);
+		std::cout << "Wrote " << path_utf8(opts.output_path) << " (" << output_capture_width << "x" << output_capture_height << ")\n";
+		return {};
+	};
+
+	const auto save_reshade_screenshot = [&]() -> std::string {
+		if (!render_frame(false))
+			return "Failed to render screenshot frame.";
+
+		const std::filesystem::path screenshot_dir = work_dir / L"ReShadeShotTemp";
+		clear_screenshot_temp_dir(screenshot_dir);
+		runtime->save_screenshot(nullptr);
+
+		const std::filesystem::path screenshot_path = wait_for_screenshot_file(screenshot_dir, std::chrono::seconds(10));
+		if (screenshot_path.empty())
+			return "ReShade screenshot was not written.";
+
+		std::error_code ec;
+		std::filesystem::create_directories(opts.output_path.parent_path(), ec);
+		std::filesystem::copy_file(screenshot_path, opts.output_path, std::filesystem::copy_options::overwrite_existing, ec);
+		if (ec)
+			return "Failed to copy ReShade screenshot to " + path_utf8(opts.output_path) + ": " + std::to_string(ec.value());
+
+		std::filesystem::remove(screenshot_path, ec);
+		std::cout << "ReShade screenshot " << path_utf8(opts.output_path) << " (" << width << "x" << height << ")\n";
+		return {};
+	};
+
+	if (opts.interactive)
+	{
+		if (opts.control_pipe.empty())
+			opts.control_pipe = "OfflineReShade-" + std::to_string(GetCurrentProcessId());
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled);
+		control->start();
+	}
 
 	if (opts.interactive)
 	{
@@ -2320,7 +2535,15 @@ int wmain(int argc, wchar_t **argv)
 			if (!opts.disable_input_watch && (++input_reload_counter % 10) == 0)
 				reload_inputs_if_changed();
 
-			if (!render_frame(true))
+			bool refreshed_shared_preview = false;
+			bool refreshed_output_capture = false;
+			if (!render_frame(true, [&]() {
+				if (ensure_private_capture_texture(device.Get(), swapchain.Get(), output_capture_texture, output_capture_width, output_capture_height))
+					refreshed_output_capture = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), output_capture_texture.Get());
+				if (opts.preview_shared && shared_preview.texture != nullptr)
+					refreshed_shared_preview = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), shared_preview.texture.Get());
+				return true;
+			}))
 			{
 				std::cerr << "Failed to upload color image to backbuffer.\n";
 				reshade.destroy_runtime(runtime);
@@ -2329,6 +2552,8 @@ int wmain(int argc, wchar_t **argv)
 				return 1;
 			}
 			stats.mark_render_frame();
+			if (refreshed_output_capture)
+				output_capture_valid = true;
 			if (preview_stream != nullptr)
 			{
 				std::vector<uint8_t> backbuffer = preview_reader.submit_and_try_read(context.Get(), swapchain.Get());
@@ -2344,7 +2569,7 @@ int wmain(int argc, wchar_t **argv)
 			}
 			else if (opts.preview_shared && shared_preview.texture != nullptr)
 			{
-				if (copy_backbuffer_to_texture(context.Get(), swapchain.Get(), shared_preview.texture.Get()))
+				if (refreshed_shared_preview)
 					stats.mark_preview_frame();
 			}
 
