@@ -14,6 +14,7 @@ public sealed class AddonImGuiControlViewModel
         string value,
         string minimum,
         string maximum,
+        IReadOnlyList<string> items,
         int components)
     {
         Id = id;
@@ -25,6 +26,7 @@ public sealed class AddonImGuiControlViewModel
         Value = value;
         Minimum = minimum;
         Maximum = maximum;
+        Items = items;
         Components = components;
     }
 
@@ -37,6 +39,7 @@ public sealed class AddonImGuiControlViewModel
     public string Value { get; }
     public string Minimum { get; }
     public string Maximum { get; }
+    public IReadOnlyList<string> Items { get; }
     public int Components { get; }
 
     public string GroupKey => string.IsNullOrWhiteSpace(Overlay) ? Addon : Addon + " / " + Overlay;

@@ -61,6 +61,7 @@ namespace reshade::imgui_capture
 		std::string value;
 		std::string minimum;
 		std::string maximum;
+		std::vector<std::string> items;
 		int components = 0;
 		bool changed = false;
 	};
@@ -205,6 +206,21 @@ namespace reshade::imgui_capture
 		return false;
 	}
 
+	static std::vector<std::string> parse_nul_separated_items(const char *items)
+	{
+		std::vector<std::string> result;
+		if (items == nullptr)
+			return result;
+
+		const char *current = items;
+		while (*current != '\0')
+		{
+			result.emplace_back(current);
+			current += result.back().size() + 1;
+		}
+		return result;
+	}
+
 	static std::string format_text_v(const char *fmt, va_list args)
 	{
 		if (fmt == nullptr)
@@ -250,7 +266,7 @@ namespace reshade::imgui_capture
 		return false;
 	}
 
-	static void add_widget(std::string kind, std::string label, std::string value = {}, std::string minimum = {}, std::string maximum = {}, int components = 0, bool changed = false, std::string id = {})
+	static void add_widget(std::string kind, std::string label, std::string value = {}, std::string minimum = {}, std::string maximum = {}, int components = 0, bool changed = false, std::string id = {}, std::vector<std::string> items = {})
 	{
 		if (!s_enabled || !s_active)
 			return;
@@ -271,6 +287,7 @@ namespace reshade::imgui_capture
 		item.value = std::move(value);
 		item.minimum = std::move(minimum);
 		item.maximum = std::move(maximum);
+		item.items = std::move(items);
 		item.components = components;
 		item.changed = changed;
 		s_widgets.push_back(std::move(item));
@@ -373,6 +390,14 @@ namespace reshade::imgui_capture
 			json += ",\"value\":" + json_string(item.value);
 			json += ",\"min\":" + json_string(item.minimum);
 			json += ",\"max\":" + json_string(item.maximum);
+			json += ",\"items\":[";
+			for (size_t item_index = 0; item_index < item.items.size(); ++item_index)
+			{
+				if (item_index != 0)
+					json += ',';
+				json += json_string(item.items[item_index]);
+			}
+			json += "]";
 			json += ",\"components\":" + std::to_string(item.components);
 			json += ",\"changed\":" + std::string(item.changed ? "true" : "false");
 			json += "}";
@@ -516,7 +541,13 @@ namespace reshade::imgui_capture
 		std::string value = current_item != nullptr ? std::to_string(*current_item) : "";
 		if (current_item != nullptr && items != nullptr && *current_item >= 0 && *current_item < items_count && items[*current_item] != nullptr)
 			value += " (" + std::string(items[*current_item]) + ")";
-		add_widget("combo", string_or_empty(label), value, "0", std::to_string(std::max(0, items_count - 1)), 1, result || injected_changed, id);
+		std::vector<std::string> item_list;
+		if (items != nullptr)
+		{
+			for (int i = 0; i < items_count; ++i)
+				item_list.emplace_back(items[i] != nullptr ? items[i] : "");
+		}
+		add_widget("combo", string_or_empty(label), value, "0", std::to_string(std::max(0, items_count - 1)), 1, result || injected_changed, id, std::move(item_list));
 		return result || injected_changed;
 	}
 
@@ -525,7 +556,8 @@ namespace reshade::imgui_capture
 		const std::string id = make_widget_id("combo", string_or_empty(label));
 		const bool injected_changed = apply_int_input(id, current_item, 1);
 		const bool result = g_imgui_function_table_19250.Combo2(label, current_item, items_separated_by_zeros, popup_max_height_in_items);
-		add_widget("combo", string_or_empty(label), current_item != nullptr ? std::to_string(*current_item) : "", {}, {}, 1, result || injected_changed, id);
+		auto item_list = parse_nul_separated_items(items_separated_by_zeros);
+		add_widget("combo", string_or_empty(label), current_item != nullptr ? std::to_string(*current_item) : "", "0", item_list.empty() ? "" : std::to_string(item_list.size() - 1), 1, result || injected_changed, id, std::move(item_list));
 		return result || injected_changed;
 	}
 

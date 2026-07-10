@@ -729,6 +729,11 @@ public sealed partial class MainWindow : Window
             return checkBox;
         }
 
+        if (control.IsCombo && control.Items.Count != 0)
+        {
+            return BuildAddonComboEditor(control);
+        }
+
         if (control.IsNumeric || control.IsCombo)
         {
             return BuildAddonNumericEditor(control);
@@ -739,6 +744,28 @@ public sealed partial class MainWindow : Window
             Text = control.Label,
             TextWrapping = TextWrapping.Wrap
         };
+    }
+
+    private FrameworkElement BuildAddonComboEditor(AddonImGuiControlViewModel control)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+
+        var combo = new ComboBox
+        {
+            Tag = control,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        foreach (var item in control.Items)
+            combo.Items.Add(item);
+        combo.SelectedIndex = Math.Clamp((int)Math.Round(control.NumericValue), 0, Math.Max(0, combo.Items.Count - 1));
+        combo.SelectionChanged += async (_, _) =>
+        {
+            if (combo.SelectedIndex >= 0)
+                await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)combo.Tag, combo.SelectedIndex.ToString(CultureInfo.InvariantCulture)));
+        };
+        panel.Children.Add(combo);
+        return panel;
     }
 
     private FrameworkElement BuildAddonNumericEditor(AddonImGuiControlViewModel control)

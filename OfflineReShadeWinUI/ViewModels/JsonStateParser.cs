@@ -210,6 +210,7 @@ public static class JsonStateParser
                 GetString(control, "value"),
                 GetString(control, "min"),
                 GetString(control, "max"),
+                GetStringArray(control, "items"),
                 GetInt(control, "components")));
         }
 
