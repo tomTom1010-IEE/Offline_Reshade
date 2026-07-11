@@ -6,6 +6,7 @@
 #pragma once
 
 #include "reshade_api.hpp"
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,17 @@
 
 namespace reshade
 {
+	struct addon_load_diagnostic
+	{
+		std::string file;
+		std::string path;
+		std::string status;
+		std::string stage;
+		std::string message;
+		uint32_t error_code = 0;
+		bool dependency_failure = false;
+	};
+
 	struct addon_info
 	{
 		struct overlay_callback

@@ -10,7 +10,10 @@
 #include "runtime.hpp"
 #include "dll_log.hpp"
 #include "ini_file.hpp"
+#include <algorithm>
 #include <cstring> // std::strlen
+#include <fstream>
+#include <deque>
 
 namespace
 {
@@ -38,6 +41,82 @@ namespace
 	std::string reshade_json_string(const std::string &value)
 	{
 		return "\"" + reshade_json_escape(value) + "\"";
+	}
+
+	const char *offline_event_support(reshade::addon_event event)
+	{
+		using reshade::addon_event;
+		switch (event)
+		{
+		case addon_event::init_device:
+		case addon_event::destroy_device:
+		case addon_event::init_command_list:
+		case addon_event::destroy_command_list:
+		case addon_event::init_command_queue:
+		case addon_event::destroy_command_queue:
+		case addon_event::init_swapchain:
+		case addon_event::destroy_swapchain:
+		case addon_event::init_effect_runtime:
+		case addon_event::destroy_effect_runtime:
+		case addon_event::execute_command_list:
+		case addon_event::present:
+		case addon_event::finish_present:
+		case addon_event::reshade_present:
+		case addon_event::reshade_begin_effects:
+		case addon_event::reshade_finish_effects:
+		case addon_event::reshade_reloaded_effects:
+		case addon_event::reshade_set_uniform_value:
+		case addon_event::reshade_set_technique_state:
+		case addon_event::reshade_overlay:
+		case addon_event::reshade_screenshot:
+		case addon_event::reshade_render_technique:
+		case addon_event::reshade_set_effects_state:
+		case addon_event::reshade_set_current_preset_path:
+		case addon_event::reshade_reorder_techniques:
+		case addon_event::reshade_open_overlay:
+			return "supported";
+		case addon_event::reshade_overlay_uniform_variable:
+		case addon_event::reshade_overlay_technique:
+			return "native_overlay_only";
+		default:
+			return "game_render_stream_unavailable";
+		}
+	}
+
+	std::vector<std::string> read_addon_log_errors(const std::filesystem::path &log_path)
+	{
+		std::ifstream log(log_path, std::ios::binary);
+		if (!log)
+			return {};
+
+		std::deque<std::string> matches;
+		std::string line;
+		while (std::getline(log, line))
+		{
+			if (line.find("| ERROR |") == std::string::npos && line.find("| WARN  |") == std::string::npos)
+				continue;
+
+			bool related = line.find("add-on") != std::string::npos ||
+				line.find("Add-on") != std::string::npos ||
+				line.find("AddonInit") != std::string::npos;
+			for (const reshade::addon_info &info : reshade::addon_loaded_info)
+			{
+				if ((!info.name.empty() && line.find(info.name) != std::string::npos) ||
+					(!info.file.empty() && line.find(info.file) != std::string::npos))
+				{
+					related = true;
+					break;
+				}
+			}
+			if (!related)
+				continue;
+
+			matches.push_back(std::move(line));
+			if (matches.size() > 40)
+				matches.pop_front();
+		}
+
+		return { matches.cbegin(), matches.cend() };
 	}
 }
 
@@ -150,6 +229,36 @@ bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
 
 	std::string json = "{\"available\":true,\"allLoaded\":";
 	json += reshade::addon_all_loaded ? "true" : "false";
+	json += ",\"searchPath\":" + reshade_json_string(reshade::addon_search_path.u8string());
+	std::filesystem::path log_path = reshade::global_config().path();
+	log_path.replace_extension(L".log");
+	json += ",\"logPath\":" + reshade_json_string(log_path.u8string());
+	json += ",\"logErrors\":[";
+	const std::vector<std::string> log_errors = read_addon_log_errors(log_path);
+	for (size_t index = 0; index < log_errors.size(); ++index)
+	{
+		if (index != 0)
+			json += ',';
+		json += reshade_json_string(log_errors[index]);
+	}
+	json += ']';
+	json += ",\"diagnostics\":[";
+	bool first_diagnostic = true;
+	for (const reshade::addon_load_diagnostic &diagnostic : reshade::addon_load_diagnostics)
+	{
+		if (!first_diagnostic)
+			json += ',';
+		first_diagnostic = false;
+		json += "{\"file\":" + reshade_json_string(diagnostic.file);
+		json += ",\"path\":" + reshade_json_string(diagnostic.path);
+		json += ",\"status\":" + reshade_json_string(diagnostic.status);
+		json += ",\"stage\":" + reshade_json_string(diagnostic.stage);
+		json += ",\"message\":" + reshade_json_string(diagnostic.message);
+		json += ",\"errorCode\":" + std::to_string(diagnostic.error_code);
+		json += ",\"dependencyFailure\":" + std::string(diagnostic.dependency_failure ? "true" : "false");
+		json += '}';
+	}
+	json += ']';
 	json += ",\"addons\":[";
 
 	bool first_addon = true;
@@ -168,6 +277,29 @@ bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
 		json += ",\"apiVersion\":" + std::to_string(info.api_version);
 		json += ",\"external\":" + std::string(info.external ? "true" : "false");
 		json += ",\"loaded\":" + std::string(info.handle != nullptr ? "true" : "false");
+		json += ",\"events\":[";
+		bool first_event = true;
+		bool has_limited_event = false;
+		std::vector<uint32_t> emitted_events;
+		for (const std::pair<uint32_t, void *> &registered_event : info.event_callbacks)
+		{
+			if (std::find(emitted_events.cbegin(), emitted_events.cend(), registered_event.first) != emitted_events.cend())
+				continue;
+			emitted_events.push_back(registered_event.first);
+			const auto event = static_cast<reshade::addon_event>(registered_event.first);
+			const char *const support = offline_event_support(event);
+			has_limited_event |= std::strcmp(support, "supported") != 0;
+			if (!first_event)
+				json += ',';
+			first_event = false;
+			json += "{\"name\":" + reshade_json_string(reshade::addon_event_name(event));
+			json += ",\"support\":" + reshade_json_string(support) + '}';
+		}
+		json += ']';
+		json += ",\"offlineCompatibility\":" + reshade_json_string(has_limited_event ? "partial" : "runtime_compatible");
+		const bool has_event_overlay = std::any_of(info.event_callbacks.cbegin(), info.event_callbacks.cend(),
+			[](const std::pair<uint32_t, void *> &event) { return event.first == static_cast<uint32_t>(reshade::addon_event::reshade_overlay); });
+		json += ",\"hasEventOverlay\":" + std::string(has_event_overlay ? "true" : "false");
 #if RESHADE_GUI
 		json += ",\"hasSettingsOverlay\":" + std::string(info.settings_overlay_callback != nullptr ? "true" : "false");
 		json += ",\"overlays\":[";
@@ -198,6 +330,41 @@ bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
 	std::memcpy(value, json.c_str(), required_size);
 	*size = required_size;
 	return true;
+}
+
+void ReShadeSetExternalAddonOverlay(reshade::api::effect_runtime *runtime, const char *addon_name, const char *overlay_name, bool settings)
+{
+	if (runtime == nullptr)
+		return;
+
+	static_cast<reshade::runtime *>(runtime)->set_external_addon_overlay(addon_name, overlay_name, settings);
+}
+
+void ReShadeAddExternalOverlayInputEvent(reshade::api::effect_runtime *runtime, uint32_t message, uintptr_t wparam, intptr_t lparam)
+{
+	if (runtime == nullptr)
+		return;
+
+	static_cast<reshade::runtime *>(runtime)->add_external_overlay_input_event(message, wparam, lparam);
+}
+
+void ReShadeNotifyOfflineInputChanged(reshade::api::effect_runtime *runtime, const char *color_path, const char *depth_path, uint32_t width, uint32_t height, uint64_t generation)
+{
+	if (runtime == nullptr)
+		return;
+
+	reshade::ini_file &config = reshade::ini_file::load_cache(static_cast<reshade::runtime *>(runtime)->get_config_path());
+	config.set("OFFLINE", "Enabled", true);
+	config.set("OFFLINE", "ColorPath", color_path != nullptr ? color_path : "");
+	config.set("OFFLINE", "DepthPath", depth_path != nullptr ? depth_path : "");
+	config.set("OFFLINE", "InputWidth", width);
+	config.set("OFFLINE", "InputHeight", height);
+	config.set("OFFLINE", "InputGeneration", generation);
+}
+
+bool ReShadeIsEffectRuntimeLoading(reshade::api::effect_runtime *runtime)
+{
+	return runtime != nullptr && static_cast<reshade::runtime *>(runtime)->is_loading();
 }
 
 #include "d3d9/d3d9_impl_device.hpp"
@@ -302,6 +469,11 @@ bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_devic
 	}
 
 	reshade::load_addons();
+	reshade::invoke_addon_event<reshade::addon_event::init_device>(swapchain_impl->get_device());
+	if (reshade::api::command_list *const immediate_command_list = graphics_queue_impl->get_immediate_command_list())
+		reshade::invoke_addon_event<reshade::addon_event::init_command_list>(immediate_command_list);
+	reshade::invoke_addon_event<reshade::addon_event::init_command_queue>(graphics_queue_impl);
+	reshade::invoke_addon_event<reshade::addon_event::init_swapchain>(swapchain_impl, false);
 
 	const auto runtime = new reshade::runtime(swapchain_impl, graphics_queue_impl, std::filesystem::u8path(config_path), false);
 	if (!runtime->on_init())
@@ -326,6 +498,12 @@ void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime)
 	static_cast<reshade::runtime *>(runtime)->on_reset();
 
 	delete static_cast<reshade::runtime *>(runtime);
+
+	reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain, false);
+	reshade::invoke_addon_event<reshade::addon_event::destroy_command_queue>(graphics_queue);
+	if (reshade::api::command_list *const immediate_command_list = graphics_queue->get_immediate_command_list())
+		reshade::invoke_addon_event<reshade::addon_event::destroy_command_list>(immediate_command_list);
+	reshade::invoke_addon_event<reshade::addon_event::destroy_device>(device);
 
 	reshade::unload_addons();
 
@@ -360,6 +538,18 @@ void ReShadeSetExternalOverlayTarget(reshade::api::effect_runtime *runtime, void
 
 	static_cast<reshade::runtime *>(runtime)->set_external_overlay_target(reshade::api::resource_view { reinterpret_cast<uintptr_t>(render_target_view) }, width, height);
 }
+void ReShadeBeginPresentEffectRuntime(reshade::api::effect_runtime *runtime)
+{
+	if (runtime == nullptr)
+		return;
+
+	reshade::api::command_queue *const queue = runtime->get_command_queue();
+	reshade::api::swapchain *const swapchain = static_cast<reshade::runtime *>(runtime)->get_swapchain();
+	if (reshade::api::command_list *const immediate_command_list = queue->get_immediate_command_list())
+		reshade::invoke_addon_event<reshade::addon_event::execute_command_list>(queue, immediate_command_list);
+	reshade::invoke_addon_event<reshade::addon_event::present>(queue, swapchain, nullptr, nullptr, 0, nullptr);
+}
+
 void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 {
 	if (runtime == nullptr)
@@ -368,6 +558,16 @@ void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 	static_cast<reshade::runtime *>(runtime)->on_present();
 
 	runtime->get_command_queue()->flush_immediate_command_list();
+}
+
+void ReShadeFinishPresentEffectRuntime(reshade::api::effect_runtime *runtime)
+{
+	if (runtime == nullptr)
+		return;
+
+	reshade::invoke_addon_event<reshade::addon_event::finish_present>(
+		runtime->get_command_queue(),
+		static_cast<reshade::runtime *>(runtime)->get_swapchain());
 }
 
 #endif

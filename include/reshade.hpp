@@ -43,6 +43,10 @@ RESHADE_API_LIBRARY_DECL void ReShadeRegisterOverlayForAddon(void *module, const
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlay(const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlayForAddon(void *module, const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 RESHADE_API_LIBRARY_DECL bool ReShadeGetAddonOverlayStateJson(char *value, size_t *value_size);
+RESHADE_API_LIBRARY_DECL void ReShadeSetExternalAddonOverlay(reshade::api::effect_runtime *runtime, const char *addon_name, const char *overlay_name, bool settings);
+RESHADE_API_LIBRARY_DECL void ReShadeAddExternalOverlayInputEvent(reshade::api::effect_runtime *runtime, uint32_t message, uintptr_t wparam, intptr_t lparam);
+RESHADE_API_LIBRARY_DECL void ReShadeNotifyOfflineInputChanged(reshade::api::effect_runtime *runtime, const char *color_path, const char *depth_path, uint32_t width, uint32_t height, uint64_t generation);
+RESHADE_API_LIBRARY_DECL bool ReShadeIsEffectRuntimeLoading(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeSetAddonImGuiCaptureEnabled(bool enabled);
 RESHADE_API_LIBRARY_DECL bool ReShadeGetAddonImGuiCaptureJson(char *value, size_t *value_size);
 RESHADE_API_LIBRARY_DECL bool ReShadeInjectAddonImGuiValue(const char *id, const char *value);
@@ -50,6 +54,8 @@ RESHADE_API_LIBRARY_DECL bool ReShadeInjectAddonImGuiValue(const char *id, const
 RESHADE_API_LIBRARY_DECL bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_device, void *opaque_command_queue, void *opaque_swapchain, const char *config_path, reshade::api::effect_runtime **out_runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime);
+RESHADE_API_LIBRARY_DECL void ReShadeBeginPresentEffectRuntime(reshade::api::effect_runtime *runtime);
+RESHADE_API_LIBRARY_DECL void ReShadeFinishPresentEffectRuntime(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeSetExternalOverlayTarget(reshade::api::effect_runtime *runtime, void *render_target_view, uint32_t width, uint32_t height);
 
 #else

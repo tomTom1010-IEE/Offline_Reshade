@@ -61,6 +61,9 @@ namespace
 		uint32_t height = 0;
 		uintptr_t parent_hwnd = 0;
 		uintptr_t overlay_hwnd = 0;
+		bool addon_overlay_shared = false;
+		uint32_t addon_overlay_width = 640;
+		uint32_t addon_overlay_height = 360;
 		std::string control_pipe;
 		std::string preview_pipe;
 		bool preview_shared = false;
@@ -76,7 +79,13 @@ namespace
 		bool (*create_runtime)(reshade::api::device_api, void *, void *, void *, const char *, reshade::api::effect_runtime **) = nullptr;
 		void (*destroy_runtime)(reshade::api::effect_runtime *) = nullptr;
 		void (*update_and_present_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*begin_present_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*finish_present_runtime)(reshade::api::effect_runtime *) = nullptr;
 		void (*set_external_overlay_target)(reshade::api::effect_runtime *, void *, uint32_t, uint32_t) = nullptr;
+		void (*set_external_addon_overlay)(reshade::api::effect_runtime *, const char *, const char *, bool) = nullptr;
+		void (*add_external_overlay_input_event)(reshade::api::effect_runtime *, uint32_t, uintptr_t, intptr_t) = nullptr;
+		void (*notify_offline_input_changed)(reshade::api::effect_runtime *, const char *, const char *, uint32_t, uint32_t, uint64_t) = nullptr;
+		bool (*is_runtime_loading)(reshade::api::effect_runtime *) = nullptr;
 		bool (*get_addon_overlay_state_json)(char *, size_t *) = nullptr;
 		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
 		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
@@ -91,10 +100,22 @@ namespace
 		uint32_t height = 0;
 	};
 
+	struct shared_addon_overlay_state
+	{
+		ComPtr<ID3D11Texture2D> texture;
+		ComPtr<ID3D11RenderTargetView> render_target;
+		ComPtr<IDXGIKeyedMutex> keyed_mutex;
+		ComPtr<ID3D11Texture2D> scratch_texture;
+		ComPtr<ID3D11RenderTargetView> scratch_render_target;
+		HANDLE handle = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
 	void print_usage()
 	{
 		std::cout <<
-			"usage: OfflineReShadePrototype [--color <png>] [--depth <png|rfloat>] [--depth-format <raw|rgba>] [--depth-profile <kks|kk>] [--depth-downsample <max2x2|box>] [--effect-dir <dir>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--control-pipe <name>] [--preview-pipe <name>] [--preview-shared] [--preview-width <w> --preview-height <h>] [--interactive] [--disable-input-watch]\n";
+			"usage: OfflineReShadePrototype [--color <png>] [--depth <png|rfloat>] [--depth-format <raw|rgba>] [--depth-profile <kks|kk>] [--depth-downsample <max2x2|box>] [--effect-dir <dir>] [--output <png>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--addon-overlay-shared] [--addon-overlay-width <w> --addon-overlay-height <h>] [--control-pipe <name>] [--preview-pipe <name>] [--preview-shared] [--preview-width <w> --preview-height <h>] [--interactive] [--disable-input-watch]\n";
 	}
 
 	std::wstring widen_utf8(const std::string &value)
@@ -228,6 +249,20 @@ namespace
 			else if (arg == L"--overlay-hwnd")
 			{
 				if (++i >= argc || !parse_hwnd_value(argv[i], opts.overlay_hwnd))
+					return false;
+			}
+			else if (arg == L"--addon-overlay-shared")
+			{
+				opts.addon_overlay_shared = true;
+			}
+			else if (arg == L"--addon-overlay-width")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.addon_overlay_width))
+					return false;
+			}
+			else if (arg == L"--addon-overlay-height")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.addon_overlay_height))
 					return false;
 			}
 			else if (arg == L"--control-pipe")
@@ -511,7 +546,7 @@ namespace
 		return result;
 	}
 
-	std::filesystem::path make_config(const options &opts, const std::filesystem::path &work_dir, const std::filesystem::path &preset_path)
+	std::filesystem::path make_config(const options &opts, const std::filesystem::path &work_dir, const std::filesystem::path &preset_path, uint32_t width, uint32_t height)
 	{
 		const std::filesystem::path config_path = work_dir / L"ReShade.ini";
 		const std::filesystem::path program_dir = executable_directory();
@@ -528,6 +563,8 @@ namespace
 		std::filesystem::path addon_dir = existing_directory(opts.effect_dir / L"Addons");
 		if (addon_dir.empty())
 			addon_dir = existing_directory(program_dir / L"Addons");
+		if (addon_dir.empty())
+			addon_dir = (opts.effect_dir / L"Addons").lexically_normal();
 
 		std::ofstream config(config_path, std::ios::binary);
 		config << "[GENERAL]\n";
@@ -541,7 +578,15 @@ namespace
 		config << "PresetPath=" << path_utf8(preset_path) << "\n";
 		config << "PreprocessorDefinitions=OFFLINE_RESHADE=1\n";
 		config << "\n[ADDON]\n";
-		config << "AddonPath=" << (addon_dir.empty() ? std::string() : path_utf8(addon_dir)) << "\n";
+		config << "AddonPath=" << path_utf8(addon_dir) << "\n";
+		config << "DisabledAddons=Generic Depth\n";
+		config << "\n[OFFLINE]\n";
+		config << "Enabled=1\n";
+		config << "ColorPath=" << path_utf8(opts.color_path) << "\n";
+		config << "DepthPath=" << path_utf8(opts.depth_path) << "\n";
+		config << "InputWidth=" << width << "\n";
+		config << "InputHeight=" << height << "\n";
+		config << "InputGeneration=1\n";
 		config << "\n[INPUT]\n";
 		config << "KeyEffects=0,0,0,0\n";
 		config << "KeyOverlay=" << (opts.interactive ? "36,0,0,0" : "0,0,0,0") << "\n";
@@ -572,7 +617,13 @@ namespace
 		result.create_runtime = reinterpret_cast<decltype(result.create_runtime)>(GetProcAddress(result.module, "ReShadeCreateEffectRuntime"));
 		result.destroy_runtime = reinterpret_cast<decltype(result.destroy_runtime)>(GetProcAddress(result.module, "ReShadeDestroyEffectRuntime"));
 		result.update_and_present_runtime = reinterpret_cast<decltype(result.update_and_present_runtime)>(GetProcAddress(result.module, "ReShadeUpdateAndPresentEffectRuntime"));
+		result.begin_present_runtime = reinterpret_cast<decltype(result.begin_present_runtime)>(GetProcAddress(result.module, "ReShadeBeginPresentEffectRuntime"));
+		result.finish_present_runtime = reinterpret_cast<decltype(result.finish_present_runtime)>(GetProcAddress(result.module, "ReShadeFinishPresentEffectRuntime"));
 		result.set_external_overlay_target = reinterpret_cast<decltype(result.set_external_overlay_target)>(GetProcAddress(result.module, "ReShadeSetExternalOverlayTarget"));
+		result.set_external_addon_overlay = reinterpret_cast<decltype(result.set_external_addon_overlay)>(GetProcAddress(result.module, "ReShadeSetExternalAddonOverlay"));
+		result.add_external_overlay_input_event = reinterpret_cast<decltype(result.add_external_overlay_input_event)>(GetProcAddress(result.module, "ReShadeAddExternalOverlayInputEvent"));
+		result.notify_offline_input_changed = reinterpret_cast<decltype(result.notify_offline_input_changed)>(GetProcAddress(result.module, "ReShadeNotifyOfflineInputChanged"));
+		result.is_runtime_loading = reinterpret_cast<decltype(result.is_runtime_loading)>(GetProcAddress(result.module, "ReShadeIsEffectRuntimeLoading"));
 		result.get_addon_overlay_state_json = reinterpret_cast<decltype(result.get_addon_overlay_state_json)>(GetProcAddress(result.module, "ReShadeGetAddonOverlayStateJson"));
 		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
 		result.get_addon_imgui_capture_json = reinterpret_cast<decltype(result.get_addon_imgui_capture_json)>(GetProcAddress(result.module, "ReShadeGetAddonImGuiCaptureJson"));
@@ -777,6 +828,53 @@ namespace
 		preview.handle = handle;
 		preview.width = width;
 		preview.height = height;
+		return true;
+	}
+
+	bool create_shared_addon_overlay_texture(ID3D11Device *device, uint32_t width, uint32_t height, shared_addon_overlay_state &overlay)
+	{
+		width = std::max(1u, width);
+		height = std::max(1u, height);
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = width;
+		desc.Height = height;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+		ComPtr<ID3D11Texture2D> texture;
+		ComPtr<ID3D11RenderTargetView> render_target;
+		ComPtr<IDXGIKeyedMutex> keyed_mutex;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture)) ||
+			FAILED(device->CreateRenderTargetView(texture.Get(), nullptr, &render_target)) ||
+			FAILED(texture.As(&keyed_mutex)))
+			return false;
+
+		desc.MiscFlags = 0;
+		ComPtr<ID3D11Texture2D> scratch_texture;
+		ComPtr<ID3D11RenderTargetView> scratch_render_target;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &scratch_texture)) ||
+			FAILED(device->CreateRenderTargetView(scratch_texture.Get(), nullptr, &scratch_render_target)))
+			return false;
+
+		ComPtr<IDXGIResource> resource;
+		HANDLE handle = nullptr;
+		if (FAILED(texture.As(&resource)) || FAILED(resource->GetSharedHandle(&handle)) || handle == nullptr)
+			return false;
+
+		overlay.texture = std::move(texture);
+		overlay.render_target = std::move(render_target);
+		overlay.keyed_mutex = std::move(keyed_mutex);
+		overlay.scratch_texture = std::move(scratch_texture);
+		overlay.scratch_render_target = std::move(scratch_render_target);
+		overlay.handle = handle;
+		overlay.width = width;
+		overlay.height = height;
 		return true;
 	}
 
@@ -1481,6 +1579,52 @@ namespace
 
 		value.clear();
 		const std::string raw = match[1].str();
+		const auto hex_value = [](char ch) -> int {
+			if (ch >= '0' && ch <= '9') return ch - '0';
+			if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+			if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+			return -1;
+		};
+		const auto parse_hex4 = [&](size_t offset, uint32_t &codepoint) -> bool {
+			if (offset + 4 > raw.size())
+				return false;
+			codepoint = 0;
+			for (size_t digit = 0; digit < 4; ++digit)
+			{
+				const int nibble = hex_value(raw[offset + digit]);
+				if (nibble < 0)
+					return false;
+				codepoint = (codepoint << 4) | static_cast<uint32_t>(nibble);
+			}
+			return true;
+		};
+		const auto append_utf8 = [&](uint32_t codepoint) -> bool {
+			if (codepoint <= 0x7F)
+				value.push_back(static_cast<char>(codepoint));
+			else if (codepoint <= 0x7FF)
+			{
+				value.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else if (codepoint <= 0xFFFF)
+			{
+				if (codepoint >= 0xD800 && codepoint <= 0xDFFF)
+					return false;
+				value.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else if (codepoint <= 0x10FFFF)
+			{
+				value.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else
+				return false;
+			return true;
+		};
 		for (size_t i = 0; i < raw.size(); ++i)
 		{
 			if (raw[i] == '\\' && i + 1 < raw.size())
@@ -1488,10 +1632,37 @@ namespace
 				const char escaped = raw[++i];
 				switch (escaped)
 				{
+				case '"': value += '"'; break;
+				case '\\': value += '\\'; break;
+				case '/': value += '/'; break;
+				case 'b': value += '\b'; break;
+				case 'f': value += '\f'; break;
 				case 'n': value += '\n'; break;
 				case 'r': value += '\r'; break;
 				case 't': value += '\t'; break;
-				default: value += escaped; break;
+				case 'u':
+				{
+					uint32_t codepoint = 0;
+					if (!parse_hex4(i + 1, codepoint))
+						return false;
+					i += 4;
+
+					if (codepoint >= 0xD800 && codepoint <= 0xDBFF)
+					{
+						if (i + 6 >= raw.size() || raw[i + 1] != '\\' || raw[i + 2] != 'u')
+							return false;
+						uint32_t low_surrogate = 0;
+						if (!parse_hex4(i + 3, low_surrogate) || low_surrogate < 0xDC00 || low_surrogate > 0xDFFF)
+							return false;
+						codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low_surrogate - 0xDC00);
+						i += 6;
+					}
+
+					if (!append_utf8(codepoint))
+						return false;
+					break;
+				}
+				default: return false;
 				}
 			}
 			else
@@ -1799,9 +1970,13 @@ namespace
 		using addon_state_callback = std::function<std::string()>;
 		using addon_imgui_state_callback = std::function<std::string()>;
 		using addon_imgui_input_callback = std::function<bool(const std::string &, const std::string &)>;
+		using addon_overlay_select_callback = std::function<bool(const std::string &, const std::string &, bool)>;
+		using addon_overlay_input_callback = std::function<bool(uint32_t, uintptr_t, intptr_t)>;
+		using addon_overlay_resize_callback = std::function<bool(uint32_t, uint32_t)>;
+		using runtime_loading_callback = std::function<bool()>;
 
-		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input) :
-			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input))
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, const frame_rate_stats *stats, const shared_preview_state *shared_preview, const shared_addon_overlay_state *shared_addon_overlay, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input, addon_overlay_select_callback addon_overlay_select, addon_overlay_input_callback addon_overlay_input, addon_overlay_resize_callback addon_overlay_resize, runtime_loading_callback runtime_loading) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _shared_addon_overlay(shared_addon_overlay), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input)), _addon_overlay_select(std::move(addon_overlay_select)), _addon_overlay_input(std::move(addon_overlay_input)), _addon_overlay_resize(std::move(addon_overlay_resize)), _runtime_loading(std::move(runtime_loading))
 		{
 		}
 
@@ -1924,6 +2099,13 @@ namespace
 			return command->done ? command->response : make_error(id, "stopped", "Control server stopped.");
 		}
 
+		std::string shared_addon_overlay_json() const
+		{
+			return ",\"sharedAddonOverlayHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_addon_overlay != nullptr ? _shared_addon_overlay->handle : nullptr)) +
+				",\"sharedAddonOverlayWidth\":" + std::to_string(_shared_addon_overlay != nullptr ? _shared_addon_overlay->width : 0) +
+				",\"sharedAddonOverlayHeight\":" + std::to_string(_shared_addon_overlay != nullptr ? _shared_addon_overlay->height : 0);
+		}
+
 		std::string execute(control_command &command)
 		{
 			try
@@ -1931,11 +2113,11 @@ namespace
 				if (command.method == "get_runtime_info")
 				{
 					std::string preset = runtime_string([&](char *buffer, size_t *size) { _runtime->get_current_preset_path(buffer, size); });
-					return make_response(command.id, "{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"presetPath\":" + json_string(preset) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"outputPath\":" + json_string(path_utf8(_output_path)) + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + "}");
+					return make_response(command.id, "{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"presetPath\":" + json_string(preset) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"outputPath\":" + json_string(path_utf8(_output_path)) + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + "}");
 				}
 				if (command.method == "list_state")
 				{
-					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
 				}
 				if (command.method == "list_addons" || command.method == "list_addon_overlays")
 				{
@@ -1958,8 +2140,48 @@ namespace
 				}
 				if (command.method == "open_native_addon_panel")
 				{
+					if (_addon_overlay_select)
+						_addon_overlay_select({}, {}, false);
 					_runtime->open_overlay(true, reshade::api::input_source::none);
 					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_native_addon_overlay")
+				{
+					std::string addon, overlay;
+					bool settings = false;
+					bool enabled = true;
+					json_get_raw_string(command.params, "addon", addon);
+					json_get_raw_string(command.params, "overlay", overlay);
+					json_get_bool(command.params, "settings", settings);
+					json_get_bool(command.params, "enabled", enabled);
+					if (!_addon_overlay_select)
+						return make_error(command.id, "not_supported", "External add-on overlay selection is not available.");
+					if (!_addon_overlay_select(enabled ? addon : std::string(), enabled ? overlay : std::string(), enabled && settings))
+						return make_error(command.id, "selection_failed", "The add-on overlay selection was rejected.");
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "send_addon_overlay_input")
+				{
+					int message = 0, wparam = 0, lparam = 0;
+					if (!json_get_int(command.params, "message", message) ||
+						!json_get_int(command.params, "wparam", wparam) ||
+						!json_get_int(command.params, "lparam", lparam))
+						return make_error(command.id, "bad_params", "Missing external add-on overlay input message data.");
+					if (!_addon_overlay_input || !_addon_overlay_input(
+						static_cast<uint32_t>(message),
+						static_cast<uintptr_t>(static_cast<uint32_t>(wparam)),
+						static_cast<intptr_t>(lparam)))
+						return make_error(command.id, "not_supported", "External add-on overlay input is not available.");
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_addon_overlay_size")
+				{
+					int width = 0, height = 0;
+					if (!json_get_int(command.params, "width", width) || !json_get_int(command.params, "height", height) || width <= 0 || height <= 0)
+						return make_error(command.id, "bad_params", "Overlay width and height must be positive.");
+					if (!_addon_overlay_resize || !_addon_overlay_resize(static_cast<uint32_t>(width), static_cast<uint32_t>(height)))
+						return make_error(command.id, "resize_failed", "The shared add-on overlay surface could not be resized.");
+					return make_response(command.id, "{" + shared_addon_overlay_json().substr(1) + "}");
 				}
 				if (command.method == "set_effects_state")
 				{
@@ -2191,6 +2413,7 @@ namespace
 		std::filesystem::path _output_path;
 		const frame_rate_stats *_stats = nullptr;
 		const shared_preview_state *_shared_preview = nullptr;
+		const shared_addon_overlay_state *_shared_addon_overlay = nullptr;
 		input_switch_callback _input_switch;
 		save_output_callback _save_output;
 		save_screenshot_callback _save_screenshot;
@@ -2198,6 +2421,10 @@ namespace
 		addon_state_callback _addon_state;
 		addon_imgui_state_callback _addon_imgui_state;
 		addon_imgui_input_callback _addon_imgui_input;
+		addon_overlay_select_callback _addon_overlay_select;
+		addon_overlay_input_callback _addon_overlay_input;
+		addon_overlay_resize_callback _addon_overlay_resize;
+		runtime_loading_callback _runtime_loading;
 		std::atomic_bool _running = false;
 		std::thread _thread;
 		std::mutex _queue_mutex;
@@ -2298,7 +2525,7 @@ int wmain(int argc, wchar_t **argv)
 
 	const std::filesystem::path work_dir = prototype_directory();
 	const std::filesystem::path preset_path = make_preset(opts, work_dir);
-	const std::filesystem::path config_path = make_config(opts, work_dir, preset_path);
+	const std::filesystem::path config_path = make_config(opts, work_dir, preset_path, width, height);
 
 	const HWND parent_hwnd = reinterpret_cast<HWND>(opts.parent_hwnd);
 	HWND hwnd = create_render_window(width, height, parent_hwnd);
@@ -2365,12 +2592,28 @@ int wmain(int argc, wchar_t **argv)
 	}
 
 	bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
+	uint64_t input_generation = 1;
+	const auto notify_offline_input_changed = [&]() {
+		if (reshade.notify_offline_input_changed == nullptr)
+			return;
+		const std::string color_path = path_utf8(opts.color_path);
+		const std::string depth_path = path_utf8(opts.depth_path);
+		reshade.notify_offline_input_changed(runtime, color_path.c_str(), depth_path.c_str(), width, height, input_generation);
+	};
+	notify_offline_input_changed();
 	frame_rate_stats stats;
 	shared_preview_state shared_preview;
 	if (opts.interactive && opts.preview_shared && !create_shared_preview_texture(device.Get(), width, height, shared_preview))
 	{
 		std::cerr << "Failed to create shared preview texture.\n";
 		opts.preview_shared = false;
+	}
+	shared_addon_overlay_state shared_addon_overlay;
+	if (opts.interactive && opts.addon_overlay_shared &&
+		!create_shared_addon_overlay_texture(device.Get(), opts.addon_overlay_width, opts.addon_overlay_height, shared_addon_overlay))
+	{
+		std::cerr << "Failed to create shared add-on overlay texture.\n";
+		opts.addon_overlay_shared = false;
 	}
 	bool output_capture_valid = false;
 
@@ -2409,6 +2652,8 @@ int wmain(int argc, wchar_t **argv)
 		color_write_time = file_write_time_or_min(opts.color_path);
 		depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
 		bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
+		++input_generation;
+		notify_offline_input_changed();
 		output_capture_valid = false;
 		return {};
 	};
@@ -2474,7 +2719,27 @@ int wmain(int argc, wchar_t **argv)
 		if (!copy_rgba_to_backbuffer(context.Get(), swapchain.Get(), width, height, color_image.pixels))
 			return false;
 
-		if (present && overlay_hwnd != nullptr && reshade.set_external_overlay_target != nullptr)
+		bool addon_overlay_acquired = false;
+		if (present && opts.addon_overlay_shared && shared_addon_overlay.render_target != nullptr && reshade.set_external_overlay_target != nullptr)
+		{
+			addon_overlay_acquired = shared_addon_overlay.keyed_mutex != nullptr &&
+				shared_addon_overlay.keyed_mutex->AcquireSync(0, 0) == S_OK;
+			if (addon_overlay_acquired)
+			{
+				const float clear_color[4] = { 0.08f, 0.085f, 0.095f, 1.0f };
+				context->ClearRenderTargetView(shared_addon_overlay.render_target.Get(), clear_color);
+				reshade.set_external_overlay_target(runtime, shared_addon_overlay.render_target.Get(), shared_addon_overlay.width, shared_addon_overlay.height);
+			}
+			else
+			{
+				// Keep rendering the selected overlay into a private target so input and ImGui
+				// state advance even while WinUI is sampling the last complete shared frame.
+				const float clear_color[4] = { 0.08f, 0.085f, 0.095f, 1.0f };
+				context->ClearRenderTargetView(shared_addon_overlay.scratch_render_target.Get(), clear_color);
+				reshade.set_external_overlay_target(runtime, shared_addon_overlay.scratch_render_target.Get(), shared_addon_overlay.width, shared_addon_overlay.height);
+			}
+		}
+		else if (present && overlay_hwnd != nullptr && reshade.set_external_overlay_target != nullptr)
 		{
 			if (!ensure_overlay_target(device.Get(), context.Get(), overlay_hwnd, overlay_swapchain, overlay_rtv, overlay_width, overlay_height))
 				return false;
@@ -2488,13 +2753,25 @@ int wmain(int argc, wchar_t **argv)
 			reshade.set_external_overlay_target(runtime, nullptr, 0, 0);
 		}
 
+		if (present && reshade.begin_present_runtime != nullptr)
+			reshade.begin_present_runtime(runtime);
 		reshade.update_and_present_runtime(runtime);
+		if (addon_overlay_acquired)
+		{
+			context->Flush();
+			shared_addon_overlay.keyed_mutex->ReleaseSync(1);
+		}
 
 		if (before_present && !before_present())
 			return false;
 
-		if (present && FAILED(swapchain->Present(0, 0)))
-			return false;
+		if (present)
+		{
+			if (FAILED(swapchain->Present(0, 0)))
+				return false;
+			if (reshade.finish_present_runtime != nullptr)
+				reshade.finish_present_runtime(runtime);
+		}
 		if (present && overlay_swapchain != nullptr && FAILED(overlay_swapchain->Present(0, 0)))
 			return false;
 		return true;
@@ -2554,7 +2831,29 @@ int wmain(int argc, wchar_t **argv)
 		const auto addon_imgui_input = [&](const std::string &id, const std::string &value) {
 			return reshade.inject_addon_imgui_value != nullptr && reshade.inject_addon_imgui_value(id.c_str(), value.c_str());
 		};
-		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input);
+		const auto addon_overlay_select = [&](const std::string &addon, const std::string &overlay, bool settings) {
+			if (reshade.set_external_addon_overlay == nullptr)
+				return false;
+			reshade.set_external_addon_overlay(runtime, addon.c_str(), overlay.c_str(), settings);
+			return true;
+		};
+		const auto addon_overlay_input = [&](uint32_t message, uintptr_t wparam, intptr_t lparam) {
+			if (reshade.add_external_overlay_input_event == nullptr)
+				return false;
+			reshade.add_external_overlay_input_event(runtime, message, wparam, lparam);
+			return true;
+		};
+		const auto addon_overlay_resize = [&](uint32_t requested_width, uint32_t requested_height) {
+			if (!opts.addon_overlay_shared)
+				return false;
+			if (shared_addon_overlay.width == requested_width && shared_addon_overlay.height == requested_height)
+				return true;
+			return create_shared_addon_overlay_texture(device.Get(), requested_width, requested_height, shared_addon_overlay);
+		};
+		const auto runtime_loading = [&]() {
+			return reshade.is_runtime_loading != nullptr && reshade.is_runtime_loading(runtime);
+		};
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, opts.addon_overlay_shared ? &shared_addon_overlay : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input, addon_overlay_select, addon_overlay_input, addon_overlay_resize, runtime_loading);
 		control->start();
 	}
 

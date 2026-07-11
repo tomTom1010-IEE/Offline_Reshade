@@ -10,6 +10,7 @@
 #include "dll_log.hpp"
 #include "ini_file.hpp"
 #include <algorithm> // std::find, std::find_if, std::remove, std::remove_if
+#include <system_error>
 #include <Windows.h>
 
 extern void register_addon_depth();
@@ -21,10 +22,8 @@ extern HMODULE g_module_handle;
 
 extern std::filesystem::path get_module_path(HMODULE module);
 
-#if RESHADE_VERBOSE_LOG
-static const char *addon_event_to_string(reshade::addon_event ev)
+const char *reshade::addon_event_name(addon_event ev)
 {
-	using reshade::addon_event;
 	switch (ev)
 	{
 	case addon_event::init_device: return "init_device";
@@ -130,12 +129,13 @@ static const char *addon_event_to_string(reshade::addon_event ev)
 	}
 	return "unknown";
 }
-#endif
 
 #if RESHADE_ADDON == 1
 bool reshade::addon_enabled = true;
 #endif
 bool reshade::addon_all_loaded = true;
+std::filesystem::path reshade::addon_search_path;
+std::vector<reshade::addon_load_diagnostic> reshade::addon_load_diagnostics;
 std::vector<void *> reshade::addon_event_list[static_cast<uint32_t>(reshade::addon_event::max)];
 std::vector<reshade::addon_info> reshade::addon_loaded_info;
 thread_local const reshade::addon_info *reshade::addon_current = nullptr;
@@ -150,6 +150,7 @@ void reshade::load_addons()
 	ini_file &config = global_config();
 
 	addon_all_loaded = true;
+	addon_load_diagnostics.clear();
 
 	std::vector<std::string> disabled_addons;
 	config.get("ADDON", "DisabledAddons", disabled_addons);
@@ -211,9 +212,10 @@ void reshade::load_addons()
 	}
 
 	// Get directory from where to load add-ons from
-	std::filesystem::path addon_search_path = g_reshade_base_path;
+	addon_search_path = g_reshade_base_path;
 	if (config.get("ADDON", "AddonPath", addon_search_path))
 		addon_search_path = g_reshade_base_path / addon_search_path;
+	addon_search_path = addon_search_path.lexically_normal();
 
 	log::message(log::level::info, "Searching for add-ons (*.addon"
 #ifndef _WIN64
@@ -224,6 +226,22 @@ void reshade::load_addons()
 		") in '%s' ...", addon_search_path.u8string().c_str());
 
 	std::error_code ec;
+	const bool addon_path_exists = std::filesystem::exists(addon_search_path, ec);
+	if (!addon_path_exists && !ec)
+	{
+		addon_all_loaded = false;
+		addon_load_diagnostic diagnostic;
+		diagnostic.path = addon_search_path.u8string();
+		diagnostic.status = "failed";
+		diagnostic.stage = "path";
+		diagnostic.error_code = ERROR_PATH_NOT_FOUND;
+		diagnostic.message = "The configured add-on search path does not exist.";
+		addon_load_diagnostics.push_back(std::move(diagnostic));
+		log::message(log::level::warning, "Add-on search path '%s' does not exist. No external add-ons will be loaded.", addon_search_path.u8string().c_str());
+		return;
+	}
+	ec.clear();
+
 	for (std::filesystem::path path : std::filesystem::directory_iterator(addon_search_path, std::filesystem::directory_options::skip_permission_denied, ec))
 	{
 		if (path.extension() != L".addon" &&
@@ -234,9 +252,20 @@ void reshade::load_addons()
 #endif
 			continue;
 
+		addon_load_diagnostic diagnostic;
+		diagnostic.file = path.filename().u8string();
+		diagnostic.path = path.u8string();
+		diagnostic.status = "loading";
+		diagnostic.stage = "scan";
+		addon_load_diagnostics.push_back(std::move(diagnostic));
+		addon_load_diagnostic &load_diagnostic = addon_load_diagnostics.back();
+
 #if RESHADE_ADDON == 1
 		// Indicate that add-ons exist that could not be loaded because this build of ReShade has only limited add-on functionality
 		addon_all_loaded = false;
+		load_diagnostic.status = "skipped";
+		load_diagnostic.stage = "capability";
+		load_diagnostic.message = "This ReShade build has limited add-on support.";
 
 		log::message(log::level::warning, "Skipped loading add-on from '%s' because this build of ReShade has only limited add-on functionality.", path.u8string().c_str());
 #else
@@ -246,6 +275,9 @@ void reshade::load_addons()
 			it != addon_loaded_info.cend())
 		{
 			assert(it->external);
+			load_diagnostic.status = "loaded";
+			load_diagnostic.stage = "external_registration";
+			load_diagnostic.message = "Already registered externally.";
 			continue;
 		}
 
@@ -264,6 +296,9 @@ void reshade::load_addons()
 			info.handle = nullptr;
 			info.external = false;
 			addon_loaded_info.push_back(std::move(info));
+			load_diagnostic.status = "disabled";
+			load_diagnostic.stage = "configuration";
+			load_diagnostic.message = "Disabled by the ReShade configuration.";
 			continue;
 		}
 
@@ -274,6 +309,16 @@ void reshade::load_addons()
 		if (module == nullptr)
 		{
 			const DWORD error_code = GetLastError();
+			load_diagnostic.error_code = error_code;
+			load_diagnostic.status = "failed";
+			load_diagnostic.stage = error_code == ERROR_DLL_INIT_FAILED ? "dll_initialization" : "load_library";
+			load_diagnostic.dependency_failure =
+				error_code == ERROR_MOD_NOT_FOUND ||
+				error_code == ERROR_DLL_NOT_FOUND ||
+				error_code == ERROR_PROC_NOT_FOUND ||
+				error_code == ERROR_BAD_EXE_FORMAT ||
+				error_code == ERROR_INVALID_DLL;
+			load_diagnostic.message = std::system_category().message(static_cast<int>(error_code));
 
 			if (error_code == ERROR_DLL_INIT_FAILED && !addon_loaded_info.empty() && path.filename().u8string() == addon_loaded_info.back().file)
 			{
@@ -281,6 +326,9 @@ void reshade::load_addons()
 				assert(addon_loaded_info.back().handle == nullptr);
 
 				addon_loaded_info.back().external = false;
+				load_diagnostic.status = "disabled";
+				load_diagnostic.stage = "registration";
+				load_diagnostic.message = "The add-on registered successfully but is disabled by configuration.";
 
 				log::message(log::level::warning, "> Add-on failed to initialize or is disabled. Skipped.");
 			}
@@ -296,11 +344,17 @@ void reshade::load_addons()
 		const auto init_func = reinterpret_cast<bool(*)(HMODULE addon_module, HMODULE reshade_module)>(GetProcAddress(module, "AddonInit"));
 		if (init_func != nullptr && !init_func(module, g_module_handle))
 		{
+			load_diagnostic.status = "failed";
+			load_diagnostic.stage = "addon_init";
+			load_diagnostic.message = "AddonInit returned false. See the ReShade log for messages written by the add-on.";
 			if (!addon_loaded_info.empty() && path.filename().u8string() == addon_loaded_info.back().file)
 			{
 				assert(addon_loaded_info.back().handle == nullptr);
 
 				addon_loaded_info.back().external = false;
+				load_diagnostic.status = "disabled";
+				load_diagnostic.stage = "registration";
+				load_diagnostic.message = "The add-on registered successfully but is disabled by configuration.";
 
 				log::message(log::level::warning, "> Add-on failed to initialize or is disabled. Skipped.");
 			}
@@ -317,10 +371,16 @@ void reshade::load_addons()
 		if (addon_info *const registered_info = find_addon(module))
 		{
 			registered_info->external = false;
+			load_diagnostic.status = "loaded";
+			load_diagnostic.stage = "ready";
+			load_diagnostic.message = "Loaded and registered successfully.";
 		}
 		else
 		{
 			addon_all_loaded = false;
+			load_diagnostic.status = "failed";
+			load_diagnostic.stage = "registration";
+			load_diagnostic.message = "The library loaded, but it did not register a ReShade add-on.";
 			log::message(log::level::warning, "No add-on was registered by '%s'. Unloading again ...", path.u8string().c_str());
 
 			FreeLibrary(module);
@@ -329,7 +389,17 @@ void reshade::load_addons()
 	}
 
 	if (ec)
+	{
+		addon_all_loaded = false;
+		addon_load_diagnostic diagnostic;
+		diagnostic.path = addon_search_path.u8string();
+		diagnostic.status = "failed";
+		diagnostic.stage = "scan";
+		diagnostic.error_code = static_cast<uint32_t>(ec.value());
+		diagnostic.message = ec.message();
+		addon_load_diagnostics.push_back(std::move(diagnostic));
 		log::message(log::level::warning, "Failed to iterate all files in '%s' with error code %d!", addon_search_path.u8string().c_str(), ec.value());
+	}
 }
 void reshade::unload_addons()
 {
@@ -585,7 +655,7 @@ void ReShadeRegisterEventForAddon(void *module, reshade::addon_event ev, void *c
 	info->event_callbacks.emplace_back(static_cast<uint32_t>(ev), callback);
 
 #if RESHADE_VERBOSE_LOG
-	reshade::log::message(reshade::log::level::debug, "Registered event callback %p for event %s.", callback, addon_event_to_string(ev));
+	reshade::log::message(reshade::log::level::debug, "Registered event callback %p for event %s.", callback, reshade::addon_event_name(ev));
 #endif
 }
 void ReShadeUnregisterEvent(reshade::addon_event ev, void *callback)
@@ -614,7 +684,7 @@ void ReShadeUnregisterEventForAddon(void *module, reshade::addon_event ev, void 
 	info->event_callbacks.erase(std::remove(info->event_callbacks.begin(), info->event_callbacks.end(), std::make_pair(static_cast<uint32_t>(ev), callback)), info->event_callbacks.end());
 
 #if RESHADE_VERBOSE_LOG
-	reshade::log::message(reshade::log::level::debug, "Unregistered event callback %p for event %s.", callback, addon_event_to_string(ev));
+	reshade::log::message(reshade::log::level::debug, "Unregistered event callback %p for event %s.", callback, reshade::addon_event_name(ev));
 #endif
 }
 

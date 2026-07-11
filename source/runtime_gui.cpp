@@ -17,6 +17,7 @@
 #include "localization.hpp"
 #include "platform_utils.hpp"
 #include "fonts/forkawesome.inl"
+#include <Windows.h>
 #include <cmath> // std::abs, std::ceil, std::floor
 #include <cctype> // std::tolower
 #include <cstdlib> // std::strtol
@@ -28,9 +29,11 @@ extern bool resolve_path(std::filesystem::path &path, std::error_code &ec, const
 namespace reshade::imgui_capture
 {
 	bool is_enabled();
-	void begin_overlay(const char *addon, const char *overlay, bool settings);
+	void begin_overlay(const char *addon, const char *overlay, bool settings, bool capture_only);
 	void end_overlay();
 }
+
+static ImGuiKey virtual_key_to_imgui_key(uint32_t key, intptr_t lparam);
 
 static bool string_contains(const std::string_view text, const std::string_view filter)
 {
@@ -839,7 +842,7 @@ void reshade::runtime::draw_gui()
 	_gather_gpu_statistics = false;
 	_effects_expanded_state &= 2;
 
-	if (!show_splash_window && !show_message_window && !show_statistics_window && !_show_overlay && _preview_texture == std::numeric_limits<size_t>::max()
+	if (!show_splash_window && !show_message_window && !show_statistics_window && !_show_overlay && !_external_addon_overlay_enabled && _preview_texture == std::numeric_limits<size_t>::max()
 #if RESHADE_ADDON
 		&& !has_addon_event<addon_event::reshade_overlay>()
 #endif
@@ -863,11 +866,13 @@ void reshade::runtime::draw_gui()
 	imgui_io.DeltaTime = _last_frame_duration.count() * 1e-9f;
 	imgui_io.DisplaySize.x = static_cast<float>(_external_overlay_enabled ? _external_overlay_width : _width);
 	imgui_io.DisplaySize.y = static_cast<float>(_external_overlay_enabled ? _external_overlay_height : _height);
+	const bool external_addon_surface_active = _external_addon_overlay_enabled && _external_overlay_enabled;
+	// WinUI already displays the system cursor over its SwapChainPanel. Drawing another
+	// ImGui cursor into the shared texture causes both cursors to alternate visually.
+	imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
-	if (_input != nullptr)
+	if (_input != nullptr && !external_addon_surface_active)
 	{
-		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
-
 		// Scale mouse position in case render resolution does not match the window size
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
@@ -996,6 +1001,68 @@ void reshade::runtime::draw_gui()
 		for (ImWchar16 c : _input->text_input())
 			imgui_io.AddInputCharacterUTF16(c);
 	}
+
+	if (_external_addon_overlay_enabled && _external_overlay_enabled)
+	{
+		for (const external_overlay_input_event &event : _external_overlay_input_events)
+		{
+			const bool pressed = event.message == WM_KEYDOWN || event.message == WM_SYSKEYDOWN;
+			switch (event.message)
+			{
+			case WM_SETFOCUS:
+				imgui_io.AddFocusEvent(true);
+				break;
+			case WM_KILLFOCUS:
+				imgui_io.AddFocusEvent(false);
+				break;
+			case WM_MOUSEMOVE:
+				imgui_io.AddMousePosEvent(
+					static_cast<float>(static_cast<int16_t>(event.lparam & 0xFFFF)),
+					static_cast<float>(static_cast<int16_t>((event.lparam >> 16) & 0xFFFF)));
+				break;
+			case WM_MOUSELEAVE:
+				imgui_io.AddMousePosEvent(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+				break;
+			case WM_LBUTTONDOWN:
+			case WM_LBUTTONUP:
+				imgui_io.AddMouseButtonEvent(ImGuiMouseButton_Left, event.message == WM_LBUTTONDOWN);
+				break;
+			case WM_RBUTTONDOWN:
+			case WM_RBUTTONUP:
+				imgui_io.AddMouseButtonEvent(ImGuiMouseButton_Right, event.message == WM_RBUTTONDOWN);
+				break;
+			case WM_MBUTTONDOWN:
+			case WM_MBUTTONUP:
+				imgui_io.AddMouseButtonEvent(ImGuiMouseButton_Middle, event.message == WM_MBUTTONDOWN);
+				break;
+			case WM_XBUTTONDOWN:
+			case WM_XBUTTONUP:
+				imgui_io.AddMouseButtonEvent(HIWORD(event.wparam) == XBUTTON1 ? 3 : 4, event.message == WM_XBUTTONDOWN);
+				break;
+			case WM_MOUSEWHEEL:
+				imgui_io.AddMouseWheelEvent(0.0f, static_cast<float>(static_cast<int16_t>(HIWORD(event.wparam))) / WHEEL_DELTA);
+				break;
+			case WM_MOUSEHWHEEL:
+				imgui_io.AddMouseWheelEvent(static_cast<float>(static_cast<int16_t>(HIWORD(event.wparam))) / WHEEL_DELTA, 0.0f);
+				break;
+			case WM_KEYDOWN:
+			case WM_KEYUP:
+			case WM_SYSKEYDOWN:
+			case WM_SYSKEYUP:
+				if (const ImGuiKey key = virtual_key_to_imgui_key(static_cast<uint32_t>(event.wparam), event.lparam); key != ImGuiKey_None)
+					imgui_io.AddKeyEvent(key, pressed);
+				imgui_io.AddKeyEvent(ImGuiMod_Ctrl, (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+				imgui_io.AddKeyEvent(ImGuiMod_Shift, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+				imgui_io.AddKeyEvent(ImGuiMod_Alt, (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+				imgui_io.AddKeyEvent(ImGuiMod_Super, (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0);
+				break;
+			case WM_CHAR:
+				imgui_io.AddInputCharacterUTF16(static_cast<ImWchar16>(event.wparam));
+				break;
+			}
+		}
+	}
+	_external_overlay_input_events.clear();
 
 	if (_input_gamepad != nullptr)
 	{
@@ -1430,7 +1497,7 @@ void reshade::runtime::draw_gui()
 	}
 
 #if RESHADE_ADDON
-	if (reshade::imgui_capture::is_enabled() && !_show_overlay)
+	if (reshade::imgui_capture::is_enabled() && !_show_overlay && !external_addon_surface_active)
 	{
 		constexpr ImGuiWindowFlags capture_window_flags =
 			ImGuiWindowFlags_NoDecoration |
@@ -1451,6 +1518,9 @@ void reshade::runtime::draw_gui()
 			const auto draw_capture_window = [&](const char *overlay_title, bool settings, void(*callback)(api::effect_runtime *)) {
 				if (callback == nullptr)
 					return;
+				if (_external_addon_overlay_enabled && _external_overlay_enabled && info.name == _external_addon_name && settings == _external_addon_settings &&
+					(settings || _external_addon_overlay == overlay_title))
+					return;
 
 				std::string window_name = "OfflineAddonCapture:";
 				window_name += info.name;
@@ -1463,7 +1533,7 @@ void reshade::runtime::draw_gui()
 				ImGui::SetNextWindowSize(ImVec2(720.0f, 480.0f), ImGuiCond_Always);
 				if (ImGui::Begin(window_name.c_str(), nullptr, capture_window_flags))
 				{
-					reshade::imgui_capture::begin_overlay(info.name.c_str(), overlay_title, settings);
+					reshade::imgui_capture::begin_overlay(info.name.c_str(), overlay_title, settings, true);
 					callback(this);
 					reshade::imgui_capture::end_overlay();
 				}
@@ -1483,6 +1553,64 @@ void reshade::runtime::draw_gui()
 	}
 #endif
 
+#if RESHADE_ADDON
+	if (_external_addon_overlay_enabled && _external_overlay_enabled)
+	{
+		for (const addon_info &info : addon_loaded_info)
+		{
+			if (info.handle == nullptr || info.name != _external_addon_name)
+				continue;
+
+			std::vector<void(*)(api::effect_runtime *)> callbacks;
+			std::string title = _external_addon_overlay;
+			if (_external_addon_settings)
+			{
+				if (info.settings_overlay_callback != nullptr)
+					callbacks.push_back(info.settings_overlay_callback);
+				title = "Settings";
+			}
+			else if (_external_addon_overlay == "@event")
+			{
+				title = "Event Overlay";
+				for (const std::pair<uint32_t, void *> &event : info.event_callbacks)
+					if (event.first == static_cast<uint32_t>(addon_event::reshade_overlay))
+						callbacks.push_back(reinterpret_cast<addon_event_traits<addon_event::reshade_overlay>::decl>(event.second));
+			}
+			else
+			{
+				const auto overlay = std::find_if(info.overlay_callbacks.cbegin(), info.overlay_callbacks.cend(),
+					[this](const addon_info::overlay_callback &candidate) { return candidate.title == _external_addon_overlay; });
+				if (overlay != info.overlay_callbacks.cend())
+					callbacks.push_back(overlay->callback);
+			}
+
+			if (!callbacks.empty())
+			{
+				ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+				ImGui::SetNextWindowSize(imgui_io.DisplaySize, ImGuiCond_Always);
+				const std::string window_name = title + "###offline_external_addon_overlay";
+				if (ImGui::Begin(window_name.c_str(), nullptr,
+					ImGuiWindowFlags_NoMove |
+					ImGuiWindowFlags_NoResize |
+					ImGuiWindowFlags_NoCollapse |
+					ImGuiWindowFlags_NoSavedSettings |
+					ImGuiWindowFlags_NoFocusOnAppearing))
+				{
+					reshade::imgui_capture::begin_overlay(info.name.c_str(), title.c_str(), _external_addon_settings, false);
+					const addon_info *const previous_addon = addon_current;
+					addon_current = &info;
+					for (const auto callback : callbacks)
+						callback(this);
+					addon_current = previous_addon;
+					reshade::imgui_capture::end_overlay();
+				}
+				ImGui::End();
+			}
+			break;
+		}
+	}
+#endif
+
 #if RESHADE_ADDON == 1
 	if (addon_enabled)
 #endif
@@ -1492,6 +1620,8 @@ void reshade::runtime::draw_gui()
 		{
 			for (const addon_info::overlay_callback &widget : info.overlay_callbacks)
 			{
+				if (_external_addon_overlay_enabled && _external_overlay_enabled && info.name == _external_addon_name && !_external_addon_settings && widget.title == _external_addon_overlay)
+					continue;
 				if (widget.title == "OSD" ? show_splash_window : !_show_overlay)
 					continue;
 
@@ -1501,7 +1631,50 @@ void reshade::runtime::draw_gui()
 			}
 		}
 
-		invoke_addon_event<addon_event::reshade_overlay>(this);
+		const bool capture_event_overlays = reshade::imgui_capture::is_enabled() && !_show_overlay && !external_addon_surface_active;
+		const std::vector<void *> &event_callbacks = addon_event_list[static_cast<uint32_t>(addon_event::reshade_overlay)];
+		for (void *const raw_callback : event_callbacks)
+		{
+			const addon_info *const info = find_addon(raw_callback);
+			if (info == nullptr || info->handle == nullptr)
+				continue;
+			if (external_addon_surface_active)
+			{
+				// The selected event overlay was invoked above. Suppress every event overlay here so
+				// callbacks from other add-ons cannot render into the same external target.
+				continue;
+			}
+
+			const auto callback = reinterpret_cast<addon_event_traits<addon_event::reshade_overlay>::decl>(raw_callback);
+			if (capture_event_overlays)
+			{
+				const std::string window_name = "OfflineAddonEventCapture:" + info->name + "###offline_addon_event_capture";
+				ImGui::SetNextWindowPos(ImVec2(-100000.0f, -100000.0f), ImGuiCond_Always);
+				ImGui::SetNextWindowSize(ImVec2(720.0f, 480.0f), ImGuiCond_Always);
+				if (ImGui::Begin(window_name.c_str(), nullptr,
+					ImGuiWindowFlags_NoDecoration |
+					ImGuiWindowFlags_NoDocking |
+					ImGuiWindowFlags_NoInputs |
+					ImGuiWindowFlags_NoSavedSettings |
+					ImGuiWindowFlags_NoBackground))
+				{
+					reshade::imgui_capture::begin_overlay(info->name.c_str(), "Event Overlay", false, true);
+					const addon_info *const previous_addon = addon_current;
+					addon_current = info;
+					callback(this);
+					addon_current = previous_addon;
+					reshade::imgui_capture::end_overlay();
+				}
+				ImGui::End();
+			}
+			else
+			{
+				const addon_info *const previous_addon = addon_current;
+				addon_current = info;
+				callback(this);
+				addon_current = previous_addon;
+			}
+		}
 	}
 #endif
 
@@ -1556,6 +1729,14 @@ void reshade::runtime::draw_gui()
 	_ignore_shortcuts |= ImGui::IsAnyItemActive();
 
 	// Render ImGui widgets and windows
+	if (external_addon_surface_active)
+	{
+		// The SwapChainPanel already owns the real WinUI cursor. Add-ons may change
+		// both the software-cursor flag and cursor shape during their callbacks, so
+		// force both off after every callback and immediately before draw-data is built.
+		imgui_io.MouseDrawCursor = false;
+		ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+	}
 	ImGui::Render();
 
 	if (_primary_input_handler && _input != nullptr)
@@ -5175,6 +5356,97 @@ void reshade::runtime::set_external_overlay_target(api::resource_view target, ui
 	_external_overlay_width = width;
 	_external_overlay_height = height;
 	_external_overlay_enabled = target.handle != 0 && width != 0 && height != 0;
+}
+
+static ImGuiKey virtual_key_to_imgui_key(uint32_t key, intptr_t lparam)
+{
+	if (key >= '0' && key <= '9')
+		return static_cast<ImGuiKey>(ImGuiKey_0 + (key - '0'));
+	if (key >= 'A' && key <= 'Z')
+		return static_cast<ImGuiKey>(ImGuiKey_A + (key - 'A'));
+	if (key >= VK_F1 && key <= VK_F12)
+		return static_cast<ImGuiKey>(ImGuiKey_F1 + (key - VK_F1));
+	if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9)
+		return static_cast<ImGuiKey>(ImGuiKey_Keypad0 + (key - VK_NUMPAD0));
+
+	if (key == VK_SHIFT)
+		key = MapVirtualKeyW(static_cast<uint32_t>((lparam >> 16) & 0xFF), MAPVK_VSC_TO_VK_EX);
+	else if (key == VK_CONTROL)
+		key = (lparam & (1LL << 24)) != 0 ? VK_RCONTROL : VK_LCONTROL;
+	else if (key == VK_MENU)
+		key = (lparam & (1LL << 24)) != 0 ? VK_RMENU : VK_LMENU;
+
+	switch (key)
+	{
+	case VK_TAB: return ImGuiKey_Tab;
+	case VK_LEFT: return ImGuiKey_LeftArrow;
+	case VK_RIGHT: return ImGuiKey_RightArrow;
+	case VK_UP: return ImGuiKey_UpArrow;
+	case VK_DOWN: return ImGuiKey_DownArrow;
+	case VK_PRIOR: return ImGuiKey_PageUp;
+	case VK_NEXT: return ImGuiKey_PageDown;
+	case VK_HOME: return ImGuiKey_Home;
+	case VK_END: return ImGuiKey_End;
+	case VK_INSERT: return ImGuiKey_Insert;
+	case VK_DELETE: return ImGuiKey_Delete;
+	case VK_BACK: return ImGuiKey_Backspace;
+	case VK_SPACE: return ImGuiKey_Space;
+	case VK_RETURN: return (lparam & (1LL << 24)) != 0 ? ImGuiKey_KeypadEnter : ImGuiKey_Enter;
+	case VK_ESCAPE: return ImGuiKey_Escape;
+	case VK_LCONTROL: return ImGuiKey_LeftCtrl;
+	case VK_RCONTROL: return ImGuiKey_RightCtrl;
+	case VK_LSHIFT: return ImGuiKey_LeftShift;
+	case VK_RSHIFT: return ImGuiKey_RightShift;
+	case VK_LMENU: return ImGuiKey_LeftAlt;
+	case VK_RMENU: return ImGuiKey_RightAlt;
+	case VK_LWIN: return ImGuiKey_LeftSuper;
+	case VK_RWIN: return ImGuiKey_RightSuper;
+	case VK_APPS: return ImGuiKey_Menu;
+	case VK_OEM_7: return ImGuiKey_Apostrophe;
+	case VK_OEM_COMMA: return ImGuiKey_Comma;
+	case VK_OEM_MINUS: return ImGuiKey_Minus;
+	case VK_OEM_PERIOD: return ImGuiKey_Period;
+	case VK_OEM_2: return ImGuiKey_Slash;
+	case VK_OEM_1: return ImGuiKey_Semicolon;
+	case VK_OEM_PLUS: return ImGuiKey_Equal;
+	case VK_OEM_4: return ImGuiKey_LeftBracket;
+	case VK_OEM_5: return ImGuiKey_Backslash;
+	case VK_OEM_6: return ImGuiKey_RightBracket;
+	case VK_OEM_3: return ImGuiKey_GraveAccent;
+	case VK_CAPITAL: return ImGuiKey_CapsLock;
+	case VK_SCROLL: return ImGuiKey_ScrollLock;
+	case VK_NUMLOCK: return ImGuiKey_NumLock;
+	case VK_SNAPSHOT: return ImGuiKey_PrintScreen;
+	case VK_PAUSE: return ImGuiKey_Pause;
+	case VK_DECIMAL: return ImGuiKey_KeypadDecimal;
+	case VK_DIVIDE: return ImGuiKey_KeypadDivide;
+	case VK_MULTIPLY: return ImGuiKey_KeypadMultiply;
+	case VK_SUBTRACT: return ImGuiKey_KeypadSubtract;
+	case VK_ADD: return ImGuiKey_KeypadAdd;
+	default: return ImGuiKey_None;
+	}
+}
+
+void reshade::runtime::set_external_addon_overlay(const char *addon_name, const char *overlay_name, bool settings)
+{
+	const bool was_enabled = _external_addon_overlay_enabled;
+	_external_addon_name = addon_name != nullptr ? addon_name : std::string();
+	_external_addon_overlay = overlay_name != nullptr ? overlay_name : std::string();
+	_external_addon_settings = settings;
+	_external_addon_overlay_enabled = !_external_addon_name.empty() && (settings || !_external_addon_overlay.empty());
+
+	if (_external_addon_overlay_enabled && _show_overlay)
+		open_overlay(false, api::input_source::none);
+
+	if (was_enabled != _external_addon_overlay_enabled)
+		invoke_addon_event<addon_event::reshade_open_overlay>(this, _external_addon_overlay_enabled, api::input_source::none);
+}
+
+void reshade::runtime::add_external_overlay_input_event(uint32_t message, uintptr_t wparam, intptr_t lparam)
+{
+	if (_external_overlay_input_events.size() >= 256)
+		_external_overlay_input_events.erase(_external_overlay_input_events.begin());
+	_external_overlay_input_events.push_back({ message, wparam, lparam });
 }
 bool reshade::runtime::open_overlay(bool open, api::input_source source)
 {

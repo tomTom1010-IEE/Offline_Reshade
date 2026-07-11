@@ -19,8 +19,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _fpsCancellation;
     private CancellationTokenSource? _settingsSaveCancellation;
     private SettingsPickerService? _picker;
-    private Func<IntPtr>? _previewHostHandleProvider;
-    private Func<IntPtr>? _addonOverlayHostHandleProvider;
     private bool _isPreviewRunning;
     private bool _isSettingsOpen;
     private bool _isBatchApplying;
@@ -31,12 +29,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _fpsText = string.Empty;
     private string _logText = string.Empty;
     private string _addonDebugText = "No ImGui controls captured yet.";
+    private string _addonSearchPath = string.Empty;
+    private string _addonLogPath = string.Empty;
+    private bool _allAddonsLoaded = true;
     private string _inputMode = "RealTime";
     private bool _isGalleryPanelOpen = true;
     private GalleryItemViewModel? _selectedGalleryItem;
     private ulong _sharedPreviewHandle;
     private uint _sharedPreviewWidth;
     private uint _sharedPreviewHeight;
+    private ulong _sharedAddonOverlayHandle;
+    private uint _sharedAddonOverlayWidth;
+    private uint _sharedAddonOverlayHeight;
     private bool _isRestoringSettings;
     private bool _isDisposed;
     private bool _controlStatePopulated;
@@ -93,6 +97,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ObservableCollection<TechniqueViewModel> Techniques { get; } = new();
     public ObservableCollection<EffectControlViewModel> Effects { get; } = new();
     public ObservableCollection<AddonViewModel> Addons { get; } = new();
+    public ObservableCollection<AddonDiagnosticViewModel> AddonDiagnostics { get; } = new();
+    public ObservableCollection<string> AddonLogErrors { get; } = new();
+    public ObservableCollection<AddonOverlayViewModel> AddonOverlays { get; } = new();
     public ObservableCollection<AddonImGuiControlViewModel> AddonImGuiControls { get; } = new();
     public ObservableCollection<GalleryItemViewModel> GalleryItems { get; } = new();
 
@@ -118,6 +125,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public event Action? ControlsChanged;
     public event Action? AddonControlsChanged;
+    public event Action? AddonControlValuesChanged;
     public event Action<WriteableBitmap>? PreviewFrameReceived;
 
     public bool IsPreviewRunning
@@ -141,6 +149,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public string FpsText { get => _fpsText; private set => SetProperty(ref _fpsText, value); }
     public string LogText { get => _logText; private set => SetProperty(ref _logText, value); }
     public string AddonDebugText { get => _addonDebugText; private set => SetProperty(ref _addonDebugText, value); }
+    public string AddonSearchPath { get => _addonSearchPath; private set => SetProperty(ref _addonSearchPath, value); }
+    public string AddonLogPath { get => _addonLogPath; private set => SetProperty(ref _addonLogPath, value); }
+    public bool AllAddonsLoaded { get => _allAddonsLoaded; private set => SetProperty(ref _allAddonsLoaded, value); }
     public string InputMode
     {
         get => _inputMode;
@@ -172,12 +183,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ulong SharedPreviewHandle { get => _sharedPreviewHandle; private set => SetProperty(ref _sharedPreviewHandle, value); }
     public uint SharedPreviewWidth { get => _sharedPreviewWidth; private set => SetProperty(ref _sharedPreviewWidth, value); }
     public uint SharedPreviewHeight { get => _sharedPreviewHeight; private set => SetProperty(ref _sharedPreviewHeight, value); }
+    public ulong SharedAddonOverlayHandle { get => _sharedAddonOverlayHandle; private set => SetProperty(ref _sharedAddonOverlayHandle, value); }
+    public uint SharedAddonOverlayWidth { get => _sharedAddonOverlayWidth; private set => SetProperty(ref _sharedAddonOverlayWidth, value); }
+    public uint SharedAddonOverlayHeight { get => _sharedAddonOverlayHeight; private set => SetProperty(ref _sharedAddonOverlayHeight, value); }
 
-    public void Initialize(SettingsPickerService picker, Func<IntPtr>? previewHostHandleProvider = null, Func<IntPtr>? addonOverlayHostHandleProvider = null)
+    public void Initialize(SettingsPickerService picker)
     {
         _picker = picker;
-        _previewHostHandleProvider = previewHostHandleProvider;
-        _addonOverlayHostHandleProvider = addonOverlayHostHandleProvider;
     }
 
     private void RestorePersistedSettings()
@@ -337,6 +349,45 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await _rpc.CallAsync("open_native_addon_panel");
     }
 
+    public async Task SelectNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
+    {
+        await _rpc.CallAsync("set_native_addon_overlay", new
+        {
+            enabled = overlay != null,
+            addon = overlay?.AddonName ?? string.Empty,
+            overlay = overlay?.Title ?? string.Empty,
+            settings = overlay?.IsSettings ?? false
+        });
+    }
+
+    public async Task SendAddonOverlayInputAsync(PreviewHostInputMessage input)
+    {
+        if (!_rpc.IsConnected)
+            return;
+
+        try
+        {
+            await _rpc.CallAsync("send_addon_overlay_input", new
+            {
+                message = unchecked((int)input.Message),
+                wparam = unchecked((int)input.WParam),
+                lparam = unchecked((int)input.LParam)
+            });
+        }
+        catch
+        {
+            // Input is transient; connection failures are reported by the normal preview status path.
+        }
+    }
+
+    public async Task SetAddonOverlaySurfaceSizeAsync(uint width, uint height)
+    {
+        if (!_rpc.IsConnected || width == 0 || height == 0)
+            return;
+
+        await _rpc.CallAsync("set_addon_overlay_size", new { width, height });
+    }
+
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
     {
         if (item == null || !item.IsValid)
@@ -469,6 +520,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         SharedPreviewHandle = 0;
         SharedPreviewWidth = 0;
         SharedPreviewHeight = 0;
+        SharedAddonOverlayHandle = 0;
+        SharedAddonOverlayWidth = 0;
+        SharedAddonOverlayHeight = 0;
         RaiseControlCommandStates();
         Techniques.Clear();
         Effects.Clear();
@@ -618,8 +672,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             for (var attempt = 0; attempt < 240; ++attempt)
             {
                 state = await _rpc.CallAsync("list_state");
-                if ((state.TryGetProperty("techniques", out var techniques) && techniques.GetArrayLength() != 0) ||
-                    (state.TryGetProperty("uniforms", out var uniforms) && uniforms.GetArrayLength() != 0))
+                var hasEffectControls =
+                    (state.TryGetProperty("techniques", out var techniques) && techniques.GetArrayLength() != 0) ||
+                    (state.TryGetProperty("uniforms", out var uniforms) && uniforms.GetArrayLength() != 0);
+                var isLoading = state.TryGetProperty("runtime", out var runtime) &&
+                    runtime.TryGetProperty("loading", out var loading) &&
+                    loading.ValueKind == JsonValueKind.True;
+                if (hasEffectControls || !isLoading)
                 {
                     break;
                 }
@@ -632,6 +691,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var uniformsList = JsonStateParser.ParseUniforms(state);
             var definitionsList = JsonStateParser.ParsePreprocessorDefinitions(state);
             var addonsList = JsonStateParser.ParseAddons(state);
+            var addonDiagnostics = JsonStateParser.ParseAddonDiagnostics(state);
+            var addonLogErrors = JsonStateParser.ParseAddonLogErrors(state);
+            AddonSearchPath = JsonStateParser.ParseAddonSearchPath(state);
+            AddonLogPath = JsonStateParser.ParseAddonLogPath(state);
+            AllAddonsLoaded = JsonStateParser.ParseAllAddonsLoaded(state);
+            if (state.TryGetProperty("runtime", out var runtimeState))
+            {
+                SharedPreviewHandle = runtimeState.TryGetProperty("sharedPreviewHandle", out var sharedPreviewHandle) ? sharedPreviewHandle.GetUInt64() : 0;
+                SharedPreviewWidth = runtimeState.TryGetProperty("sharedPreviewWidth", out var sharedPreviewWidth) ? sharedPreviewWidth.GetUInt32() : 0;
+                SharedPreviewHeight = runtimeState.TryGetProperty("sharedPreviewHeight", out var sharedPreviewHeight) ? sharedPreviewHeight.GetUInt32() : 0;
+                SharedAddonOverlayHandle = runtimeState.TryGetProperty("sharedAddonOverlayHandle", out var sharedAddonOverlayHandle) ? sharedAddonOverlayHandle.GetUInt64() : 0;
+                SharedAddonOverlayWidth = runtimeState.TryGetProperty("sharedAddonOverlayWidth", out var sharedAddonOverlayWidth) ? sharedAddonOverlayWidth.GetUInt32() : 0;
+                SharedAddonOverlayHeight = runtimeState.TryGetProperty("sharedAddonOverlayHeight", out var sharedAddonOverlayHeight) ? sharedAddonOverlayHeight.GetUInt32() : 0;
+            }
             ApplyAddonUiState(state);
             EffectsEnabled = JsonStateParser.ParseEffectsEnabled(state);
 
@@ -647,8 +720,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             foreach (var addon in addonsList)
                 Addons.Add(addon);
 
-            _controlStatePopulated = techniquesList.Count != 0 || uniformsList.Count != 0 || definitionsList.Count != 0;
-            ControlStatusText = _controlStatePopulated ? "Ready" : "No effects";
+            AddonOverlays.Clear();
+            foreach (var addon in addonsList.Where(static addon => addon.IsLoaded))
+            {
+                if (addon.HasSettingsOverlay)
+                    AddonOverlays.Add(new AddonOverlayViewModel(addon.Name, "Settings", true));
+                if (addon.HasEventOverlay)
+                    AddonOverlays.Add(new AddonOverlayViewModel(addon.Name, "@event", false, "Event Overlay"));
+                foreach (var overlay in addon.Overlays.Where(static overlay => !string.Equals(overlay, "OSD", StringComparison.OrdinalIgnoreCase)))
+                    AddonOverlays.Add(new AddonOverlayViewModel(addon.Name, overlay, false));
+            }
+
+            AddonDiagnostics.Clear();
+            foreach (var diagnostic in addonDiagnostics)
+                AddonDiagnostics.Add(diagnostic);
+
+            AddonLogErrors.Clear();
+            foreach (var logError in addonLogErrors)
+                AddonLogErrors.Add(logError);
+
+            var hasLoadedEffectControls = techniquesList.Count != 0 || uniformsList.Count != 0 || definitionsList.Count != 0;
+            _controlStatePopulated = true;
+            ControlStatusText = hasLoadedEffectControls ? "Ready" : "No effects";
             RaiseControlCommandStates();
             ControlsChanged?.Invoke();
         }
@@ -681,15 +774,35 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         AddonDebugText = JsonStateParser.ParseAddonUiDebugText(state);
 
         var controls = JsonStateParser.ParseAddonImGuiControls(state);
-        var oldSignature = string.Join('\n', AddonImGuiControls.Select(static control => control.Id + "=" + control.Value));
-        var newSignature = string.Join('\n', controls.Select(static control => control.Id + "=" + control.Value));
+        var oldSignature = string.Join('\n', AddonImGuiControls.Select(AddonControlStructureSignature));
+        var newSignature = string.Join('\n', controls.Select(AddonControlStructureSignature));
         if (string.Equals(oldSignature, newSignature, StringComparison.Ordinal))
+        {
+            var valuesChanged = false;
+            for (var i = 0; i < controls.Count; ++i)
+                valuesChanged |= AddonImGuiControls[i].UpdateValue(controls[i].Value);
+
+            if (valuesChanged)
+                AddonControlValuesChanged?.Invoke();
             return;
+        }
 
         AddonImGuiControls.Clear();
         foreach (var control in controls)
             AddonImGuiControls.Add(control);
         AddonControlsChanged?.Invoke();
+    }
+
+    private static string AddonControlStructureSignature(AddonImGuiControlViewModel control)
+    {
+        return string.Join('\u001F',
+            control.Id,
+            control.Kind,
+            control.Label,
+            control.Minimum,
+            control.Maximum,
+            control.Components.ToString(CultureInfo.InvariantCulture),
+            string.Join('\u001E', control.Items));
     }
 
     private async Task PollFpsAsync(CancellationToken cancellationToken)
@@ -698,11 +811,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             try
             {
-                if (!Settings.ShowFps)
-                {
-                    FpsText = string.Empty;
-                }
-                else if (_rpc.IsConnected)
+                if (_rpc.IsConnected)
                 {
                     var info = await _rpc.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
                     var renderFps = info.TryGetProperty("renderFps", out var render) ? render.GetDouble() : 0.0;
@@ -710,11 +819,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     SharedPreviewHandle = info.TryGetProperty("sharedPreviewHandle", out var handle) ? handle.GetUInt64() : 0;
                     SharedPreviewWidth = info.TryGetProperty("sharedPreviewWidth", out var previewWidth) ? previewWidth.GetUInt32() : 0;
                     SharedPreviewHeight = info.TryGetProperty("sharedPreviewHeight", out var previewHeight) ? previewHeight.GetUInt32() : 0;
-                    FpsText = string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS");
+                    SharedAddonOverlayHandle = info.TryGetProperty("sharedAddonOverlayHandle", out var addonOverlayHandle) ? addonOverlayHandle.GetUInt64() : 0;
+                    SharedAddonOverlayWidth = info.TryGetProperty("sharedAddonOverlayWidth", out var addonOverlayWidth) ? addonOverlayWidth.GetUInt32() : 0;
+                    SharedAddonOverlayHeight = info.TryGetProperty("sharedAddonOverlayHeight", out var addonOverlayHeight) ? addonOverlayHeight.GetUInt32() : 0;
+                    FpsText = Settings.ShowFps
+                        ? string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS")
+                        : string.Empty;
                     var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
                     ApplyAddonUiState(addonUi);
                     if (!_controlStatePopulated && !_isRefreshingControlState)
                         _ = RefreshControlStateAsync();
+                }
+                else
+                {
+                    FpsText = string.Empty;
                 }
             }
             catch (OperationCanceledException)
@@ -888,9 +1006,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             arguments.AddSwitch("--preview-shared");
         }
 
-        var overlayHwnd = _addonOverlayHostHandleProvider?.Invoke() ?? IntPtr.Zero;
-        if (overlayHwnd != IntPtr.Zero)
-            arguments.Add("--overlay-hwnd", overlayHwnd.ToInt64().ToString(CultureInfo.InvariantCulture));
+        arguments.AddSwitch("--addon-overlay-shared");
 
         return arguments.ToString();
     }

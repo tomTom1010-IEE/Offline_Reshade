@@ -19,6 +19,9 @@ namespace reshade
 	extern bool addon_enabled;
 #endif
 	extern bool addon_all_loaded;
+	extern std::filesystem::path addon_search_path;
+	extern std::vector<addon_load_diagnostic> addon_load_diagnostics;
+	const char *addon_event_name(addon_event ev);
 
 	/// <summary>
 	/// List of add-on event callbacks.

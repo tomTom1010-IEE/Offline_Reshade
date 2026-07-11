@@ -222,7 +222,8 @@
                      CanDragTabs="False"
                      TabWidthMode="Equal"
                      SelectionChanged="OnControlsTabSelectionChanged">
-              <TabViewItem Header="FX">
+              <TabViewItem Header="FX"
+                           IsClosable="False">
                 <ScrollViewer x:Name="ControlsScrollViewer"
                               HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Padding="12" Spacing="12">
@@ -238,16 +239,59 @@
                   </StackPanel>
                 </ScrollViewer>
               </TabViewItem>
-              <TabViewItem Header="Add-ons">
+              <TabViewItem Header="Add-ons"
+                           AutomationProperties.AutomationId="TabAddons"
+                           IsClosable="False">
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Padding="12"
                               Spacing="10">
-                    <Border Height="280"
+                    <Grid ColumnSpacing="10">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="Native add-on overlays"
+                                 FontWeight="SemiBold"
+                                 VerticalAlignment="Center" />
+                      <ToggleSwitch x:Name="NativeAddonOverlaySwitch"
+                                    AutomationProperties.AutomationId="TglNativeAddonOverlay"
+                                    AutomationProperties.Name="Show native add-on overlay"
+                                    Grid.Column="1"
+                                    Header="Show"
+                                    Toggled="OnNativeAddonOverlayToggled" />
+                    </Grid>
+                    <TabView x:Name="AddonOverlayTabView"
+                             AutomationProperties.AutomationId="TabsAddonOverlays"
+                             Height="48"
+                             IsAddTabButtonVisible="False"
+                             CanDragTabs="False"
+                             TabWidthMode="SizeToContent"
+                             SelectionChanged="OnAddonOverlayTabSelectionChanged" />
+                    <Border x:Name="AddonNativeSurfaceBorder"
+                            Height="360"
                             Background="Black"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1">
                       <Grid x:Name="AddonNativeSurface">
-                        <TextBlock Text="Native add-on panel"
+                        <SwapChainPanel x:Name="AddonOverlaySwapChainPanel"
+                                        AutomationProperties.AutomationId="SurfaceNativeAddonOverlay"
+                                        AutomationProperties.Name="Native add-on overlay surface"
+                                        Visibility="Collapsed"
+                                        PointerMoved="OnAddonOverlayPointerMoved"
+                                        PointerExited="OnAddonOverlayPointerExited"
+                                        PointerPressed="OnAddonOverlayPointerPressed"
+                                        PointerReleased="OnAddonOverlayPointerReleased"
+                                        PointerCanceled="OnAddonOverlayPointerCaptureLost"
+                                        PointerCaptureLost="OnAddonOverlayPointerCaptureLost"
+                                        PointerWheelChanged="OnAddonOverlayPointerWheelChanged"
+                                        GotFocus="OnAddonOverlayGotFocus"
+                                        LostFocus="OnAddonOverlayLostFocus"
+                                        KeyDown="OnAddonOverlayKeyDown"
+                                        KeyUp="OnAddonOverlayKeyUp"
+                                        CharacterReceived="OnAddonOverlayCharacterReceived"
+                                        SizeChanged="OnAddonOverlaySurfaceSizeChanged" />
+                        <TextBlock x:Name="AddonOverlayPlaceholder"
+                                   Text="Select an add-on overlay tab"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />

@@ -74,7 +74,7 @@ public static class JsonStateParser
     public static IReadOnlyList<AddonViewModel> ParseAddons(JsonElement state)
     {
         var result = new List<AddonViewModel>();
-        if (!state.TryGetProperty("addons", out var addonState) || addonState.ValueKind != JsonValueKind.Object)
+        if (!TryGetAddonState(state, out var addonState))
             return result;
         if (!addonState.TryGetProperty("addons", out var addons) || addons.ValueKind != JsonValueKind.Array)
             return result;
@@ -93,10 +93,84 @@ public static class JsonStateParser
                 GetBool(item, "loaded"),
                 GetBool(item, "external"),
                 GetBool(item, "hasSettingsOverlay"),
-                GetStringArray(item, "overlays")));
+                GetBool(item, "hasEventOverlay"),
+                GetStringArray(item, "overlays"),
+                GetString(item, "offlineCompatibility"),
+                ParseAddonEvents(item)));
         }
 
         return result;
+    }
+
+    private static IReadOnlyList<AddonEventViewModel> ParseAddonEvents(JsonElement addon)
+    {
+        if (!addon.TryGetProperty("events", out var events) || events.ValueKind != JsonValueKind.Array)
+            return Array.Empty<AddonEventViewModel>();
+
+        return events.EnumerateArray()
+            .Select(static item => new AddonEventViewModel(GetString(item, "name"), GetString(item, "support")))
+            .ToArray();
+    }
+
+    public static IReadOnlyList<AddonDiagnosticViewModel> ParseAddonDiagnostics(JsonElement state)
+    {
+        var result = new List<AddonDiagnosticViewModel>();
+        if (!TryGetAddonState(state, out var addonState) ||
+            !addonState.TryGetProperty("diagnostics", out var diagnostics) ||
+            diagnostics.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (var item in diagnostics.EnumerateArray())
+        {
+            result.Add(new AddonDiagnosticViewModel(
+                GetString(item, "file"),
+                GetString(item, "path"),
+                GetString(item, "status"),
+                GetString(item, "stage"),
+                GetString(item, "message"),
+                GetUInt32(item, "errorCode"),
+                GetBool(item, "dependencyFailure")));
+        }
+
+        return result;
+    }
+
+    public static IReadOnlyList<string> ParseAddonLogErrors(JsonElement state)
+    {
+        return TryGetAddonState(state, out var addonState)
+            ? GetStringArray(addonState, "logErrors")
+            : Array.Empty<string>();
+    }
+
+    public static string ParseAddonSearchPath(JsonElement state) =>
+        TryGetAddonState(state, out var addonState) ? GetString(addonState, "searchPath") : string.Empty;
+
+    public static string ParseAddonLogPath(JsonElement state) =>
+        TryGetAddonState(state, out var addonState) ? GetString(addonState, "logPath") : string.Empty;
+
+    public static bool ParseAllAddonsLoaded(JsonElement state) =>
+        !TryGetAddonState(state, out var addonState) || GetBool(addonState, "allLoaded");
+
+    private static bool TryGetAddonState(JsonElement state, out JsonElement addonState)
+    {
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addons", out var nested) &&
+            nested.ValueKind == JsonValueKind.Object)
+        {
+            addonState = nested;
+            return true;
+        }
+
+        if (state.ValueKind == JsonValueKind.Object && state.TryGetProperty("available", out _))
+        {
+            addonState = state;
+            return true;
+        }
+
+        addonState = default;
+        return false;
     }
 
     public static bool ParseEffectsEnabled(JsonElement state)
@@ -222,13 +296,33 @@ public static class JsonStateParser
         return kind == "button" ||
             kind == "checkbox" ||
             kind == "combo" ||
+            kind == "list_box" ||
             kind == "slider_float" ||
             kind == "slider_int" ||
             kind == "drag_float" ||
             kind == "drag_int" ||
             kind == "input_float" ||
             kind == "input_int" ||
-            kind == "color";
+            kind == "input_text" ||
+            kind == "input_text_multiline" ||
+            kind == "color" ||
+            kind == "text" ||
+            kind == "tree_node" ||
+            kind == "tree_end" ||
+            kind == "collapsing_header" ||
+            kind == "tab_bar_begin" ||
+            kind == "tab_bar_end" ||
+            kind == "tab_item_begin" ||
+            kind == "tab_item_end" ||
+            kind == "tooltip" ||
+            kind == "menu_begin" ||
+            kind == "menu_end" ||
+            kind == "menu_item" ||
+            kind == "selectable" ||
+            kind == "popup_begin" ||
+            kind == "popup_modal_begin" ||
+            kind == "popup_end" ||
+            kind == "native_fallback";
     }
 
     public static IReadOnlyList<EffectControlViewModel> BuildEffects(IReadOnlyList<TechniqueViewModel> techniques, IReadOnlyList<UniformViewModel> uniforms, IReadOnlyList<PreprocessorDefinitionViewModel> definitions)
@@ -294,6 +388,13 @@ public static class JsonStateParser
     private static bool GetBool(JsonElement item, string name)
     {
         return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+    }
+
+    private static uint GetUInt32(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetUInt32(out var result)
+            ? result
+            : 0;
     }
 
     private static int GetInt(JsonElement item, string name)

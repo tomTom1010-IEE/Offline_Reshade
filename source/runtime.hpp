@@ -168,6 +168,8 @@ namespace reshade
 		bool open_overlay(bool open, api::input_source source) final;
 
 		void set_external_overlay_target(api::resource_view target, uint32_t width, uint32_t height);
+		void set_external_addon_overlay(const char *addon_name, const char *overlay_name, bool settings);
+		void add_external_overlay_input_event(uint32_t message, uintptr_t wparam, intptr_t lparam);
 
 		void set_color_space(api::color_space color_space) final;
 
@@ -424,6 +426,17 @@ namespace reshade
 		uint32_t _external_overlay_width = 0;
 		uint32_t _external_overlay_height = 0;
 		bool _external_overlay_enabled = false;
+		std::string _external_addon_name;
+		std::string _external_addon_overlay;
+		bool _external_addon_settings = false;
+		bool _external_addon_overlay_enabled = false;
+		struct external_overlay_input_event
+		{
+			uint32_t message;
+			uintptr_t wparam;
+			intptr_t lparam;
+		};
+		std::vector<external_overlay_input_event> _external_overlay_input_events;
 
 		ImGuiContext *_imgui_context = nullptr;
 

@@ -25,6 +25,7 @@ namespace
 		ComPtr<ID3D11SamplerState> sampler;
 		ComPtr<ID3D11Texture2D> shared_texture;
 		ComPtr<ID3D11ShaderResourceView> shared_srv;
+		ComPtr<IDXGIKeyedMutex> shared_mutex;
 		uintptr_t shared_handle = 0;
 		uint32_t width = 1;
 		uint32_t height = 1;
@@ -144,9 +145,13 @@ float4 ps_main(VSOut input) : SV_TARGET
 
 		bridge->shared_texture.Reset();
 		bridge->shared_srv.Reset();
+		bridge->shared_mutex.Reset();
 		HRESULT hr = bridge->device->OpenSharedResource(reinterpret_cast<HANDLE>(shared_handle), IID_PPV_ARGS(&bridge->shared_texture));
 		if (FAILED(hr))
 			return hr;
+		// The main preview uses a regular shared texture, while the add-on overlay uses a
+		// keyed mutex so WinUI never samples a half-cleared or partially drawn frame.
+		bridge->shared_texture.As(&bridge->shared_mutex);
 		hr = bridge->device->CreateShaderResourceView(bridge->shared_texture.Get(), nullptr, &bridge->shared_srv);
 		if (FAILED(hr))
 			return hr;
@@ -222,14 +227,26 @@ extern "C" __declspec(dllexport) HRESULT __stdcall ORPreview_RenderShared(
 	if (FAILED(hr))
 		return hr;
 
+	const bool shared_mutex_acquired = bridge->shared_mutex != nullptr && bridge->shared_mutex->AcquireSync(1, 0) == S_OK;
+	if (bridge->shared_mutex != nullptr && !shared_mutex_acquired)
+		return S_FALSE;
+	const auto finish_shared_read = [&](HRESULT result) {
+		if (shared_mutex_acquired)
+		{
+			bridge->context->Flush();
+			bridge->shared_mutex->ReleaseSync(0);
+		}
+		return result;
+	};
+
 	ComPtr<ID3D11Texture2D> backbuffer;
 	ComPtr<ID3D11RenderTargetView> rtv;
 	hr = bridge->swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
 	if (FAILED(hr))
-		return hr;
+		return finish_shared_read(hr);
 	hr = bridge->device->CreateRenderTargetView(backbuffer.Get(), nullptr, &rtv);
 	if (FAILED(hr))
-		return hr;
+		return finish_shared_read(hr);
 
 	const float clear_color[4] = { 0, 0, 0, 1 };
 	bridge->context->ClearRenderTargetView(rtv.Get(), clear_color);
@@ -239,7 +256,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall ORPreview_RenderShared(
 	const float dest_width = scale_x;
 	const float dest_height = scale_y;
 	if (dest_width <= 0.0f || dest_height <= 0.0f)
-		return bridge->swapchain->Present(0, 0);
+		return finish_shared_read(bridge->swapchain->Present(0, 0));
 
 	D3D11_VIEWPORT viewport = {};
 	viewport.TopLeftX = dest_x;
@@ -267,5 +284,5 @@ extern "C" __declspec(dllexport) HRESULT __stdcall ORPreview_RenderShared(
 	bridge->context->Draw(3, 0);
 	srv_ptr = nullptr;
 	bridge->context->PSSetShaderResources(0, 1, &srv_ptr);
-	return bridge->swapchain->Present(0, 0);
+	return finish_shared_read(bridge->swapchain->Present(0, 0));
 }
