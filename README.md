@@ -17,8 +17,9 @@ Koikatsu Sunshine (KKS) offline capture workflows:
   full-resolution runtime.
 
 This repository is based on ReShade, but the release package intentionally does
-not include third-party `.fx` or `.fxh` shader resources. Users must select
-their own ReShade effect folder in Settings.
+not include third-party shaders or add-ons. The package provides empty
+`Effects`, `Textures`, and `Addons` folders so users can install their own
+resources without changing the default paths.
 
 ## Quick Start For Users
 
@@ -38,8 +39,11 @@ before the game-side color/depth export has been verified.
      `coloroutput.png`, `depthoutput.rfloat`, and `metadata.json`
 4. Extract the Offline ReShade client release package anywhere outside the game
    folder.
-5. Put your ReShade shader library into the client package `Effects` folder, or
-   prepare your own external shader folder.
+5. Install your ReShade resources into the client package:
+   - `.fx` / `.fxh` files: `Effects`
+   - effect images, LUTs, noise maps, and other textures: `Textures`
+   - `.addon64` files: `Addons`
+   You may instead select an external shader folder later in `Settings`.
 6. Run `OfflineReShadeWinUI.exe`.
 7. Open `Settings`.
 8. Select `Game`: `KKS` or `KK`.
@@ -53,6 +57,12 @@ before the game-side color/depth export has been verified.
 11. Configure ReShade resources:
     - `Effect Folder`: use the package `Effects` folder if you copied shaders
       there, or choose your own shader folder.
+    - Textures are found automatically in the package `Textures` folder, the
+      selected Effect Folder's `Textures` subfolder, or a sibling `Textures`
+      folder next to the selected Effect Folder.
+    - Add-ons are loaded from the selected Effect Folder's `Addons` subfolder
+      when it exists; otherwise they are loaded from the package `Addons`
+      folder.
     - `Preset INI`: leave blank for the safest first run, or choose your own
       preset after the basic workflow is confirmed.
 12. Click `Start Preview`.
@@ -63,6 +73,7 @@ The clean release package should include the application binaries and runtime
 DLLs, but should not include:
 
 - `.fx` / `.fxh` shader files;
+- third-party `.addon64` DLLs;
 - paid or private ReShade presets;
 - local user settings;
 - ReShade logs;
@@ -203,9 +214,44 @@ Set these fields carefully:
 - `Render Width` / `Render Height`: leave blank unless you intentionally want a
   different final render size.
 
-The release package contains an `Effects` folder for convenience. The default
-setting points there. Copy your shader library into that folder if you want to
-use the default path. You may also choose any external ReShade shader folder.
+The release package uses paths relative to `OfflineReShadeWinUI.exe`. With the
+default settings, use this layout:
+
+```text
+OfflineReShade-win-x64-<version>\
+  OfflineReShadeWinUI.exe
+  Effects\
+    Shader.fx
+    IncludeFile.fxh
+    Subfolders\...
+  Textures\
+    LUT.png
+    Noise.png
+  Addons\
+    Example.addon64
+```
+
+`Effect Folder` defaults to `Effects`, and effect scanning is recursive. Files
+may therefore be placed directly in `Effects` or organized in subfolders.
+
+Texture search is also recursive and checks these locations in order:
+
+1. `<Effect Folder>\Textures`
+2. `<Effect Folder parent>\Textures`
+3. `<application folder>\Textures`
+
+This supports the usual ReShade layout where `Effect Folder` is
+`reshade-shaders\Shaders` and textures are in the sibling
+`reshade-shaders\Textures` folder.
+
+Add-on loading checks `<Effect Folder>\Addons` first, then the application
+folder's `Addons` directory. For the default setup, placing `.addon64` files in
+the package-level `Addons` folder is recommended. Add-on scanning is not
+recursive: `.addon64` files must be directly inside the selected AddonPath, not
+inside another subfolder. Only one AddonPath is active, so check the path shown
+on the Add-ons page when both locations exist. Add-on DLL changes are read when
+the preview runtime starts, so stop and restart Preview after adding, removing,
+or replacing an add-on.
 
 The app stores separate path sets for KK and KKS. Switching `Game` restores the
 last paths used for that game.
@@ -227,6 +273,45 @@ over old settings. That may cause depth-dependent effects to look inverted,
 upside down, too bright, too dark, or completely black. If that happens, first
 test with `Preset INI` blank, then rebuild the preset inside Offline ReShade and
 click `Save Preset`.
+
+### Using Add-ons
+
+Add-on support is available after `Start Preview` creates the native runtime.
+
+1. Put the add-on's `.addon64` file in the package `Addons` folder. Install any
+   shader and texture files supplied with it in `Effects` and `Textures` as
+   described above.
+2. Start Preview, then open the `Add-ons` tab in `ReShade Controls`.
+3. Check the displayed `AddonPath` to confirm which directory was scanned.
+4. Review `Load diagnostics`. It lists every discovered add-on as loaded,
+   disabled, failed, or skipped. Expand `Add-on initialization log` when a DLL
+   or dependency fails to load.
+5. Use the overlay tabs under `Native add-on overlays` to select an add-on
+   window. Keep `Show` enabled to display and interact with its original ImGui
+   interface inside the WinUI panel.
+6. Use `WinUI Add-on Controls` for controls that Offline ReShade can reproduce
+   as native WinUI buttons, checkboxes, scalar or vector sliders, combo boxes,
+   text fields, colors, tabs, and collapsing sections. Changes are sent to the
+   live add-on runtime.
+7. Use `Open native add-on panel` when an add-on depends on custom drawing,
+   plots, texture widgets, popups, on-screen selection, or another interaction
+   that is not fully represented by the WinUI controls.
+
+The add-on details section also reports registered events and offline
+compatibility. Runtime, effect, uniform, technique, screenshot, present, and
+overlay-oriented add-ons can work in the offline host. Add-ons that require a
+live game's draw calls, pipeline resources, object data, motion stream, or
+game-specific hooks may load successfully but still cannot provide their full
+functionality.
+
+Some add-ons also install companion FX techniques. Configure the add-on in the
+`Add-ons` tab, then return to `FX` to enable those techniques. Drag the headers
+of enabled FX sections to put launchpad/pre-pass techniques before the effects
+that consume their data, following the add-on author's instructions. Click
+`Save Preset` when the final order and parameters are correct.
+
+If an add-on is copied while Preview is already running, click `Stop`, then
+`Start Preview`. `Reload` recompiles effects but does not reload add-on DLLs.
 
 ### Real Time Mode
 
@@ -382,7 +467,8 @@ resolution, so screenshots and batch output are full resolution.
 ## ReShade Effects and Presets
 
 Effects are user supplied. Set `Effect Folder` to a folder containing ReShade
-`.fx` and `.fxh` files.
+`.fx` and `.fxh` files. The default package layout uses `Effects` for shaders,
+`Textures` for image resources, and `Addons` for `.addon64` DLLs.
 
 The clean release package intentionally does not ship shader packs. This avoids
 redistributing paid/private shaders and keeps licensing separate from the
@@ -434,6 +520,18 @@ debug symbols, import libraries, and any `.fx` / `.fxh` shader resources.
 - Effects do not appear:
   - confirm `Effect Folder` points to your shader folder;
   - the release package does not include shaders by design.
+- Effects compile but textures are missing or the preview turns black:
+  - place the required files in `Textures`, `<Effect Folder>\Textures`, or the
+    sibling `Textures` folder next to the selected Effect Folder;
+  - inspect the FX log for the exact missing filename.
+- Add-ons do not appear:
+  - stop Preview, put `.addon64` files in the package `Addons` folder, then
+    start Preview again;
+  - open the `Add-ons` tab and verify `AddonPath` and `Load diagnostics`;
+  - install any Microsoft Visual C++ runtime or companion DLLs required by the
+    add-on;
+  - remember that add-ons requiring live game render data may not be compatible
+    with the offline host.
 
 ## License
 

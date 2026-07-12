@@ -13,7 +13,7 @@ Offline ReShade 是一个 Windows 工具，用于把 ReShade FX 效果应用到�
 - `OfflineReShadePrototype.exe` 承载全分辨率 D3D11 ReShade runtime；
 - UI 中显示缩放预览，截图和批处理输出使用全分辨率 runtime。
 
-发布包不会包含第三方 `.fx` 或 `.fxh` shader。用户需要在 Settings 里选择自己的 ReShade effect 文件夹。
+发布包不会包含第三方 shader 或 add-on。发布包提供空的 `Effects`、`Textures` 和 `Addons` 文件夹，用户可以直接按默认相对路径安装自己的资源。
 
 ## 快速开始
 
@@ -22,12 +22,13 @@ Offline ReShade 是一个 Windows 工具，用于把 ReShade FX 效果应用到�
 3. 运行 `OfflineReShadeWinUI.exe`。
 4. 打开 `Settings`。
 5. 选择 `Game`：`KKS` 或 `KK`。
-6. 把 `Effect Folder` 设置为你自己的 ReShade shader 文件夹。
+6. 把 `.fx` / `.fxh` 放入 `Effects`，把效果需要的图片资源放入 `Textures`，把 `.addon64` 放入 `Addons`。也可以在 Settings 中选择外部 shader 文件夹。
 7. 使用 `Real Time` 或 `Gallery` 模式。
 
 干净的发布包应该只包含程序二进制和 runtime DLL，不应包含：
 
 - `.fx` / `.fxh` shader 文件；
+- 第三方 `.addon64` DLL；
 - 付费或私有 ReShade preset；
 - 本地用户设置；
 - ReShade 日志；
@@ -123,7 +124,7 @@ CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
 - `Game`：选择 `KKS` 或 `KK`。
 - `Color PNG`：实时 color 输入。
 - `Depth File`：实时 depth 输入。
-- `Effect Folder`：你的 ReShade shader 文件夹。
+- `Effect Folder`：ReShade `.fx` / `.fxh` 所在文件夹；默认值是程序目录下的 `Effects`。
 - `Preset INI`：可选的 ReShade preset。
 - `Output PNG`：实时输出路径。
 - `Gallery Input Folder`：包含静态截图或视频帧 pair 的文件夹。
@@ -131,6 +132,54 @@ CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
 - `Render Width` / `Render Height`：留空则使用 color 图像尺寸。
 
 程序会为 KK 和 KKS 分别保存路径设置。切换 `Game` 时会恢复该游戏上次使用的路径。
+
+### FX、Texture 与 Add-on 相对路径
+
+发布版中的相对路径以 `OfflineReShadeWinUI.exe` 所在目录为基准。使用默认设置时，推荐目录结构如下：
+
+```text
+OfflineReShade-win-x64-<version>\
+  OfflineReShadeWinUI.exe
+  Effects\
+    Shader.fx
+    IncludeFile.fxh
+    Subfolders\...
+  Textures\
+    LUT.png
+    Noise.png
+  Addons\
+    Example.addon64
+```
+
+- `Effects`：放置 `.fx`、`.fxh` 及其子文件夹。Effect 扫描是递归的，不要求所有 shader 都直接放在根目录。
+- `Textures`：放置 LUT、noise、mask、blue-noise 和其他 shader 图片资源。
+- `Addons`：放置 ReShade `.addon64` DLL。默认安装建议使用程序根目录的这个文件夹。扫描不递归，`.addon64` 必须直接位于实际的 AddonPath 中，不能藏在下一级文件夹。
+
+Texture 会按以下顺序递归搜索：
+
+1. `<Effect Folder>\Textures`
+2. `<Effect Folder 的父目录>\Textures`
+3. `<程序目录>\Textures`
+
+因此也兼容常见的 `reshade-shaders\Shaders` + `reshade-shaders\Textures` 结构：把 `Effect Folder` 指向 `Shaders` 即可。
+
+Add-on 会优先从 `<Effect Folder>\Addons` 加载；该目录不存在时，使用 `<程序目录>\Addons`。同时存在时只会启用其中一个 AddonPath，因此请以 `Add-ons` 页面实际显示的 `AddonPath` 为准。如果使用默认 `Effects`，建议始终把 `.addon64` 放在发布包根目录的 `Addons` 中，避免与 shader 混在一起。
+
+新增、删除或替换 `.addon64` 后必须停止并重新启动 Preview。顶部的 `Reload` 只重新编译 FX，不会重新载入 add-on DLL。
+
+### Add-on 界面使用
+
+1. 把 `.addon64` 放入 `Addons`，并按照 add-on 自带说明把配套 `.fx` 和 texture 分别放入 `Effects` 与 `Textures`。
+2. 点击 `Start Preview`，然后打开左侧 `ReShade Controls` 中的 `Add-ons` 选项卡。
+3. 查看 `AddonPath`，确认程序实际扫描的是你预期的目录。
+4. 查看 `Load diagnostics`。这里会列出每个发现的 add-on，以及 loaded、disabled、failed 或 skipped 状态。DLL 或依赖加载失败时，再展开 `Add-on initialization log`。
+5. `Native add-on overlays` 下方的选项卡对应 add-on 注册的原生窗口。选择一个选项卡并保持 `Show` 开启，即可在 WinUI 面板中显示和操作原版 ImGui 界面。
+6. `WinUI Add-on Controls` 会把能够重建的按钮、checkbox、单值或多值 slider、combo、文本、颜色、选项卡和折叠区域转换成 WinUI 控件，并实时控制当前 add-on。
+7. 遇到 custom drawing、plot、texture widget、复杂 popup、画面内选点或 WinUI 按钮不能完成的交互时，使用 `Open native add-on panel` 作为原生界面 fallback。
+
+Add-on 详情还会显示它注册的事件和离线兼容性。依赖 runtime、effect、uniform、technique、screenshot、present 或 overlay 的 add-on 可以在离线宿主中工作；依赖游戏实时 draw call、pipeline resource、场景对象、motion stream 或游戏专用 hook 的 add-on 即使加载成功，也可能只能使用一部分功能。
+
+部分 Add-on 还会安装配套 FX technique。先在 `Add-ons` 选项卡配置 Add-on，再回到 `FX` 启用对应 technique。按照 Add-on 作者说明拖动已启用 FX 的标题，把 launchpad/pre-pass 放在需要消费其数据的效果之前。顺序和参数确认后点击 `Save Preset` 保存。
 
 ### Real Time 模式
 
@@ -206,3 +255,11 @@ KK bridge 可能输出 color 尺寸的 depth，也可能输出 2x resolution dep
 - 效果没有出现：
   - 确认 `Effect Folder` 指向你的 shader 文件夹；
   - 发布包默认不包含 shader，这是设计如此。
+- FX 能编译但提示 texture 缺失，或启用后画面变黑：
+  - 把缺失资源放入 `Textures`、`<Effect Folder>\Textures`，或 Effect Folder 同级的 `Textures`；
+  - 在 FX 日志中查看具体缺失的文件名。
+- Add-on 没有出现：
+  - 停止 Preview，把 `.addon64` 放入程序根目录的 `Addons`，再启动 Preview；
+  - 在 `Add-ons` 选项卡检查 `AddonPath`、`Load diagnostics` 和初始化日志；
+  - 安装 add-on 要求的 Microsoft Visual C++ runtime 或配套 DLL；
+  - 依赖游戏实时渲染数据的 add-on 可能不兼容离线宿主。
