@@ -427,5 +427,27 @@
         </Border>
       </Grid>
     </Grid>
+
+    <Grid x:Name="SliderModeOverlay"
+          Grid.RowSpan="2"
+          Canvas.ZIndex="1000"
+          Visibility="Collapsed"
+          IsHitTestVisible="False"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center">
+      <Border Padding="22,12"
+              MinWidth="116"
+              HorizontalAlignment="Center"
+              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="1"
+              CornerRadius="6">
+        <TextBlock x:Name="SliderModeOverlayText"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   FontSize="26"
+                   FontWeight="SemiBold" />
+      </Border>
+    </Grid>
   </Grid>
 </Window>

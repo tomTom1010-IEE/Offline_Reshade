@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using System.Globalization;
+using OfflineReShade.WinUI.Controls;
 using OfflineReShade.WinUI.Services;
 using OfflineReShade.WinUI.ViewModels;
 using WinRT.Interop;
@@ -18,12 +19,17 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, CancellationTokenSource> _uniformUpdateSources = new();
     private readonly Dictionary<string, CancellationTokenSource> _addonControlUpdateSources = new();
     private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
+    private readonly List<MappedSlider> _fxMappedSliders = new();
+    private readonly List<MappedSlider> _addonMappedSliders = new();
+    private readonly List<FrameworkElement> _fxLogIndicators = new();
+    private readonly List<FrameworkElement> _addonLogIndicators = new();
     private readonly PreviewHostService _previewHost;
     private readonly D3DPreviewBridge _d3dPreview = new();
     private readonly D3DPreviewBridge _addonOverlayPreview = new();
     private readonly DispatcherTimer _gpuPreviewTimer = new();
     private readonly DispatcherTimer _addonOverlayPreviewTimer = new();
     private readonly DispatcherTimer _addonInputMoveTimer = new();
+    private readonly DispatcherTimer _sliderModeOverlayTimer = new();
     private bool _isPreviewDragging;
     private bool _updatingInputModeSwitch;
     private bool _buildingAddonOverlayTabs;
@@ -104,6 +110,9 @@ public sealed partial class MainWindow : Window
             }
             if (args.PropertyName == nameof(SettingsViewModel.DepthDownsample))
                 UpdateDepthDownsampleSelection();
+            if (args.PropertyName == nameof(SettingsViewModel.SliderDragSensitivity) ||
+                args.PropertyName == nameof(SettingsViewModel.SliderSymLog))
+                UpdateSliderInteractionMode();
         };
         PreviewSurface.PointerWheelChanged += OnPreviewPointerWheelChanged;
         PreviewSurface.PointerPressed += OnPreviewPointerPressed;
@@ -114,18 +123,26 @@ public sealed partial class MainWindow : Window
         PreviewSurface.Loaded += (_, _) => AttachPreviewXamlRootChanged();
         PreviewSurface.SizeChanged += (_, _) => UpdatePreviewClipAndTransform();
         ControlsScrollViewer.SizeChanged += (_, _) => UpdateControlsPanelWidth();
+        RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
         _gpuPreviewTimer.Interval = TimeSpan.FromMilliseconds(16);
         _gpuPreviewTimer.Tick += (_, _) => RenderGpuPreviewFrame();
         _addonOverlayPreviewTimer.Interval = TimeSpan.FromMilliseconds(16);
         _addonOverlayPreviewTimer.Tick += (_, _) => RenderAddonOverlayFrame();
         _addonInputMoveTimer.Interval = TimeSpan.FromMilliseconds(16);
         _addonInputMoveTimer.Tick += (_, _) => FlushAddonOverlayMouseMove();
+        _sliderModeOverlayTimer.Interval = TimeSpan.FromMilliseconds(850);
+        _sliderModeOverlayTimer.Tick += (_, _) =>
+        {
+            _sliderModeOverlayTimer.Stop();
+            SliderModeOverlay.Visibility = Visibility.Collapsed;
+        };
         Closed += (_, _) =>
         {
             if (_previewXamlRoot is not null)
                 _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
             _previewHost.Dispose();
             _addonInputMoveTimer.Stop();
+            _sliderModeOverlayTimer.Stop();
             _addonOverlayPreviewTimer.Stop();
             _d3dPreview.Dispose();
             _addonOverlayPreview.Dispose();
@@ -570,6 +587,72 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnSliderDragSensitivityWheelChanged(object? sender, MappedSliderWheelEventArgs args)
+    {
+        var factors = new[] { 1, 2, 4, 8 };
+        var currentIndex = Array.IndexOf(factors, ViewModel.Settings.SliderDragSensitivity);
+        if (currentIndex < 0)
+            currentIndex = 0;
+        var nextIndex = Math.Clamp(currentIndex + (args.Delta > 0 ? 1 : -1), 0, factors.Length - 1);
+        ViewModel.Settings.SliderDragSensitivity = factors[nextIndex];
+        ShowSliderModeOverlay("x" + factors[nextIndex].ToString(CultureInfo.InvariantCulture));
+    }
+
+    private void OnRootKeyDown(object sender, KeyRoutedEventArgs args)
+    {
+        if (args.Key != Windows.System.VirtualKey.L || args.KeyStatus.WasKeyDown || IsTextEntryFocused())
+            return;
+        if (_fxMappedSliders.Any(static slider => slider.IsDragging) ||
+            _addonMappedSliders.Any(static slider => slider.IsDragging))
+            return;
+
+        ViewModel.Settings.SliderSymLog = !ViewModel.Settings.SliderSymLog;
+        ShowSliderModeOverlay(ViewModel.Settings.SliderSymLog ? "L  SYMLOG" : "LINEAR");
+        args.Handled = true;
+    }
+
+    private void UpdateSliderInteractionMode()
+    {
+        var sensitivity = ViewModel.Settings.SliderDragSensitivity;
+        var logarithmic = ViewModel.Settings.SliderSymLog;
+        foreach (var slider in _fxMappedSliders.Concat(_addonMappedSliders))
+        {
+            if (!slider.IsDragging)
+                slider.SetInteractionMode(sensitivity, logarithmic);
+        }
+
+        var visibility = logarithmic ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var indicator in _fxLogIndicators.Concat(_addonLogIndicators))
+            indicator.Visibility = visibility;
+    }
+
+    private void ShowSliderModeOverlay(string text)
+    {
+        SliderModeOverlayText.Text = text;
+        SliderModeOverlay.Visibility = Visibility.Visible;
+        _sliderModeOverlayTimer.Stop();
+        _sliderModeOverlayTimer.Start();
+    }
+
+    private bool IsTextEntryFocused()
+    {
+        var focused = FocusManager.GetFocusedElement(RootGrid.XamlRoot) as DependencyObject;
+        return FindVisualAncestor<TextBox>(focused) is not null ||
+            FindVisualAncestor<RichEditBox>(focused) is not null ||
+            FindVisualAncestor<PasswordBox>(focused) is not null;
+    }
+
+    private static T? FindVisualAncestor<T>(DependencyObject? source) where T : DependencyObject
+    {
+        for (var current = source; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is T match)
+                return match;
+        }
+
+        return null;
+    }
+
     private void OnPreviewPointerWheelChanged(object sender, PointerRoutedEventArgs args)
     {
         var point = args.GetCurrentPoint(PreviewSurface);
@@ -843,6 +926,8 @@ public sealed partial class MainWindow : Window
     private void BuildControls()
     {
         ControlsPanel.Children.Clear();
+        _fxMappedSliders.Clear();
+        _fxLogIndicators.Clear();
         AddonsPanel.Children.Clear();
         AddonControlsPanel.Children.Clear();
         UpdateControlsPanelWidth();
@@ -1166,6 +1251,8 @@ public sealed partial class MainWindow : Window
     {
         AddonControlsPanel.Children.Clear();
         _addonControlValueUpdaters.Clear();
+        _addonMappedSliders.Clear();
+        _addonLogIndicators.Clear();
 
         if (ViewModel.AddonImGuiControls.Count == 0)
         {
@@ -1547,7 +1634,9 @@ public sealed partial class MainWindow : Window
     private FrameworkElement BuildAddonNumericEditor(AddonImGuiControlViewModel control)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(control.IsCombo
+            ? new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap }
+            : CreateMappedSliderLabel(control.Label, _addonLogIndicators));
 
         var componentCount = Math.Max(1, control.Components);
         var numericValues = control.NumericValues.ToList();
@@ -1558,7 +1647,7 @@ public sealed partial class MainWindow : Window
         var hasMaximum = TryParseFirstNumber(control.Maximum, out var maximum);
         var hasExplicitRange = hasMinimum && hasMaximum && maximum > minimum;
         var isInteger = control.Kind.Contains("int", StringComparison.OrdinalIgnoreCase);
-        var editors = new List<(Slider? Slider, TextBox TextBox)>();
+        var editors = new List<(MappedSlider? Slider, TextBox TextBox)>();
 
         string FormatValue(double value) => isInteger
             ? Math.Round(value).ToString(CultureInfo.InvariantCulture)
@@ -1572,6 +1661,14 @@ public sealed partial class MainWindow : Window
 
         async Task CommitValueAsync()
         {
+            foreach (var editor in editors)
+            {
+                if (editor.Slider is null || !TryParseFirstNumber(editor.TextBox.Text, out var value))
+                    continue;
+
+                editor.Slider.SetMappedValue(value, false);
+                editor.TextBox.Text = FormatValue(editor.Slider.MappedValue);
+            }
             await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, BuildValue()));
         }
 
@@ -1592,29 +1689,29 @@ public sealed partial class MainWindow : Window
             ApplyAddonAutomation(textBox, control);
             AutomationProperties.SetAutomationId(textBox, "AddonNumber_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
 
-            Slider? slider = null;
+            MappedSlider? slider = null;
             if (!control.IsCombo)
             {
                 var dynamicSpan = Math.Max(isInteger ? 1.0 : 1.0, Math.Abs(componentValue) * 2.0);
                 var componentMinimum = hasExplicitRange ? minimum : componentValue - dynamicSpan;
                 var componentMaximum = hasExplicitRange ? maximum : componentValue + dynamicSpan;
-                slider = new Slider
+                slider = new MappedSlider
                 {
-                    Minimum = componentMinimum,
-                    Maximum = componentMaximum,
-                    Value = Math.Clamp(componentValue, componentMinimum, componentMaximum),
-                    StepFrequency = isInteger ? 1.0 : 0.001,
                     Tag = control,
                     MinWidth = 80,
                     HorizontalAlignment = HorizontalAlignment.Stretch
                 };
+                slider.ConfigureRange(componentMinimum, componentMaximum, componentValue, isInteger ? 1.0 : 0.001);
+                slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
+                slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
+                _addonMappedSliders.Add(slider);
                 AutomationProperties.SetAutomationId(slider, "AddonSlider_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
-                slider.ValueChanged += (_, _) =>
+                slider.MappedValueChanged += (_, args) =>
                 {
                     if (_updatingAddonControlValues)
                         return;
 
-                    textBox.Text = FormatValue(slider.Value);
+                    textBox.Text = FormatValue(args.Value);
                     QueueAddonControlUpdate(control, BuildValue());
                 };
                 row.Children.Add(slider);
@@ -1656,16 +1753,18 @@ public sealed partial class MainWindow : Window
                 if (editor.TextBox.FocusState == FocusState.Unfocused)
                     editor.TextBox.Text = FormatValue(updatedValue);
 
-                if (editor.Slider == null || editor.Slider.FocusState != FocusState.Unfocused)
+                if (editor.Slider == null || editor.Slider.IsDragging)
                     continue;
 
-                if (!hasExplicitRange && (updatedValue < editor.Slider.Minimum || updatedValue > editor.Slider.Maximum))
+                if (!hasExplicitRange && (updatedValue < editor.Slider.MappedMinimum || updatedValue > editor.Slider.MappedMaximum))
                 {
                     var dynamicSpan = Math.Max(1.0, Math.Abs(updatedValue) * 2.0);
-                    editor.Slider.Minimum = updatedValue - dynamicSpan;
-                    editor.Slider.Maximum = updatedValue + dynamicSpan;
+                    editor.Slider.ConfigureRange(updatedValue - dynamicSpan, updatedValue + dynamicSpan, updatedValue, isInteger ? 1.0 : 0.001);
                 }
-                editor.Slider.Value = Math.Clamp(updatedValue, editor.Slider.Minimum, editor.Slider.Maximum);
+                else
+                {
+                    editor.Slider.SetMappedValue(updatedValue, false);
+                }
             }
         });
 
@@ -2057,12 +2156,47 @@ public sealed partial class MainWindow : Window
         return panel;
     }
 
+    private FrameworkElement CreateMappedSliderLabel(string text, ICollection<FrameworkElement> indicatorCollection)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var indicator = new TextBlock
+        {
+            Text = "L",
+            FontSize = 12,
+            FontWeight = Microsoft.UI.Text.FontWeights.Bold,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            Visibility = ViewModel.Settings.SliderSymLog ? Visibility.Visible : Visibility.Collapsed,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        ToolTipService.SetToolTip(indicator, "Symmetric logarithmic scale");
+        AutomationProperties.SetName(indicator, "Symmetric logarithmic scale enabled");
+        indicatorCollection.Add(indicator);
+
+        var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch };
+        header.ColumnDefinitions.Add(new ColumnDefinition());
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(label);
+        Grid.SetColumn(indicator, 1);
+        header.Children.Add(indicator);
+        return header;
+    }
+
     private FrameworkElement BuildUniformEditor(UniformViewModel uniform)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(new TextBlock { Text = uniform.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
+        var hasNumericSlider = !hasChoiceEditor && uniform.Type != "bool";
+        panel.Children.Add(hasNumericSlider
+            ? CreateMappedSliderLabel(uniform.Label, _fxLogIndicators)
+            : new TextBlock { Text = uniform.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
 
-        if ((uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0)
+        if (hasChoiceEditor)
         {
             var combo = new ComboBox { MinWidth = 180, Tag = uniform, HorizontalAlignment = HorizontalAlignment.Stretch };
             foreach (var item in uniform.Items)
@@ -2088,7 +2222,7 @@ public sealed partial class MainWindow : Window
 
         var numericValues = uniform.Values.Length == 0 ? new[] { 0.0 } : uniform.Values.Select(ToDouble).ToArray();
         var textBoxes = new List<TextBox>();
-        var sliders = new List<Slider>();
+        var sliders = new List<MappedSlider>();
         for (var i = 0; i < numericValues.Length; ++i)
         {
             var componentIndex = i;
@@ -2102,23 +2236,24 @@ public sealed partial class MainWindow : Window
             if (Math.Abs(maximum - minimum) < 0.000001)
                 maximum = minimum + 1.0;
 
-            var slider = new Slider
+            var step = uniform.Step ?? (uniform.Type == "float" ? 0.001 : 1.0);
+            var slider = new MappedSlider
             {
-                Minimum = minimum,
-                Maximum = maximum,
-                Value = Math.Clamp(numericValues[i], minimum, maximum),
-                StepFrequency = uniform.Step ?? (uniform.Type == "float" ? 0.001 : 1.0),
                 Tag = uniform,
                 MinWidth = 120,
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
-            var textBox = new TextBox { Text = numericValues[i].ToString("0.######"), HorizontalAlignment = HorizontalAlignment.Stretch };
+            slider.ConfigureRange(minimum, maximum, numericValues[i], step);
+            slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
+            slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
+            _fxMappedSliders.Add(slider);
+            var textBox = new TextBox { Text = numericValues[i].ToString("0.######", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
             textBoxes.Add(textBox);
             sliders.Add(slider);
-            slider.ValueChanged += (_, _) =>
+            slider.MappedValueChanged += (_, args) =>
             {
-                textBox.Text = slider.Value.ToString("0.######");
-                QueueUniformUpdate(uniform, BuildNumericValue(textBoxes, componentIndex, slider.Value));
+                textBox.Text = args.Value.ToString("0.######", CultureInfo.InvariantCulture);
+                QueueUniformUpdate(uniform, BuildNumericValue(textBoxes, componentIndex, args.Value));
             };
             textBox.KeyDown += async (_, args) =>
             {
@@ -2145,15 +2280,15 @@ public sealed partial class MainWindow : Window
         return panel;
     }
 
-    private static void ApplyTextValuesToSliders(IReadOnlyList<TextBox> boxes, IReadOnlyList<Slider> sliders)
+    private static void ApplyTextValuesToSliders(IReadOnlyList<TextBox> boxes, IReadOnlyList<MappedSlider> sliders)
     {
         for (var i = 0; i < boxes.Count && i < sliders.Count; ++i)
         {
-            if (!double.TryParse(boxes[i].Text, out var value))
+            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
                 continue;
 
-            sliders[i].Value = Math.Clamp(value, sliders[i].Minimum, sliders[i].Maximum);
-            boxes[i].Text = sliders[i].Value.ToString("0.######");
+            sliders[i].SetMappedValue(value, false);
+            boxes[i].Text = sliders[i].MappedValue.ToString("0.######", CultureInfo.InvariantCulture);
         }
     }
 

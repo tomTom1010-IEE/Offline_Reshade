@@ -274,6 +274,27 @@ upside down, too bright, too dark, or completely black. If that happens, first
 test with `Preset INI` blank, then rebuild the preset inside Offline ReShade and
 click `Save Preset`.
 
+### Fine Slider Control
+
+FX and WinUI add-on numeric sliders support two global precision controls:
+
+- Hover a numeric slider and use `Ctrl + mouse wheel` to select `x1`, `x2`,
+  `x4`, or `x8`. Scrolling up increases the factor and scrolling down reduces
+  it. A higher factor requires more mouse travel for the same parameter change,
+  which makes fine adjustment easier. The current factor briefly appears in
+  the center of the window.
+- Press `L` to switch all numeric sliders between linear and symmetric
+  logarithmic mapping. SymLog gives more slider space to values near zero while
+  still supporting negative and positive ranges. When it is enabled, an `L`
+  marker appears next to every numeric slider and a center overlay confirms the
+  mode change.
+
+The precision factor is selected before dragging; the mouse wheel does not need
+to be used during a drag. SymLog changes only how the slider maps pointer
+movement to its range. Text boxes, the ReShade runtime, screenshots, and presets
+continue to use the real parameter value. Both choices are saved automatically
+and restored the next time the client starts.
+
 ### Using Add-ons
 
 Add-on support is available after `Start Preview` creates the native runtime.

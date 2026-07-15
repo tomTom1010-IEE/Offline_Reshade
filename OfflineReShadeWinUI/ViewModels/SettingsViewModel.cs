@@ -20,6 +20,8 @@ public sealed class SettingsViewModel : ObservableObject
     private string _galleryOutputFolder = string.Empty;
     private string _galleryBatchFrameDelay = "5";
     private bool _showFps = true;
+    private int _sliderDragSensitivity = 1;
+    private bool _sliderSymLog;
 
     public SettingsViewModel(AppPaths paths)
     {
@@ -44,4 +46,14 @@ public sealed class SettingsViewModel : ObservableObject
     public string GalleryOutputFolder { get => _galleryOutputFolder; set => SetProperty(ref _galleryOutputFolder, value); }
     public string GalleryBatchFrameDelay { get => _galleryBatchFrameDelay; set => SetProperty(ref _galleryBatchFrameDelay, value); }
     public bool ShowFps { get => _showFps; set => SetProperty(ref _showFps, value); }
+    public int SliderDragSensitivity { get => _sliderDragSensitivity; set => SetProperty(ref _sliderDragSensitivity, NormalizeSliderDragSensitivity(value)); }
+    public bool SliderSymLog { get => _sliderSymLog; set => SetProperty(ref _sliderSymLog, value); }
+
+    private static int NormalizeSliderDragSensitivity(int value) => value switch
+    {
+        2 => 2,
+        4 => 4,
+        8 => 8,
+        _ => 1
+    };
 }

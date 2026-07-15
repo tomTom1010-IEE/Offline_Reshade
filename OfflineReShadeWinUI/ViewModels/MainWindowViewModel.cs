@@ -221,6 +221,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ApplyIfNotNull(settings.GalleryBatchFrameDelay, value => Settings.GalleryBatchFrameDelay = value);
             if (settings.ShowFps.HasValue)
                 Settings.ShowFps = settings.ShowFps.Value;
+            if (settings.SliderDragSensitivity.HasValue)
+                Settings.SliderDragSensitivity = settings.SliderDragSensitivity.Value;
+            if (settings.SliderSymLog.HasValue)
+                Settings.SliderSymLog = settings.SliderSymLog.Value;
             _kksPaths = settings.KksPaths ?? new PersistedProfilePaths();
             _kkPaths = settings.KkPaths ?? new PersistedProfilePaths();
             if (string.Equals(settings.InputMode, "Gallery", StringComparison.OrdinalIgnoreCase))
@@ -968,6 +972,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             GalleryOutputFolder = Settings.GalleryOutputFolder,
             GalleryBatchFrameDelay = Settings.GalleryBatchFrameDelay,
             ShowFps = Settings.ShowFps,
+            SliderDragSensitivity = Settings.SliderDragSensitivity,
+            SliderSymLog = Settings.SliderSymLog,
             InputMode = InputMode,
             KksPaths = _kksPaths,
             KkPaths = _kkPaths

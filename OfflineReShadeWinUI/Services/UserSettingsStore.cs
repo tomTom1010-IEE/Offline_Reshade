@@ -71,6 +71,8 @@ public sealed class PersistedUiSettings
     public string? GalleryOutputFolder { get; set; }
     public string? GalleryBatchFrameDelay { get; set; }
     public bool? ShowFps { get; set; }
+    public int? SliderDragSensitivity { get; set; }
+    public bool? SliderSymLog { get; set; }
     public string? InputMode { get; set; }
     public PersistedProfilePaths? KksPaths { get; set; }
     public PersistedProfilePaths? KkPaths { get; set; }
