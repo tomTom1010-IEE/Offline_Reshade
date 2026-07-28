@@ -45,6 +45,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isDisposed;
     private bool _controlStatePopulated;
     private bool _isRefreshingControlState;
+    private bool _isEffectsLoading;
+    private DateTimeOffset? _effectsLoadingStartedAt;
     private bool _hasPersistedDepthProfile;
     private bool _isApplyingProfilePaths;
     private string _currentDepthProfile = "kks";
@@ -145,6 +147,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public bool EffectsEnabled { get => _effectsEnabled; private set => SetProperty(ref _effectsEnabled, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
     public string ControlStatusText { get => _controlStatusText; private set => SetProperty(ref _controlStatusText, value); }
+    public bool IsEffectsLoading
+    {
+        get => _isEffectsLoading;
+        private set
+        {
+            if (SetProperty(ref _isEffectsLoading, value))
+                OnPropertyChanged(nameof(EffectsLoadingOpacity));
+        }
+    }
+    public double EffectsLoadingOpacity => IsEffectsLoading ? 1.0 : 0.0;
     public string PreviewInfoText { get => _previewInfoText; private set => SetProperty(ref _previewInfoText, value); }
     public string FpsText { get => _fpsText; private set => SetProperty(ref _fpsText, value); }
     public string LogText { get => _logText; private set => SetProperty(ref _logText, value); }
@@ -338,6 +350,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task SetPreprocessorDefinitionAsync(PreprocessorDefinitionViewModel definition, string value)
     {
         definition.Value = value;
+        MarkEffectsLoading();
         await _rpc.CallAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
         await Task.Delay(500);
         await RefreshControlStateAsync();
@@ -495,8 +508,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             await _rpc.ConnectAsync(pipeName, CancellationToken.None);
             ControlStatusText = "Connected";
             RaiseControlCommandStates();
-            StartFpsPolling();
             await RefreshControlStateAsync();
+            StartFpsPolling();
         }
         catch (Exception ex)
         {
@@ -520,6 +533,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             StatusText = "Preview stopped";
         ControlStatusText = "Disconnected";
         _controlStatePopulated = false;
+        CompleteEffectsLoading();
         FpsText = string.Empty;
         SharedPreviewHandle = 0;
         SharedPreviewWidth = 0;
@@ -653,6 +667,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task ReloadAsync()
     {
+        MarkEffectsLoading();
         await _rpc.CallAsync("reload_effects");
         await Task.Delay(500);
         await RefreshControlStateAsync();
@@ -672,23 +687,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _isRefreshingControlState = true;
         try
         {
-            JsonElement state = default;
-            for (var attempt = 0; attempt < 240; ++attempt)
+            var runtimeInfo = await _rpc.CallAsync("get_runtime_info");
+            if (IsRuntimeLoading(runtimeInfo))
             {
-                state = await _rpc.CallAsync("list_state");
-                var hasEffectControls =
-                    (state.TryGetProperty("techniques", out var techniques) && techniques.GetArrayLength() != 0) ||
-                    (state.TryGetProperty("uniforms", out var uniforms) && uniforms.GetArrayLength() != 0);
-                var isLoading = state.TryGetProperty("runtime", out var runtime) &&
-                    runtime.TryGetProperty("loading", out var loading) &&
-                    loading.ValueKind == JsonValueKind.True;
-                if (hasEffectControls || !isLoading)
-                {
-                    break;
-                }
+                MarkEffectsLoading();
+                return;
+            }
 
-                ControlStatusText = "Loading effects";
-                await Task.Delay(250);
+            var state = await _rpc.CallAsync("list_state");
+            if (IsRuntimeLoading(state))
+            {
+                MarkEffectsLoading();
+                return;
             }
 
             var techniquesList = JsonStateParser.ParseTechniques(state);
@@ -745,6 +755,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             var hasLoadedEffectControls = techniquesList.Count != 0 || uniformsList.Count != 0 || definitionsList.Count != 0;
             _controlStatePopulated = true;
+            CompleteEffectsLoading();
             ControlStatusText = hasLoadedEffectControls ? "Ready" : "No effects";
             RaiseControlCommandStates();
             ControlsChanged?.Invoke();
@@ -753,6 +764,39 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             _isRefreshingControlState = false;
         }
+    }
+
+    private void MarkEffectsLoading()
+    {
+        _controlStatePopulated = false;
+        if (!IsEffectsLoading)
+        {
+            _effectsLoadingStartedAt = DateTimeOffset.UtcNow;
+            IsEffectsLoading = true;
+        }
+
+        var elapsedSeconds = _effectsLoadingStartedAt.HasValue
+            ? Math.Max(0, (int)(DateTimeOffset.UtcNow - _effectsLoadingStartedAt.Value).TotalSeconds)
+            : 0;
+        ControlStatusText = elapsedSeconds == 0
+            ? "Loading effects"
+            : string.Create(CultureInfo.InvariantCulture, $"Loading effects ({elapsedSeconds}s)");
+    }
+
+    private void CompleteEffectsLoading()
+    {
+        _effectsLoadingStartedAt = null;
+        IsEffectsLoading = false;
+    }
+
+    private static bool IsRuntimeLoading(JsonElement state)
+    {
+        if (state.TryGetProperty("loading", out var loading))
+            return loading.ValueKind == JsonValueKind.True;
+
+        return state.TryGetProperty("runtime", out var runtime) &&
+            runtime.TryGetProperty("loading", out loading) &&
+            loading.ValueKind == JsonValueKind.True;
     }
 
     private void StartFpsPolling()
@@ -829,10 +873,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     FpsText = Settings.ShowFps
                         ? string.Create(CultureInfo.InvariantCulture, $"Runtime {renderFps:0.0} FPS | Preview {previewFps:0.0} FPS")
                         : string.Empty;
+                    var isLoading = IsRuntimeLoading(info);
+                    if (isLoading)
+                    {
+                        MarkEffectsLoading();
+                    }
+                    else if ((IsEffectsLoading || !_controlStatePopulated) && !_isRefreshingControlState)
+                    {
+                        await RefreshControlStateAsync();
+                    }
                     var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
                     ApplyAddonUiState(addonUi);
-                    if (!_controlStatePopulated && !_isRefreshingControlState)
-                        _ = RefreshControlStateAsync();
                 }
                 else
                 {

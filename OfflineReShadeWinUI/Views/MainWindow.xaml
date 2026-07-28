@@ -15,6 +15,10 @@
     </Grid.RowDefinitions>
 
     <Grid Grid.Row="0" Padding="16,10" Background="#20242B">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="*" />
@@ -53,6 +57,14 @@
         <TextBlock Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="#C9D1D9" />
         <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" Foreground="White" FontWeight="SemiBold" />
       </StackPanel>
+
+      <ProgressBar Grid.Row="1"
+                   Grid.ColumnSpan="3"
+                   Height="3"
+                   Margin="0,8,0,0"
+                   IsIndeterminate="{x:Bind ViewModel.IsEffectsLoading, Mode=OneWay}"
+                   Opacity="{x:Bind ViewModel.EffectsLoadingOpacity, Mode=OneWay}"
+                   AutomationProperties.Name="ReShade effect compilation progress" />
     </Grid>
 
     <Grid Grid.Row="1">
