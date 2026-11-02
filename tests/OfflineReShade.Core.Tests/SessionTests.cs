@@ -60,6 +60,12 @@ internal static class SessionTests
         host.RecoveryRequired = true;
         await Fails<DeviceLostException>(() => session.OpenAsync(input));
         host.RecoveryRequired = false;
+        var diskPreset = Path.Combine(folder, "session-preset.ini");
+        await File.WriteAllTextAsync(diskPreset, "fixture");
+        await session.LoadPresetAsync(diskPreset);
+        host.Gain = 0.38;
+        await session.LoadPresetAsync(diskPreset);
+        Check(host.Gain == 1, "Explicitly loading the same preset retained unsaved parameters instead of loading disk contents.");
         await session.DisposeAsync();
         Check(host.Disposed && !host.IsConnected, "Dispose did not release the owned host.");
         await Fails<ObjectDisposedException>(() => session.OpenAsync(input));

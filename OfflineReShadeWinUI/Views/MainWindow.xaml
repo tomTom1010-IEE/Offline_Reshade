@@ -5,6 +5,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
+    xmlns:views="using:OfflineReShade.WinUI.Views"
     mc:Ignorable="d"
     Title="Offline ReShade">
 
@@ -16,6 +17,7 @@
 
     <Grid Grid.Row="0" Padding="16,10" Background="#20242B">
       <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
@@ -55,7 +57,6 @@
           <TextBlock Grid.Column="2" Text="Gallery" Foreground="#C9D1D9" VerticalAlignment="Center" />
         </Grid>
         <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Foreground="#C9D1D9" />
-        <TextBlock Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="#C9D1D9" />
         <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" Foreground="White" FontWeight="SemiBold" />
       </StackPanel>
 
@@ -66,13 +67,35 @@
                    IsIndeterminate="{x:Bind ViewModel.IsEffectsLoading, Mode=OneWay}"
                    Opacity="{x:Bind ViewModel.EffectsLoadingOpacity, Mode=OneWay}"
                    AutomationProperties.Name="ReShade effect compilation progress" />
-      <Grid Grid.Row="2" Grid.ColumnSpan="3" ColumnSpacing="12" Margin="0,8,0,0">
+      <Button Grid.Row="1" Grid.Column="2" Content="Cancel operation" HorizontalAlignment="Right" Margin="8,4,0,0"
+              Command="{x:Bind ViewModel.CancelOperationCommand}" AutomationProperties.AutomationId="CancelOperation"
+              Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsOperationRunning), Mode=OneWay}" />
+      <Grid Grid.Row="2" Grid.ColumnSpan="3" ColumnSpacing="12" Margin="0,8,0,0" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.HasBatchTask), Mode=OneWay}">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
         <ProgressBar Value="{x:Bind ViewModel.BatchProgress, Mode=OneWay}" Maximum="{x:Bind ViewModel.BatchMaximum, Mode=OneWay}"
                      AutomationProperties.Name="Batch export progress" VerticalAlignment="Center" />
         <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" VerticalAlignment="Center" />
         <Button Grid.Column="2" Content="Cancel batch" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="CancelBatch" />
       </Grid>
+      <InfoBar Grid.Row="3" Grid.ColumnSpan="3" Margin="0,8,0,0"
+               IsOpen="{x:Bind ViewModel.FeedbackOpen, Mode=TwoWay}"
+               Severity="{x:Bind views:MainWindow.NoticeSeverity(ViewModel.FeedbackStatus), Mode=OneWay}"
+               Title="{x:Bind ViewModel.FeedbackTitle, Mode=OneWay}" Message="{x:Bind ViewModel.FeedbackMessage, Mode=OneWay}"
+               AutomationProperties.AutomationId="OperationFeedback" AutomationProperties.LiveSetting="Polite">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Button Content="Retry" AutomationProperties.AutomationId="RetryOperation" Command="{x:Bind ViewModel.RetryOperationCommand}" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.CanRetryOperation), Mode=OneWay}" />
+          <Button Content="Locate files" AutomationProperties.AutomationId="LocateOperationFiles" Command="{x:Bind ViewModel.LocateFeedbackCommand}" />
+          <Button Content="Details" AutomationProperties.AutomationId="OperationDetails">
+            <Button.Flyout>
+              <Flyout>
+                <ScrollViewer MaxHeight="360" MaxWidth="640">
+                  <TextBox Header="Operation details" AutomationProperties.AutomationId="OperationDetailsText" Text="{x:Bind ViewModel.FeedbackDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinWidth="300" />
+                </ScrollViewer>
+              </Flyout>
+            </Button.Flyout>
+          </Button>
+        </StackPanel>
+      </InfoBar>
     </Grid>
 
     <Grid Grid.Row="1">
@@ -377,6 +400,15 @@
                   <CompositeTransform x:Name="PreviewTransform" />
                 </Image.RenderTransform>
               </Image>
+              <Border Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="24"
+                      Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.ShowEmptyCanvas), Mode=OneWay}">
+                <StackPanel Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420">
+                  <TextBlock Text="{x:Bind ViewModel.EmptyTitle, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                  <TextBlock Text="{x:Bind ViewModel.EmptyMessage, Mode=OneWay}" TextWrapping="Wrap" />
+                  <Button Content="Open input settings" AutomationProperties.AutomationId="EmptyOpenInput" Command="{x:Bind ViewModel.ToggleSettingsCommand}" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}" />
+                  <Button Content="Cancel operation" AutomationProperties.AutomationId="EmptyCancelOperation" Command="{x:Bind ViewModel.CancelOperationCommand}" />
+                </StackPanel>
+              </Border>
             </Grid>
           </Grid>
         </Border>

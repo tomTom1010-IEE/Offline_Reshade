@@ -179,7 +179,7 @@ public sealed partial class MainWindow : Window
             catch (Exception ex)
             {
                 _closeRequested = false;
-                await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not finish closing", Content = ex.Message, CloseButtonText = "OK" }.ShowAsync();
+                ViewModel.ReportUiError(ex, "close_session");
             }
         };
         Closed += (_, _) =>
@@ -2429,15 +2429,10 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            ContentDialog dialog = new()
-            {
-                Title = "Offline ReShade",
-                Content = ex.Message,
-                CloseButtonText = "OK",
-                XamlRoot = Content.XamlRoot
-            };
-            await dialog.ShowAsync();
+            ViewModel.ReportUiError(ex);
             return false;
         }
     }
+    public static Visibility BoolVisibility(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
+    public static InfoBarSeverity NoticeSeverity(string status) => status is "failed" or "rejected" ? InfoBarSeverity.Error : status == "warning" ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
 }

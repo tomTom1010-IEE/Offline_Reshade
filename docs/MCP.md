@@ -43,6 +43,32 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
+### Shared operation results (automation broker 2)
+
+WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
+an exclusive operation (open, preset load/save, reload, export or batch) drains previously
+accepted updates and rejects new mutations until completion. A batch remains active
+through restoring the original input, not only until its submission returns.
+
+Mutating tools return `structuredContent` and equivalent JSON text. Completed operations
+include `operation` with `id`, `operation`, `status`, `code`, `message`, `sourcePath`,
+`targetPath` and applicable recovery `actions`. Status is `succeeded`, `warning`,
+`cancelled`, `failed` or `rejected`; an active request reports `running`. Errors use
+MCP `isError: true`; intentional black output is a successful tool response with
+`operation.status: warning`, and retains the existing `warning` field.
+
+`get_operation_status` exposes runtime observation, active operation, latest result and
+persistent notice even without an open runtime. `get_status` includes the same `activity`.
+`cancel_operation` cancels accepted work; attached clients use a separate control connection
+so cancellation is not queued behind the request it must interrupt. Cancellation waits
+for native response draining and any required restoration before the session is editable.
+It cannot undo an output file already atomically written by the native host.
+
+`save_preset` validates a temporary exported INI before replacing the destination;
+silent native write failures do not report success or overwrite the previous preset.
+Explicitly loading the same preset path reloads disk contents into the private working
+copy. Ordinary input switches continue preserving unsaved parameters.
+
 ## Independent rendering
 
 Without attachment, `open_input` starts an owned native process. Example arguments:
@@ -166,7 +192,7 @@ system GPU; it does not replace hardware driver-reset testing.
 
 ## Maintenance contract (0.8.3)
 
-Native RPC is now **5**, automation broker **1**, custom offline DLL API **1**,
+Native RPC is now **5**, automation broker **2**, custom offline DLL API **1**,
 and preview bridge ABI **3**. These are internal component contracts, separate
 from MCP's negotiated stdio protocol. Connecting or attaching validates the
 contract and pinned upstream before any mutation; update the whole package together.

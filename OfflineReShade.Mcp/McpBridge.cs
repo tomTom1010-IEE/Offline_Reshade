@@ -30,9 +30,20 @@ public sealed class McpBridge : IAsyncDisposable
     public async Task<JsonElement> CallAsync(string method, object? arguments = null, CancellationToken token = default)
     {
         var json = AutomationEngine.Json(arguments ?? new { });
-        if (_attached != null) return await _attached.CallAsync(method, json, token);
+        if (_attached != null)
+        {
+            if (method is "cancel_operation" or "batch_cancel" or "get_operation_status" or "batch_status")
+            {
+                // A second connection allows cancellation/status while the first awaits a mutation.
+                using var control = new RuntimeConnection();
+                await control.ConnectAsync(_session?.PipeName ?? "OfflineReShade.Automation." + _sessionId, token);
+                await Compatibility.VerifyAsync(control, "automation", token);
+                return await control.CallAsync(method, json, token);
+            }
+            return await _attached.CallAsync(method, json, token);
+        }
         _native ??= new NativeSession(_nativePath);
-        _engine ??= new AutomationEngine(_native.CallAsync, _native.OpenAsync, () => _native.Current);
+        _engine ??= new AutomationEngine(_native.CallAsync, _native.OpenAsync, () => _native.Current, _native.LoadPresetAsync);
         return await _engine.ExecuteAsync(method, json, token);
     }
     public object ConnectionInfo() => new { mode = Mode, session = _sessionId, name = _session?.Name };

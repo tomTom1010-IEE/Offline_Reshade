@@ -6,12 +6,14 @@ public sealed class AsyncRelayCommand : ICommand
 {
     private readonly Func<Task> _execute;
     private readonly Func<bool>? _canExecute;
+    private readonly Action<Exception> _reportError;
     private bool _isRunning;
 
-    public AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute = null)
+    public AsyncRelayCommand(Func<Task> execute, Action<Exception> reportError, Func<bool>? canExecute = null)
     {
         _execute = execute;
         _canExecute = canExecute;
+        _reportError = reportError;
     }
 
     public event EventHandler? CanExecuteChanged;
@@ -31,7 +33,7 @@ public sealed class AsyncRelayCommand : ICommand
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine(ex);
+            _reportError(ex);
         }
         finally
         {

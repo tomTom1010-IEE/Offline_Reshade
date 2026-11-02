@@ -25,12 +25,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ulong AdapterLuid { get; private set; }
     public uint RenderWidth { get; private set; }
     public uint RenderHeight { get; private set; }
-    public bool CanEditSession => !IsBatchApplying;
+    public bool CanEditSession => !_automation.IsExclusive;
     public string AutomationSessionText => "MCP session: " + _broker.Descriptor.Id;
     public string AutomationSessionId => _broker.Descriptor.Id;
     public double BatchProgress => _automation.Job?.Completed ?? 0;
     public double BatchMaximum => Math.Max(1, _automation.Job?.Total ?? 1);
-    public string BatchStatusText => _automation.Job is { } j ? $"{j.State}: {j.Completed}/{j.Total}" + (j.Error == null ? "" : " — " + j.Error) : "Ready";
+    public string BatchStatusText => _automation.Job is { } j ? $"{j.State}: {j.Completed}/{j.Total}" + (j.Error == null ? "" : " — " + j.Error) : "No batch task";
     public RelayCommand CancelBatchCommand { get; }
 
     private readonly PreviewFrameClient _previewFrames = new();
@@ -43,7 +43,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isSettingsOpen;
     private bool _isBatchApplying;
     private bool _effectsEnabled = true;
-    private string _statusText = "Ready";
     private string _controlStatusText = "Disconnected";
     private string _previewInfoText = "Full-res ReShade preview";
     private string _fpsText = string.Empty;
@@ -92,31 +91,36 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _previewFrames.ErrorReceived += AppendLog;
         _syncContext = uiContext ?? SynchronizationContext.Current;
 
-        _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current);
+        _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current,
+            (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true));
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
-        StartPreviewCommand = new AsyncRelayCommand(StartPreviewAsync, () => !IsPreviewRunning && CanEditSession);
-        StopPreviewCommand = new AsyncRelayCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0);
+        StartPreviewCommand = CreateCommand(StartPreviewAsync, () => !IsPreviewRunning && CanEditSession);
+        StopPreviewCommand = CreateCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0);
         CancelBatchCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.Job?.State == "running");
-        SavePngCommand = new AsyncRelayCommand(SavePngAsync, () => CanEditSession);
-        ReShadeShotCommand = new AsyncRelayCommand(ReShadeShotAsync, () => _session.IsConnected && CanEditSession);
-        ReloadCommand = new AsyncRelayCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
-        SavePresetCommand = new AsyncRelayCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
-        ToggleInputModeCommand = new AsyncRelayCommand(ToggleInputModeAsync, () => CanEditSession);
+        SavePngCommand = CreateCommand(SavePngAsync, () => CanEditSession);
+        ReShadeShotCommand = CreateCommand(ReShadeShotAsync, () => _session.IsConnected && CanEditSession);
+        ReloadCommand = CreateCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
+        SavePresetCommand = CreateCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
+        ToggleInputModeCommand = CreateCommand(ToggleInputModeAsync, () => CanEditSession);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
-        BatchApplySavePngCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
-        BatchApplyReShadeShotCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
+        BatchApplySavePngCommand = CreateCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
+        BatchApplyReShadeShotCommand = CreateCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
-        PickColorCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.ColorPath = path, picker => picker.PickPngAsync()));
-        PickDepthCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.DepthPath = path, picker => picker.PickDepthAsync()));
-        PickEffectDirCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.EffectDir = path, picker => picker.PickFolderAsync()));
-        PickPresetCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.PresetPath = path, picker => picker.PickIniAsync()));
-        PickOutputCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.OutputPath = path, picker => picker.PickOutputPngAsync()));
-        PickGalleryInputFolderCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
-        PickGalleryOutputFolderCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
+        PickColorCommand = CreateCommand(async () => await PickPathAsync(path => Settings.ColorPath = path, picker => picker.PickPngAsync()));
+        PickDepthCommand = CreateCommand(async () => await PickPathAsync(path => Settings.DepthPath = path, picker => picker.PickDepthAsync()));
+        PickEffectDirCommand = CreateCommand(async () => await PickPathAsync(path => Settings.EffectDir = path, picker => picker.PickFolderAsync()));
+        PickPresetCommand = CreateCommand(async () => await PickPathAsync(path => Settings.PresetPath = path, picker => picker.PickIniAsync()));
+        PickOutputCommand = CreateCommand(async () => await PickPathAsync(path => Settings.OutputPath = path, picker => picker.PickOutputPngAsync()));
+        PickGalleryInputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
+        PickGalleryOutputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
 
+        CancelOperationCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.IsBusy);
+        RetryOperationCommand = CreateCommand(async () => { await _automation.RetryAsync(); if (_session.IsConnected) await RefreshControlStateAsync(); }, () => CanRetryOperation && CanEditSession);
+        LocateFeedbackCommand = CreateCommand(LocateFeedbackAsync, () => FeedbackPath.Length > 0);
+        if (_settingsStore.LoadError != null) ReportUiError(new IOException(_settingsStore.LoadError), "load_settings");
         if (IsGalleryMode)
             RefreshGalleryItems();
     }
@@ -171,7 +175,41 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsSettingsOpen { get => _isSettingsOpen; set => SetProperty(ref _isSettingsOpen, value); }
     public bool EffectsEnabled { get => _effectsEnabled; private set => SetProperty(ref _effectsEnabled, value); }
-    public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
+    private ActivitySnapshot Activity => _automation.Activity.Snapshot;
+    public string StatusText => Activity.StatusText;
+    public bool ShowEmptyCanvas => Activity.ShowEmpty;
+    public string EmptyTitle => Activity.EmptyTitle;
+    public string EmptyMessage => Activity.EmptyMessage;
+    public bool HasBatchTask => _automation.Job != null;
+    public bool IsOperationRunning => _automation.IsBusy;
+    public bool FeedbackOpen { get => Activity.Notice != null || Activity.Runtime.Error != null || Activity.Runtime.PreviewWarning != null; set { if (!value) _automation.Activity.Dismiss(); } }
+    public string FeedbackTitle => Activity.Notice is { } n ? $"{ApplicationActivity.Label(n.Operation)}: {n.Status}" : "Preview needs attention";
+    public string FeedbackMessage => Activity.Notice?.Message ?? Activity.Runtime.Error ?? Activity.Runtime.PreviewWarning ?? "";
+    public string FeedbackStatus => Activity.Notice?.Status ?? (Activity.Runtime.Error != null ? "failed" : "warning");
+    public string FeedbackDetails => System.Text.Json.JsonSerializer.Serialize(Activity, AutomationEngine.JsonOptions) + Environment.NewLine + LogText;
+    public bool CanRetryOperation => _automation.Activity.RetryRequest != null;
+    public string FeedbackPath => Activity.Notice?.TargetPath ?? Activity.Notice?.SourcePath ?? Activity.Runtime.InputPath;
+    public RelayCommand CancelOperationCommand { get; }
+    public AsyncRelayCommand RetryOperationCommand { get; }
+    public AsyncRelayCommand LocateFeedbackCommand { get; }
+    private AsyncRelayCommand CreateCommand(Func<Task> action, Func<bool>? canExecute = null) => new(action, error => ReportUiError(error), canExecute);
+    public void ReportUiError(Exception error, string operation = "edit")
+    {
+        AppendLog(error.ToString());
+        _automation.Activity.Report(error, operation, _session.Current);
+    }
+    private Task<JsonElement> ExecuteOperationAsync(string method, object? args = null, CancellationToken token = default)
+        => _automation.ExecuteAsync(method, AutomationEngine.Json(args ?? new { }), token);
+    private Task LocateFeedbackAsync()
+    {
+        var path = Path.GetFullPath(FeedbackPath);
+        var directory = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+        while (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) directory = Path.GetDirectoryName(directory);
+        if (directory == null) throw new DirectoryNotFoundException("The associated directory is unavailable.");
+        var start = new System.Diagnostics.ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+        start.ArgumentList.Add(directory); System.Diagnostics.Process.Start(start);
+        return Task.CompletedTask;
+    }
     public string ControlStatusText { get => _controlStatusText; private set => SetProperty(ref _controlStatusText, value); }
     public bool IsEffectsLoading
     {
@@ -292,22 +330,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetEffectsEnabledAsync(bool enabled)
     {
-        if (!CanEditSession) return;
-        await _session.CallAsync("set_effects_state", new { enabled });
+        await ExecuteOperationAsync("set_effects_state", new { enabled });
         EffectsEnabled = enabled;
     }
 
     public async Task SetTechniqueStateAsync(TechniqueViewModel technique, bool enabled)
     {
-        if (!CanEditSession) return;
+        await ExecuteOperationAsync("set_technique_state", new { id = technique.Id, enabled });
         technique.IsEnabled = enabled;
-        await _session.CallAsync("set_technique_state", new { id = technique.Id, enabled });
         await RefreshControlStateAsync();
     }
 
     public async Task ReorderTechniquesAsync(IReadOnlyList<TechniqueViewModel> techniques)
     {
-        if (!CanEditSession) return;
         if (!_session.IsConnected || techniques.Count == 0)
             return;
 
@@ -317,7 +352,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            await _session.CallAsync("reorder_techniques", new { ids });
+            await ExecuteOperationAsync("reorder_techniques", new { ids });
         }
         catch
         {
@@ -353,7 +388,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task ReorderEnabledEffectsAsync(IReadOnlyList<string> orderedEffectNames)
     {
-        if (!CanEditSession) return;
         if (!_session.IsConnected || orderedEffectNames.Count == 0)
             return;
 
@@ -384,35 +418,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetUniformAsync(UniformViewModel uniform, object value)
     {
-        if (!CanEditSession) return;
-        await _session.CallAsync("set_uniform", new { id = uniform.Id, value });
+        await ExecuteOperationAsync("set_uniform", new { id = uniform.Id, value });
     }
 
     public async Task SetPreprocessorDefinitionAsync(PreprocessorDefinitionViewModel definition, string value)
     {
-        if (!CanEditSession) return;
-        definition.Value = value;
         MarkEffectsLoading();
-        await _session.CallAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
+        await ExecuteOperationAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
+        definition.Value = value;
         await Task.Delay(500);
         await RefreshControlStateAsync();
     }
 
     public async Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value)
     {
-        if (!CanEditSession) return;
-        await _session.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
+        await ExecuteOperationAsync("set_addon_imgui_value", new { id = control.Id, value });
     }
 
     public async Task OpenNativeAddonPanelAsync()
     {
-        if (!CanEditSession) return;
-        await _session.CallAsync("open_native_addon_panel");
+        await ExecuteOperationAsync("open_native_addon_panel");
     }
 
     public async Task SelectNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
     {
-        if (!CanEditSession) return;
+        // Presentation selection also runs while controls are rebuilt during an open.
+        // User input into the overlay remains serialized and blocked during exclusive work.
         await _session.CallAsync("set_native_addon_overlay", new
         {
             enabled = overlay != null,
@@ -430,7 +461,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            await _session.CallAsync("send_addon_overlay_input", new
+            await ExecuteOperationAsync("send_addon_overlay_input", new
             {
                 message = unchecked((int)input.Message),
                 wparam = unchecked((int)input.WParam),
@@ -458,7 +489,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _inputOverride = null;
         PreviewInfoText = item.BaseName;
         if (IsGalleryMode && _session.IsConnected)
-            await OpenAutomationInputAsync(InputForGallery(item), CancellationToken.None);
+            await ExecuteOperationAsync("open_input", InputForGallery(item));
     }
 
     public async Task ToggleInputModeAsync()
@@ -470,43 +501,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _inputOverride = null;
             if (IsGalleryMode) { RefreshGalleryItems(); EnsureGallerySelection(); }
             if (_session.IsConnected) {
-                await OpenAutomationInputAsync(CurrentRenderInput(), CancellationToken.None);
-                await _session.CallAsync("set_input_watch_enabled", new { enabled = !IsGalleryMode });
+                await ExecuteOperationAsync("open_input", CurrentRenderInput());
             }
-        } catch (Exception ex) { InputMode = previous; AppendLog(ex.Message); }
+        } catch { InputMode = previous; throw; }
     }
 
     private Task StartPreviewAsync() => StartPreviewCoreAsync(false);
-
     private async Task StartPreviewCoreAsync(bool preserveBatch)
     {
-        try
-        {
-            if (IsGalleryMode && _inputOverride == null) EnsureGallerySelection();
-            ControlStatusText = "Connecting";
-            await OpenAutomationInputAsync(CurrentRenderInput(), CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            AppendLog(ex.Message);
-            StatusText = "Failed";
-            ControlStatusText = _session.IsConnected ? "Connected" : "Control failed";
-            if (preserveBatch) throw;
-        }
+        if (IsGalleryMode && _inputOverride == null) EnsureGallerySelection();
+        await ExecuteOperationAsync("open_input", CurrentRenderInput());
     }
-
     private Task StopPreviewAsync() => StopPreviewAsync(updateStatus: true);
-    private async Task StopPreviewAsync(bool updateStatus)
-    {
-        _automation.Cancel(restore: false);
-        await _automation.StopAsync();
-        await _session.StopAsync();
-        if (updateStatus) StatusText = "Preview stopped";
-    }
+    private Task StopPreviewAsync(bool updateStatus) => _automation.StopSessionAsync(_session.StopAsync);
 
     private void ResetPreviewPresentation()
     {
         _runtimeGeneration++;
+        _automation.Activity.Disconnected();
         StopFpsPolling();
         _previewFrames.Stop();
         _cpuPreviewFallback = false;
@@ -537,25 +549,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private Task ReShadeShotAsync() => SaveImageAsync(true);
     private async Task SaveImageAsync(bool reShadeShot)
     {
-        try {
-            if (!_session.IsConnected) await StartPreviewCoreAsync(false);
-            StatusText = "Rendering";
-            var saved = await _automation.ExecuteAsync("export_image", AutomationEngine.Json(new { path = ActiveOutputPath, reShadeShot, warmupFrames = 5 }));
-            if (saved.TryGetProperty("warning", out var warning) && !string.IsNullOrEmpty(warning.GetString())) AppendLog(warning.GetString()!);
-            RefreshOutputInfo(); StatusText = "Saved";
-        } catch (Exception ex) { AppendLog(ex.Message); StatusText = "Failed"; }
+        if (!_session.IsConnected) await StartPreviewCoreAsync(false);
+        await ExecuteOperationAsync("export_image", new { path = ActiveOutputPath, reShadeShot, warmupFrames = 5 });
+        RefreshOutputInfo();
     }
 
     private async Task BatchApplyGalleryAsync(string saveMethod, string label)
     {
-        try {
-            if (!IsGalleryMode || !_session.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
-            RefreshGalleryItems();
-            var items = GalleryItems.Where(x => x.IsValid).Select(InputForGallery).ToArray();
-            var frames = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
-            await _automation.ExecuteAsync("batch_start", AutomationEngine.Json(new BatchRequest(items, frames, saveMethod == "save_screenshot")));
-            AppendLog($"Batch {label} started; existing validated outputs will be resumed.");
-        } catch (Exception ex) { AppendLog(ex.Message); StatusText = "Batch failed"; }
+        if (!IsGalleryMode || !_session.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
+        RefreshGalleryItems();
+        var items = GalleryItems.Where(x => x.IsValid).Select(InputForGallery).ToArray();
+        var frames = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
+        await ExecuteOperationAsync("batch_start", new BatchRequest(items, frames, saveMethod == "save_screenshot"));
     }
 
     private RenderInput CurrentRenderInput()
@@ -570,14 +575,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ColorPath = item.ColorPath, DepthPath = item.DepthPath, DepthFormat = item.DepthFormat,
         DepthProfile = EffectiveDepthProfile(item.DepthFormat), OutputPath = item.OutputPath, WatchInput = false };
 
-    private async Task OpenAutomationInputAsync(RenderInput input, CancellationToken token)
+    private Task OpenAutomationInputAsync(RenderInput input, CancellationToken token) => ApplySessionInputAsync(input, token);
+    private async Task ApplySessionInputAsync(RenderInput input, CancellationToken token, bool replacePreset = false)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         _pendingOpens++;
         StopPreviewCommand.RaiseCanExecuteChanged();
         try
         {
-            await _session.OpenAsync(input, token);
+            if (replacePreset) await _session.LoadPresetAsync(input.PresetPath, token);
+            else await _session.OpenAsync(input, token);
             _inputOverride = _session.Current;
             PreviewInfoText = Path.GetFileName(_session.Current.ColorPath);
             var item = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, _session.Current.ColorPath, StringComparison.OrdinalIgnoreCase));
@@ -592,7 +599,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
                 IsPreviewRunning = true;
                 ControlStatusText = "Connected";
-                StatusText = "Preview running";
                 RaiseControlCommandStates();
                 await RefreshControlStateAsync();
                 StartFpsPolling();
@@ -616,23 +622,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void OnAutomationChanged()
     {
-        IsBatchApplying = _automation.IsBusy;
-        OnPropertyChanged(nameof(BatchProgress)); OnPropertyChanged(nameof(BatchMaximum)); OnPropertyChanged(nameof(BatchStatusText));
-        CancelBatchCommand.RaiseCanExecuteChanged();
-        if (_automation.Job is { } job) { StatusText = $"Batch {job.State}: {job.Completed}/{job.Total}"; if (job.Error != null) AppendLog(job.Error); }
+        void Update()
+        {
+            if (_isDisposed) return;
+            IsBatchApplying = _automation.Job?.State == "running";
+            foreach (var property in new[] { nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
+                nameof(StatusText), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
+                nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
+            CancelBatchCommand.RaiseCanExecuteChanged(); CancelOperationCommand.RaiseCanExecuteChanged();
+            RetryOperationCommand.RaiseCanExecuteChanged(); LocateFeedbackCommand.RaiseCanExecuteChanged();
+            StartPreviewCommand.RaiseCanExecuteChanged(); SavePngCommand.RaiseCanExecuteChanged();
+            ToggleInputModeCommand.RaiseCanExecuteChanged(); RefreshGalleryCommand.RaiseCanExecuteChanged(); RaiseControlCommandStates();
+        }
+        if (_syncContext != null && SynchronizationContext.Current != _syncContext) _syncContext.Post(_ => Update(), null); else Update();
     }
 
     private async Task ReloadAsync()
     {
         MarkEffectsLoading();
-        await _session.CallAsync("reload_effects");
+        await ExecuteOperationAsync("reload_effects");
         await Task.Delay(500);
         await RefreshControlStateAsync();
     }
 
     private async Task SavePresetAsync()
     {
-        await _session.CallAsync("save_preset");
+        await ExecuteOperationAsync("save_preset");
         AppendLog("Preset saved.");
     }
 
@@ -647,6 +662,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             var runtimeInfo = await _session.CallAsync("get_runtime_info");
             if (_isDisposed || generation != _runtimeGeneration) return;
+            _automation.Activity.Observe(runtimeInfo, _session.Current);
             await ApplyGraphicsStateAsync(runtimeInfo);
             if (_isDisposed || generation != _runtimeGeneration) return;
             if (IsRuntimeLoading(runtimeInfo))
@@ -825,6 +841,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 {
                     var info = await _session.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
                     if (_isDisposed || cancellationToken.IsCancellationRequested) return;
+                    _automation.Activity.Observe(info, _session.Current);
                     var needsRecovery = info.TryGetProperty("recoveryRequired", out var recovery) && recovery.GetBoolean();
                     if (CanEditSession && (needsRecovery || info.TryGetProperty("restartRequired", out var restart) && restart.GetBoolean())) {
                         if (needsRecovery) AppendLog("D3D device lost; rebuilding the rendering session.");
@@ -869,7 +886,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
             catch (DeviceLostException ex)
             {
-                AppendLog(ex.Message); StatusText = "D3D recovery failed";
+                ReportUiError(ex, "recover_session");
                 await StopPreviewAsync(updateStatus: false);
                 return;
             }
@@ -877,7 +894,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                 FpsText = "FPS unavailable";
-                AppendLog(ex.Message);
+                ReportUiError(ex, "observe_runtime");
             }
 
             try
@@ -982,7 +999,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            AppendLog("Failed to save UI settings: " + ex.Message);
+            ReportUiError(ex, "save_settings");
         }
     }
 
@@ -1012,7 +1029,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         RenderWidth = info.GetProperty("width").GetUInt32(); RenderHeight = info.GetProperty("height").GetUInt32();
         var error = info.TryGetProperty("previewError", out var e) ? e.GetString() ?? "" : "";
         if (error.Length > 0 && error != _lastPreviewError) { _lastPreviewError = error; AppendLog(error); }
-        if (error.Length > 0 && !IsGpuPreviewActive && info.TryGetProperty("cpuPreview", out var cpu) && !cpu.GetBoolean()) StatusText = "Preview unavailable";
         if (IsGpuPreviewActive && info.TryGetProperty("sharedPreviewHandle", out var handle) && handle.GetUInt64() == 0)
             await FallBackToCpuPreviewAsync(error.Length > 0 ? error : "Shared GPU preview is unavailable.");
     }
@@ -1025,11 +1041,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         AppendLog(reason + " Switching to CPU preview; export dimensions are unchanged.");
         try {
             if (_session.IsConnected) await _session.CallAsync("set_preview_transport", new { cpu = true });
-            if (!_isDisposed) StatusText = "CPU preview (GPU unavailable)";
-        } catch (Exception ex) { if (!_isDisposed) { AppendLog(ex.Message); StatusText = "Preview unavailable"; } }
+        } catch (Exception ex) { if (!_isDisposed) ReportUiError(ex, "preview_transport"); }
     }
 
-    public void ReportPreviewError(string message) { if (!_isDisposed) AppendLog(message); }
+    public void ReportPreviewError(string message) { if (!_isDisposed) ReportUiError(new IOException(message), "preview_transport"); }
 
     private async Task UpdatePreviewTransportAsync()
     {
@@ -1040,7 +1055,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
                 await ApplyGraphicsStateAsync(await _session.CallAsync("get_runtime_info"));
             }
-        } catch (Exception ex) { if (!_isDisposed) AppendLog(ex.Message); }
+        } catch (Exception ex) { if (!_isDisposed) ReportUiError(ex, "preview_transport"); }
     }
     private string ActiveColorPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.ColorPath : Settings.ColorPath;
     private string ActiveDepthPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthPath : Settings.DepthPath;
@@ -1396,8 +1411,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         async void Handle(object? _)
         {
             if (_isDisposed || _session.IsConnected) return;
-            try { await StopPreviewAsync(false); StatusText = "Rendering process exited"; }
-            catch (Exception ex) { AppendLog(ex.Message); }
+            try { await StopPreviewAsync(false); ReportUiError(new IOException("The rendering process exited. Open the input again to restore the session."), "runtime_exit"); }
+            catch (Exception ex) { ReportUiError(ex, "stop_session"); }
         }
         if (_syncContext != null) _syncContext.Post(Handle, null); else Handle(null);
     }
@@ -1405,11 +1420,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task PrepareCloseAsync()
     {
         _automation.Cancel(restore: false);
-        await _automation.StopAsync();
-        if (_settingsStore.LoadError == null) await SaveSettingsNowAsync();
-        else AppendLog(_settingsStore.LoadError);
-        StopFpsPolling();
-        await _session.DisposeAsync();
+        await _automation.StopSessionAsync(async () => {
+            if (_settingsStore.LoadError == null) await SaveSettingsNowAsync();
+            else AppendLog(_settingsStore.LoadError);
+            StopFpsPolling();
+            await _session.DisposeAsync();
+        });
     }
 
     private void RaiseControlCommandStates()

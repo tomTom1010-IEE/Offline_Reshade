@@ -8,7 +8,7 @@
 |---|---|---|
 | 1 状态归属与配置迁移 | 基础实现及测试完成 | Core 分离 EditorDocument、ApplicationPreferences 和 EditingSession；WinUI 绑定适配；配置 v2 迁移、备份、原子保存；设置页待应用提示。后续步骤将统一所有运行路径与操作结果 |
 | 2 会话生命周期 | 实现及自动化验证完成 | Core RenderSessionController 统一启动、切图、重载、恢复、取消和释放；WinUI/独立 MCP 复用，附着 MCP 回归通过；真实进程测试验证参数保留和宿主释放 |
-| 3 操作与状态反馈 | 待实施 | 需要共享操作入口、结构化结果与可见错误/空状态 |
+| 3 操作与状态反馈 | 实现及自动化验证完成 | Core 操作队列、结构化结果、取消和错误恢复；WinUI 可见反馈及空状态；MCP broker 2。等待输入状态模型已具备，实际监听入口在第四步接入 |
 | 4 素材入口 | 待实施 | 需要主工作区输入、来源切换和失败保留上下文 |
 | 5 统一导出 | 待实施 | 需要统一导出面板、待应用处理、参数提交屏障、目标及冲突策略 |
 | 6 编辑历史 | 待实施 | 已预留 IEditHistory；撤销事务、预设修改标记与关闭处理待实现 |
@@ -34,6 +34,22 @@
 - 使用独立测试包 `OfflineReShade.RefactorLifecycle030601`，仅经 winapp 命令行启动并通过附着 MCP 运行 `run_integration.py`、`run_output_correctness.py`、`run_d3d_recovery.py`：全部通过。工作目录分别为 `build/refactor-step2-final/attached-integration`、`attached-correctness`、`attached-recovery`。
 - 附着测试结束后按 PID 和完整路径核对并终止测试进程及其宿主，没有通过 computer use 操作窗口。真实宿主正常释放由 NativeProcessTests 证明；窗口关闭事件、键盘和视觉交互保留用户验收。
 - 最后补充启动期间 Stop 命令可用性，随后 Release/x64 再次编译通过；该按钮的实际交互留待用户验收。未修改原生协议或预览 ABI。
+
+## 第三步验证
+
+- `OperationCoordinator` 统一 WinUI、附着及独立 MCP 的参数修改、输入/预设、重载、导出和批处理互斥。参数更新排队；排他的长操作先等待已接收的修改，再拒绝新的修改。取消和停止等待真实任务完成，批处理恢复输入结束后才释放操作。
+- `ApplicationActivity` 区分运行观察、当前操作、最后结果和持久提示。成功、警告、取消、失败和忙碌拒绝有结构化结果；轮询不会擦除错误。空画布依赖有效帧状态，不依赖亮度；黑色作品保持成功并附带警告。
+- WinUI 常规命令和动态参数控件统一反馈到 InfoBar；显示原因、适用的重试、定位目录和详情。移除顶部同时显示 Ready/Disconnected 的方式，无批处理任务时收起其进度区域。只有预览传输、表面尺寸、原生 Add-on 页签选择等显示操作仍直接调用宿主；Add-on 用户输入经过共享操作层。
+- `get_operation_status` 在断连和操作进行中可用；`cancel_operation` 支持普通操作，附着 MCP 经第二条控制连接取消正在等待响应的请求。MCP 的错误与多媒体预览均携带结构化操作结果；没有批任务时 `cancel_job` 不取消其他操作。
+- 保存预设先导出到独立临时文件，确认实际写入非空文件后才替换目标；静默保存失败不破坏旧文件。修复重复加载同一路径预设时没有重新读取磁盘的问题，继续使用私有工作预设保护源文件。UI 的完整保存/另存及未保存语义继续在第六步实施。
+- Automation broker 升级为 2，并同步生成常量、接口锁及 MCP/维护文档；native RPC 5、offline API 1 和 preview ABI 3 保持不变。
+- 新增 `OperationTests`：验证参数先于导出提交、忙碌拒绝、取消/停止期间的任务追踪、预设失败原子保护及重试、错误保留、黑帧语义、双客户端 broker 状态与取消、结构化错误传递。`SessionTests` 增加相同路径预设显式重载。
+- 增强真实 `run_integration.py`：验证预览和导出结果结构、黑色警告、损坏输入的错误来源、重复载入预设、导出进行中的状态查询/取消及取消后的再次导出。
+- 首先运行包含原生重编译的 `tools/build_offline_release.ps1 -RunIntegrationTests -OutputDirectory build/refactor-step3`，通过。完成后续托管层修正后，最终运行 `-SkipBuild -RunIntegrationTests -OutputDirectory build/refactor-step3-verified`，通过；仅复用本轮重编译且未再修改的 C++ 组件，重新发布 WinUI/Core/MCP。
+- 最终报告：`build/refactor-step3-verified/verification-20261103-035148.json`。包：`build/refactor-step3-verified/OfflineReShade-0.8.3-win-x64-20261103-035148`；ZIP SHA256：`d8085f9f5100a4e85d895fc42e20c224a1e3f3a6e79777ca9de442ee00ec19c1`。包含输出正确性、缓存失效、D3D/故障注入、实际宿主生命周期、接口拒绝、完整性及 CI 规则校验。
+- 通过命令行启动独立测试包 `OfflineReShade.RefactorOperations035148`，附着会话 `84ec73af0a9048b6bd0f890b64f8e8e0`；`run_integration.py`、`run_output_correctness.py`、`run_d3d_recovery.py` 均通过。结果目录位于上述最终输出目录的 `attached-integration`、`attached-correctness`、`attached-recovery`。
+- 额外只读协议查询确认：缺失贴图引起的批处理失败仍保留在 `notice`，正常帧/状态轮询不覆盖该错误。按路径核对后结束本轮测试 UI 进程 15488 与子进程 38656，测试包已注销。
+- 全程没有使用 computer use。窗口视觉、实际按钮/键盘操作和关闭窗口交互留待用户验收；第三步尚未把素材入口搬出 Settings，也未实现缺失文件的主动监听入口，这部分按计划属于第四步。发布包未对外发布。
 
 ## 完成判定
 

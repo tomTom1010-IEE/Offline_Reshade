@@ -69,7 +69,8 @@ public sealed class AutomationBroker : IDisposable
                             : await dispatch(method, doc.RootElement.GetProperty("params").Clone(), _stop.Token);
                         response = new { id, ok = true, result };
                     }
-                    catch (Exception ex) { response = new { id, ok = false, error = new { message = ex.Message } }; }
+                    catch (Exception ex) { response = new { id, ok = false, error = new { message = ex.Message,
+                        operation = ex.Data[nameof(OperationOutcome)] is OperationOutcome outcome ? AutomationEngine.Json(outcome) : (JsonElement?)null } }; }
                     await writer.WriteLineAsync(JsonSerializer.Serialize(response).AsMemory(), _stop.Token);
                 }
             }

@@ -31,7 +31,7 @@ public class RuntimeConnection : IDisposable
             if (_reader == null || _writer == null) throw new IOException("Runtime is disconnected.");
             // Drain an in-flight response before honoring caller cancellation.
             using var deadline = new CancellationTokenSource();
-            deadline.CancelAfter(TimeSpan.FromSeconds(method.StartsWith("save_") ? 120 : 30));
+            deadline.CancelAfter(TimeSpan.FromSeconds(method is "open_input" or "set_preset" or "reload_effects" or "export_image" or "render_preview" or "export_preset" ? 660 : method.StartsWith("save_") ? 120 : 30));
             var id = ++_id;
             sent = true;
             await _writer.WriteLineAsync(JsonSerializer.Serialize(new { id, method, @params = parameters ?? new { } }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }).AsMemory(), deadline.Token);
@@ -42,7 +42,13 @@ public class RuntimeConnection : IDisposable
             sent = false;
             cancellationToken.ThrowIfCancellationRequested();
             if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-                throw new InvalidOperationException(root.GetProperty("error").GetProperty("message").GetString());
+            {
+                var error = root.GetProperty("error");
+                var exception = new InvalidOperationException(error.GetProperty("message").GetString());
+                if (error.TryGetProperty("operation", out var operation) && operation.ValueKind == JsonValueKind.Object)
+                    exception.Data[nameof(OperationOutcome)] = operation.Deserialize<OperationOutcome>(AutomationEngine.JsonOptions);
+                throw exception;
+            }
             return root.GetProperty("result").Clone();
         }
         catch (Exception ex) when (sent && ex is OperationCanceledException or IOException or JsonException)

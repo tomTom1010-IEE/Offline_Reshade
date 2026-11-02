@@ -72,7 +72,10 @@ public class RenderSessionController : IAsyncDisposable
         }
     }
 
-    public async Task OpenAsync(RenderInput requested, CancellationToken token = default)
+    public Task OpenAsync(RenderInput requested, CancellationToken token = default) => OpenCoreAsync(requested, false, token);
+    public Task LoadPresetAsync(string path, CancellationToken token = default) => OpenCoreAsync(Current with { PresetPath = path }, true, token);
+
+    private async Task OpenCoreAsync(RenderInput requested, bool replacePreset, CancellationToken token)
     {
         var input = AutomationEngine.ValidateInput(requested);
         if (string.IsNullOrWhiteSpace(input.EffectDir) || !Directory.Exists(input.EffectDir))
@@ -123,7 +126,7 @@ public class RenderSessionController : IAsyncDisposable
                 File.Copy(persisted, snapshot);
                 ReplaceSnapshot(snapshot);
             }
-            var restart = !IsConnected || recovery || Flag(previous, "restartRequired") ||
+            var restart = replacePreset || !IsConnected || recovery || Flag(previous, "restartRequired") ||
                 input.EffectDir != previousInput.EffectDir || input.PresetPath != previousInput.PresetPath ||
                 input.Width != previousInput.Width || input.Height != previousInput.Height;
             touchedRuntime = true;
@@ -135,7 +138,7 @@ public class RenderSessionController : IAsyncDisposable
             if (restart)
             {
                 await ResetAsync();
-                await _host.StartAsync(input, input.PresetPath == previousInput.PresetPath ? snapshot : null, ct);
+                await _host.StartAsync(input, !replacePreset && input.PresetPath == previousInput.PresetPath ? snapshot : null, ct);
             }
             await CallAsync("set_effects_state", new { enabled = effectsEnabled }, ct);
             await CallAsync("set_input_watch_enabled", new { enabled = input.WatchInput }, ct);
@@ -148,7 +151,7 @@ public class RenderSessionController : IAsyncDisposable
                 if (request != _request || _disposed) throw new OperationCanceledException("Input request superseded.");
                 Current = input;
                 State.AppliedSuccessfully(State.BeginApply(input));
-                if (input.PresetPath != previousInput.PresetPath) ClearSnapshot();
+                if (replacePreset || input.PresetPath != previousInput.PresetPath) ClearSnapshot();
             }
         }
         catch (Exception original)

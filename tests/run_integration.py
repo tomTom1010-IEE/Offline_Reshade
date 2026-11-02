@@ -48,20 +48,28 @@ def stderr():
     for line in proc.stderr: logs.append(line.rstrip())
 threading.Thread(target=stdout,daemon=True).start(); threading.Thread(target=stderr,daemon=True).start()
 request_id=0
-def rpc(method,params):
+pending={}
+
+def send_rpc(method,params):
     global request_id
     request_id+=1; ident=request_id
     proc.stdin.write(json.dumps({'jsonrpc':'2.0','id':ident,'method':method,'params':params})+'\n'); proc.stdin.flush()
+    return ident
+
+def receive_rpc(ident):
     deadline=time.time()+90
     while time.time()<deadline:
+        if ident in pending:
+            obj=pending.pop(ident); assert 'error' not in obj,obj; return obj['result']
         try: line=lines.get(timeout=1)
         except queue.Empty:
             assert proc.poll() is None,logs[-20:]; continue
         obj=json.loads(line)
-        if obj.get('id')==ident:
-            assert 'error' not in obj,obj
-            return obj['result']
-    raise TimeoutError((method,logs[-20:]))
+        if 'id' in obj: pending[obj['id']]=obj
+    raise TimeoutError((ident,logs[-20:]))
+
+def rpc(method,params): return receive_rpc(send_rpc(method,params))
+
 def tool(name,**kw):
     r=rpc('tools/call',{'name':name,'arguments':kw}); assert not r.get('isError'),(name,r,logs[-15:]); return r
 def data(r):
@@ -71,7 +79,7 @@ try:
     rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'OfflineReShade integration','version':'1.0'}})
     proc.stdin.write(json.dumps({'jsonrpc':'2.0','method':'notifications/initialized'})+'\n');proc.stdin.flush()
     names={t['name'] for t in rpc('tools/list',{})['tools']}
-    assert {'open_input','render_preview','export_image','start_batch','cancel_job','attach_session','get_diagnostics'}<=names,names
+    assert {'open_input','render_preview','export_image','start_batch','cancel_job','attach_session','get_diagnostics','get_operation_status','cancel_operation'}<=names,names
     diagnostics=data(tool('get_diagnostics'))
     assert diagnostics['schemaVersion']==1 and diagnostics['expected']['protocolVersion']==5,diagnostics
     def config(c,d,out): return dict(colorPath=str(c),depthPath=str(d),effectDir=str(effects),outputPath=str(out),presetPath=str(preset))
@@ -79,14 +87,23 @@ try:
     diagnostics=data(tool('get_diagnostics'))
     assert diagnostics['runtime']['upstreamCommit']==diagnostics['expected']['upstreamCommit'] and diagnostics['runtimeError'] is None,diagnostics
     preview=tool('render_preview',maxWidth=128,warmupFrames=3)
+    assert preview['structuredContent']['operation']['status']=='succeeded',preview
     image=next(c for c in preview['content'] if c['type']=='image'); assert base64.b64decode(image['data']).startswith(b'\x89PNG')
     metadata=data(tool('list_effects',effectName='Integration.fx',limit=10))
     assert {u['id'] for u in metadata['uniforms']} >= {'Integration.fx::Gain','Integration.fx::UseDepth'},metadata
     tool('reorder_techniques',ids=[t['id'] for t in metadata['techniques']])
     tool('save_preset',path=str(work/'saved.ini'));assert (work/'saved.ini').exists()
     tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':0}])
-    tool('export_image',path=str(work/'black.png'),warmupFrames=3)
+    black=data(tool('export_image',path=str(work/'black.png'),warmupFrames=3))
+    assert black['operation']['status']=='warning' and 'black' in black['operation']['message'],black
     assert max(Image.open(work/'black.png').convert('RGB').getpixel((8,6)))<5
+    notice=data(tool('get_operation_status'))['notice']
+    assert notice['status']=='warning',notice
+    for _ in range(2):
+        tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':0.2}])
+        tool('load_preset',path=str(preset))
+        tool('export_image',path=str(work/'reloaded-preset.png'),warmupFrames=2)
+        assert Image.open(work/'reloaded-preset.png').getpixel((8,6))[1]>240,'Same-path preset load retained old edits'
     tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':1}])
     tool('set_parameters',updates=[{'id':'Integration.fx::UseDepth','value':True}])
     tool('export_image',path=str(work/'depth.png'),warmupFrames=2,reShadeShot=False)
@@ -108,12 +125,25 @@ try:
     damaged=work/'damaged.png';damaged.write_bytes(b'incomplete')
     failure=rpc('tools/call',{'name':'open_input','arguments':config(damaged,d2,work/'damaged-output.png')})
     assert failure.get('isError'),failure
+    outcome=data(failure)['operation']
+    assert outcome['status']=='failed' and outcome['operation']=='open_input' and outcome['sourcePath']==str(damaged),outcome
     tool('export_image',path=str(work/'after-failed-open.png'),warmupFrames=2)
     restored=Image.open(work/'after-failed-open.png').convert('RGB')
     assert restored.size==(160,120) and 60 <= restored.getpixel((8,6))[1] <= 70,'Failed input did not restore previous image/parameters'
     assert preset.read_bytes()==preset_before,'Rebuild silently overwrote the source preset'
     tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':1}])
     print('PASS: source/explicit resolution changes preserve unsaved parameters; damaged input restores the previous session without saving the source preset',flush=True)
+    long_export=send_rpc('tools/call',{'name':'export_image','arguments':{'path':str(work/'cancel-export.png'),'warmupFrames':100000}})
+    for _ in range(100):
+        activity=data(tool('get_operation_status'))
+        if activity['active'] and activity['active']['operation']=='export_image': break
+        time.sleep(.05)
+    assert activity['active'] and activity['active']['operation']=='export_image',activity
+    tool('cancel_operation')
+    cancelled=receive_rpc(long_export)
+    assert cancelled.get('isError') and data(cancelled)['operation']['status']=='cancelled',cancelled
+    tool('export_image',path=str(work/'after-cancel.png'),warmupFrames=1)
+    print('PASS: active status and cancellation stay available during export; the next export succeeds',flush=True)
     items=[config(c1,d1,work/'batch-first.png'),config(c2,d2,work/'batch-second.png')]
     tool('start_batch',items=items,warmupFrames=3)
     for _ in range(200):
