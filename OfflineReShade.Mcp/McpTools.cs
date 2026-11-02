@@ -17,16 +17,18 @@ public sealed class McpTools(McpBridge bridge)
 
     [McpServerTool(Name = "open_input"), Description("Open a color/depth pair. In independent mode this launches the native host. Use absolute paths. Zero width and height preserve each source image's resolution.")]
     public Task<CallToolResult> OpenInput(string colorPath, string outputPath, string effectDir, CancellationToken cancellationToken,
-        string depthPath = "", string depthFormat = "raw", string depthProfile = "kks", string depthDownsample = "max2x2", string presetPath = "", int width = 0, int height = 0, bool watchInput = false)
-        => ExecuteToolAsync("open_input", new RenderInput(colorPath, depthPath, depthFormat, depthProfile, depthDownsample, outputPath, effectDir, presetPath, width, height, watchInput), cancellationToken);
+        string depthPath = "", string depthFormat = "raw", string depthProfile = "kks", string depthDownsample = "max2x2", string presetPath = "", int width = 0, int height = 0, bool watchInput = false,
+        string unsavedChanges = "reject", string? savePath = null, long? expectedRevision = null)
+        => ExecuteToolAsync("open_input", Decision(new RenderInput(colorPath, depthPath, depthFormat, depthProfile, depthDownsample, outputPath, effectDir, presetPath, width, height, watchInput), unsavedChanges, savePath, expectedRevision), cancellationToken);
 
     [McpServerTool(Name = "get_status", ReadOnly = true), Description("Read resolution, loading, frame count, input generation, rendering adapter, preview transport and device recovery diagnostics.")]
     public Task<JsonElement> GetStatus(CancellationToken cancellationToken) => bridge.CallAsync("get_runtime_info", token: cancellationToken);
 
     [McpServerTool(Name = "listen_input"), Description("Listen for a color/depth pair that may not exist yet. Validates settings, waits for stable files, and opens them through the shared session. While waiting, exporting the previous image is blocked; malformed files are reported and retried only after they change.")]
     public Task<CallToolResult> ListenInput(string colorPath, string outputPath, string effectDir, CancellationToken cancellationToken,
-        string depthPath = "", string depthFormat = "raw", string depthProfile = "kks", string depthDownsample = "max2x2", string presetPath = "", int width = 0, int height = 0)
-        => ExecuteToolAsync("listen_input", new RenderInput(colorPath, depthPath, depthFormat, depthProfile, depthDownsample, outputPath, effectDir, presetPath, width, height, true), cancellationToken);
+        string depthPath = "", string depthFormat = "raw", string depthProfile = "kks", string depthDownsample = "max2x2", string presetPath = "", int width = 0, int height = 0,
+        string unsavedChanges = "reject", string? savePath = null, long? expectedRevision = null)
+        => ExecuteToolAsync("listen_input", Decision(new RenderInput(colorPath, depthPath, depthFormat, depthProfile, depthDownsample, outputPath, effectDir, presetPath, width, height, true), unsavedChanges, savePath, expectedRevision), cancellationToken);
 
     [McpServerTool(Name = "stop_listening"), Description("Stop waiting for game files and disable automatic input updates. Retains the last applied image and parameters.")]
     public Task<CallToolResult> StopListening(CancellationToken cancellationToken) => ExecuteToolAsync("stop_listening", null, cancellationToken);
@@ -48,23 +50,42 @@ public sealed class McpTools(McpBridge bridge)
     }
 
     [McpServerTool(Name = "set_parameters"), Description("Set 1–256 uniform values by stable effect.fx::uniform ID. Values use real shader units; slider display mapping does not affect them.")]
-    public Task<CallToolResult> SetParameters(JsonElement[] updates, CancellationToken cancellationToken) => ExecuteToolAsync("set_parameters", new { updates }, cancellationToken);
+    public Task<CallToolResult> SetParameters(JsonElement[] updates, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("set_parameters", new { updates, transactionId }, cancellationToken);
 
     [McpServerTool(Name = "set_technique"), Description("Enable or disable a technique by its effect.fx::technique ID.")]
-    public Task<CallToolResult> SetTechnique(string id, bool enabled, CancellationToken cancellationToken) => ExecuteToolAsync("set_technique_state", new { id, enabled }, cancellationToken);
+    public Task<CallToolResult> SetTechnique(string id, bool enabled, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("set_technique_state", new { id, enabled, transactionId }, cancellationToken);
 
-    [McpServerTool(Name = "set_effects_enabled"), Description("Enable or disable all ReShade effects for before/after comparison.")]
-    public Task<CallToolResult> SetEffectsEnabled(bool enabled, CancellationToken cancellationToken) => ExecuteToolAsync("set_effects_state", new { enabled }, cancellationToken);
+    [McpServerTool(Name = "set_effects_enabled"), Description("Enable or disable all ReShade effects. This is an undoable preset edit that affects exported images.")]
+    public Task<CallToolResult> SetEffectsEnabled(bool enabled, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("set_effects_state", new { enabled, transactionId }, cancellationToken);
 
     [McpServerTool(Name = "reorder_techniques"), Description("Set technique execution order using the complete ordered list of technique IDs returned by list_effects.")]
-    public Task<CallToolResult> ReorderTechniques(string[] ids, CancellationToken cancellationToken) => ExecuteToolAsync("reorder_techniques", new { ids }, cancellationToken);
+    public Task<CallToolResult> ReorderTechniques(string[] ids, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("reorder_techniques", new { ids, transactionId }, cancellationToken);
 
     [McpServerTool(Name = "load_preset"), Description("Load an existing preset INI. Query loading status and wait before exporting.")]
-    public Task<CallToolResult> LoadPreset(string path, CancellationToken cancellationToken)
-        => ExecuteToolAsync("set_preset", new { path }, cancellationToken);
-    [McpServerTool(Name = "save_preset"), Description("Export current parameters and technique order to the given absolute INI path.")]
-    public Task<CallToolResult> SavePreset(string path, CancellationToken cancellationToken)
+    public Task<CallToolResult> LoadPreset(string path, CancellationToken cancellationToken, string unsavedChanges = "reject", string? savePath = null, long? expectedRevision = null)
+        => ExecuteToolAsync("set_preset", new { path, unsavedChanges, savePath, expectedRevision }, cancellationToken);
+    [McpServerTool(Name = "save_preset"), Description("Save FX edits to their source INI, or Save As when an absolute path is supplied. Publishes atomically and marks FX content saved. Add-on private state is not included.")]
+    public Task<CallToolResult> SavePreset(CancellationToken cancellationToken, string path = "")
+        => ExecuteToolAsync(string.IsNullOrWhiteSpace(path) ? "save_preset" : "save_preset_as", new { path }, cancellationToken);
+    [McpServerTool(Name = "export_preset_copy"), Description("Write a separate INI copy without changing the source preset or its unsaved marker.")]
+    public Task<CallToolResult> ExportPresetCopy(string path, CancellationToken cancellationToken)
         => ExecuteToolAsync("export_preset", new { path }, cancellationToken);
+    [McpServerTool(Name = "get_edit_history", ReadOnly = true), Description("Read shared FX undo/redo, unsaved marker, decision revision and Add-on capability limits. Reconciles external changes when idle; returns cached state during an operation.")]
+    public Task<CallToolResult> GetEditHistory(CancellationToken cancellationToken) => ExecuteToolAsync("get_edit_history", null, cancellationToken);
+    [McpServerTool(Name = "begin_edit"), Description("Begin one undoable gesture. Pass returned transactionId with all its FX edits; end_edit releases it. Other writers are rejected until end or cancel_operation.")]
+    public Task<CallToolResult> BeginEdit(CancellationToken cancellationToken) => ExecuteToolAsync("begin_edit", null, cancellationToken);
+    [McpServerTool(Name = "end_edit"), Description("Finish a grouped FX gesture while preserving its applied values as one undo entry.")]
+    public Task<CallToolResult> EndEdit(string transactionId, CancellationToken cancellationToken) => ExecuteToolAsync("end_edit", new { transactionId }, cancellationToken);
+    [McpServerTool(Name = "undo"), Description("Undo the most recent successful shared FX edit, including edits made in WinUI.")]
+    public Task<CallToolResult> Undo(CancellationToken cancellationToken) => ExecuteToolAsync("undo", null, cancellationToken);
+    [McpServerTool(Name = "redo"), Description("Redo an undone shared FX edit.")]
+    public Task<CallToolResult> Redo(CancellationToken cancellationToken) => ExecuteToolAsync("redo", null, cancellationToken);
+    [McpServerTool(Name = "reset_parameter"), Description("Reset an editable uniform to its shader default as one undoable edit.")]
+    public Task<CallToolResult> ResetParameter(string id, CancellationToken cancellationToken, string? transactionId = null)
+        => ExecuteToolAsync("reset_uniform", new { id, transactionId }, cancellationToken);
+    [McpServerTool(Name = "set_preprocessor_definition"), Description("Change an FX preprocessor override, await recompilation and validate it. Failed edits roll back and do not enter history.")]
+    public Task<CallToolResult> SetPreprocessorDefinition(string effectName, string name, string value, CancellationToken cancellationToken, string? transactionId = null)
+        => ExecuteToolAsync("set_preprocessor_definition", new { effectName, name, value, transactionId }, cancellationToken);
 
     [McpServerTool(Name = "render_preview"), Description("Return a clean PNG preview image to the model after FX compilation and actual warmup frames. Maximum width is 2048 pixels.")]
     public async Task<CallToolResult> RenderPreview(CancellationToken cancellationToken, int maxWidth = 1280, int warmupFrames = 5)
@@ -84,8 +105,9 @@ public sealed class McpTools(McpBridge bridge)
     }
     [McpServerTool(Name = "export_image"), Description("Export the applied image after pending parameter submissions, compilation and warmup. ReShade screenshot is the default; direct PNG is explicit. conflictPolicy: replace, rename or fail. Pending UI configuration requires explicit applyInput (applied and exported under one lock). Optional expectedInput rejects a changed source. Returns the actual output path.")]
     public Task<CallToolResult> ExportImage(string path, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true,
-        string conflictPolicy = "replace", RenderInput? applyInput = null, RenderInput? expectedInput = null)
-        => ExecuteToolAsync("export_image", new ImageExportRequest(path, warmupFrames, reShadeShot, conflictPolicy, applyInput, expectedInput), cancellationToken);
+        string conflictPolicy = "replace", RenderInput? applyInput = null, RenderInput? expectedInput = null,
+        string unsavedChanges = "reject", string? savePath = null, long? expectedRevision = null)
+        => ExecuteToolAsync("export_image", Decision(new ImageExportRequest(path, warmupFrames, reShadeShot, conflictPolicy, applyInput, expectedInput), unsavedChanges, savePath, expectedRevision), cancellationToken);
 
     [McpServerTool(Name = "start_batch"), Description("Start a cancellable batch using an immutable list of inputs and output paths. Resumes matching completed files using a checkpoint and output hashes. Returns a job ID immediately.")]
     public Task<CallToolResult> StartBatch(RenderInput[] items, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true, bool resume = true, int retries = 1)
@@ -103,6 +125,8 @@ public sealed class McpTools(McpBridge bridge)
     public Task<CallToolResult> CancelOperation(CancellationToken cancellationToken)
         => ExecuteToolAsync("cancel_operation", null, cancellationToken);
 
+    private static JsonElement Decision(object args, string unsavedChanges, string? savePath, long? expectedRevision)
+        => AutomationEngine.CopyPresetDecision(AutomationEngine.Json(args), AutomationEngine.Json(new { unsavedChanges, savePath, expectedRevision }));
     private async Task<CallToolResult> ExecuteToolAsync(string method, object? args, CancellationToken token)
     {
         try

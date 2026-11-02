@@ -33,11 +33,15 @@
         <AppBarButton Label="Open image" Icon="OpenFile" Command="{x:Bind ViewModel.OpenImageCommand}" AutomationProperties.AutomationId="OpenImage" />
         <AppBarButton Label="Listen for game output" Icon="Play" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="ConfigureInputListener" />
         <AppBarButton Label="Export image" Icon="Save" Command="{x:Bind ViewModel.OpenExportCommand}" AutomationProperties.AutomationId="ExportImage" />
+        <AppBarButton Label="Undo" Icon="Undo" Command="{x:Bind ViewModel.UndoCommand}" ToolTipService.ToolTip="Undo FX edit (Ctrl+Z)" AutomationProperties.AutomationId="UndoEdit" />
+        <AppBarButton Label="Redo" Icon="Redo" Command="{x:Bind ViewModel.RedoCommand}" ToolTipService.ToolTip="Redo FX edit (Ctrl+Y)" AutomationProperties.AutomationId="RedoEdit" />
         <CommandBar.SecondaryCommands>
           <AppBarButton Label="Input and preset" Command="{x:Bind ViewModel.OpenInputPanelCommand}" />
           <AppBarButton Label="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}" />
           <AppBarButton Label="Reload effects" Command="{x:Bind ViewModel.ReloadCommand}" />
           <AppBarButton Label="Save preset" Command="{x:Bind ViewModel.SavePresetCommand}" />
+          <AppBarButton Label="Save preset as…" Command="{x:Bind ViewModel.SavePresetAsCommand}" AutomationProperties.AutomationId="SavePresetAs" />
+          <AppBarButton Label="Restore controls from renderer" Command="{x:Bind ViewModel.RestoreControlsCommand}" ToolTipService.ToolTip="Discard failed pending control edits and display actual renderer values" />
           <AppBarButton Label="Settings" Icon="Setting" Command="{x:Bind ViewModel.ToggleSettingsCommand}" />
         </CommandBar.SecondaryCommands>
         <CommandBar.Content>
@@ -89,6 +93,8 @@
     <Border Grid.Row="1" Margin="14,0,14,8" Padding="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
       <StackPanel Spacing="8">
         <TextBlock Text="{x:Bind ViewModel.InputSourceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.AutomationId="InputSourceStatus" />
+        <TextBlock Text="{x:Bind ViewModel.PresetEditStatus, Mode=OneWay}" AutomationProperties.AutomationId="PresetEditStatus" AutomationProperties.LiveSetting="Polite" />
+        <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
         <Grid ColumnSpacing="16">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
           <StackPanel><TextBlock Text="Current image" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.AutomationId="CurrentInputPath" /></StackPanel>
@@ -368,6 +374,7 @@
                     </Border>
                     <StackPanel x:Name="AddonsPanel"
                                 Spacing="10" />
+                    <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <Expander Header="WinUI Add-on Controls"
                               IsExpanded="True">
                       <StackPanel x:Name="AddonControlsPanel"

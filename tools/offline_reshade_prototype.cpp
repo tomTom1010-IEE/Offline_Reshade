@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cctype>
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,7 @@
 #include <mutex>
 #include <limits>
 #include <regex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1779,24 +1781,40 @@ namespace
 		}
 		return values;
 	}
-	std::vector<double> json_get_number_values(const std::string &json, const std::string &key)
+	std::vector<double> json_get_number_values(const std::string &json, const std::string &key, bool allow_bool = false)
 	{
 		std::vector<double> values;
-		const std::regex array_pattern("\\\"" + key + "\\\"\\s*:\\s*\\[([^\\]]*)\\]");
+		const std::regex value_pattern("\\\"" + key + "\\\"\\s*:\\s*(\\[[^\\]]*\\]|true|false|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)");
 		std::smatch match;
-		if (std::regex_search(json, match, array_pattern))
+		if (!std::regex_search(json, match, value_pattern)) return values;
+		std::string body = match[1].str();
+		if (!body.empty() && body.front() == '[') body = body.substr(1, body.size() - 2);
+		const std::regex number_pattern("-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
+		for (size_t begin = 0; begin <= body.size();)
 		{
-			const std::string body = match[1].str();
-			const std::regex number_pattern("-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
-			for (auto it = std::sregex_iterator(body.begin(), body.end(), number_pattern); it != std::sregex_iterator(); ++it)
-				values.push_back(std::stod(it->str()));
-			return values;
+			const auto end = body.find(',', begin);
+			auto part = body.substr(begin, end == std::string::npos ? end : end - begin);
+			const auto first = part.find_first_not_of(" \t\r\n"), last = part.find_last_not_of(" \t\r\n");
+			if (first == std::string::npos) return {};
+			part = part.substr(first, last - first + 1);
+			if (allow_bool && (part == "true" || part == "false")) values.push_back(part == "true" ? 1.0 : 0.0);
+			else
+			{
+				if (!std::regex_match(part, number_pattern)) return {};
+				try { values.push_back(std::stod(part)); } catch (...) { return {}; }
+				if (!std::isfinite(values.back())) return {};
+			}
+			if (end == std::string::npos) break;
+			begin = end + 1;
 		}
-
-		const std::regex number_pattern("\\\"" + key + "\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)");
-		if (std::regex_search(json, match, number_pattern))
-			values.push_back(std::stod(match[1].str()));
 		return values;
+	}
+	std::string json_float(float value)
+	{
+		if (!std::isfinite(value)) return "null";
+		char buffer[64];
+		const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general, std::numeric_limits<float>::max_digits10);
+		return result.ec == std::errc() ? std::string(buffer, result.ptr) : "null";
 	}
 
 	std::string runtime_string(const std::function<void(char *, size_t *)> &getter)
@@ -1902,11 +1920,13 @@ namespace
 	{
 		std::string result;
 		bool first = true;
+		bool compact = false;
 	};
 
-	std::string build_uniforms_json(reshade::api::effect_runtime *runtime)
+	std::string build_uniforms_json(reshade::api::effect_runtime *runtime, bool compact = false)
 	{
 		uniform_list_state state;
+		state.compact = compact;
 		state.result = "[";
 		runtime->enumerate_uniform_variables(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, void *user_data) {
 			auto &state = *static_cast<uniform_list_state *>(user_data);
@@ -1914,11 +1934,14 @@ namespace
 				return;
 			if (!uniform_annotation_string(runtime, variable, "source").empty())
 				return;
+			const bool read_only = uniform_annotation_bool(runtime, variable, "nosave");
+			if (state.compact && read_only) return;
 
 			reshade::api::format base_type = reshade::api::format::unknown;
 			uint32_t rows = 0, columns = 0, array_length = 0;
 			runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
 			const uint32_t components = std::max(1u, rows) * std::max(1u, columns);
+			if (components > 16 || array_length > 1) return;
 			const std::string name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_name(variable, buffer, size); });
 			const std::string effect_name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_effect_name(variable, buffer, size); });
 			if (name.empty() || effect_name.empty())
@@ -1928,7 +1951,10 @@ namespace
 				state.result += ',';
 			state.first = false;
 			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"type\":" + json_string(format_name(base_type)) + ",\"rows\":" + std::to_string(rows) + ",\"columns\":" + std::to_string(columns) + ",\"arrayLength\":" + std::to_string(array_length);
+			if (read_only) state.result += ",\"readOnly\":true";
 
+			if (!state.compact)
+			{
 			const std::string label = uniform_annotation_string(runtime, variable, "ui_label");
 			const std::string category = uniform_annotation_string(runtime, variable, "ui_category");
 			const std::string ui_type = uniform_annotation_string(runtime, variable, "ui_type");
@@ -1941,6 +1967,7 @@ namespace
 			if (uniform_annotation_number(runtime, variable, "ui_min", min_value) || uniform_annotation_number(runtime, variable, "ui_minimum", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
 			if (uniform_annotation_number(runtime, variable, "ui_max", max_value) || uniform_annotation_number(runtime, variable, "ui_maximum", max_value)) state.result += ",\"max\":" + std::to_string(max_value);
 			if (uniform_annotation_number(runtime, variable, "ui_step", step_value)) state.result += ",\"step\":" + std::to_string(step_value);
+			}
 
 			state.result += ",\"value\":[";
 			for (uint32_t i = 0; i < components; ++i)
@@ -1951,7 +1978,7 @@ namespace
 				{
 					float values[16] = {};
 					runtime->get_uniform_value_float(variable, values, components);
-					state.result += std::to_string(values[i]);
+					state.result += json_float(values[i]);
 				}
 				else if (base_type == reshade::api::format::r32_sint)
 				{
@@ -2000,6 +2027,32 @@ namespace
 		state.result += "]";
 		return state.result;
 	}
+	std::string build_edit_definitions_json(reshade::api::effect_runtime *runtime, std::set<std::string> &scopes)
+	{
+		// Keep known scopes even if a failed compilation temporarily removes its controls.
+		runtime->enumerate_preprocessor_definitions(nullptr, [](reshade::api::effect_runtime *, const char *effect, const char *, const char *, const char *, void *data) {
+			if (effect != nullptr && *effect != '\0') static_cast<std::set<std::string> *>(data)->insert(effect);
+		}, &scopes);
+		scopes.insert("PRESET");
+		std::string result = "[";
+		bool first = true;
+		for (const auto &scope : scopes)
+		{
+			const auto names = runtime_string([&](char *buffer, size_t *size) { runtime->get_preprocessor_definition_for_effect(scope.c_str(), nullptr, buffer, size); });
+			for (size_t begin = 0; begin < names.size();)
+			{
+				const auto end = names.find('\0', begin);
+				const auto name = names.substr(begin, end == std::string::npos ? end : end - begin);
+				const auto value = runtime_string([&](char *buffer, size_t *size) { runtime->get_preprocessor_definition_for_effect(scope.c_str(), name.c_str(), buffer, size); });
+				if (!first) result += ',';
+				first = false;
+				result += "{\"id\":" + json_string(scope + "::" + name) + ",\"effectName\":" + json_string(scope) + ",\"name\":" + json_string(name) + ",\"value\":" + json_string(value) + "}";
+				if (end == std::string::npos) break;
+				begin = end + 1;
+			}
+		}
+		return result + "]";
+	}
 	std::string make_response(int id, const std::string &result)
 	{
 		return "{\"id\":" + std::to_string(id) + ",\"ok\":true,\"result\":" + result + "}";
@@ -2023,6 +2076,7 @@ namespace
 
 	class control_server
 	{
+		std::set<std::string> _edit_definition_scopes;
 	public:
 		struct input_switch_result
 		{
@@ -2217,6 +2271,10 @@ namespace
 					std::string preset = runtime_string([&](char *buffer, size_t *size) { _runtime->get_current_preset_path(buffer, size); });
 					return make_response(command.id, "{" + compatibility_json() + ",\"restartRequired\":" + std::string(_stats->restart_required ? "true" : "false") + ",\"inputError\":" + json_string(_stats->input_error) + ",\"frameCount\":" + std::to_string(_stats ? _stats->frame_count : 0) + ",\"inputGeneration\":" + std::to_string(_stats ? _stats->input_generation : 0) + ",\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"presetPath\":" + json_string(preset) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"outputPath\":" + json_string(path_utf8(_output_path)) + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "}");
 				}
+				if (command.method == "get_edit_state")
+				{
+					return make_response(command.id, "{\"effectsEnabled\":" + std::string(_runtime->get_effects_state() ? "true" : "false") + ",\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime, true) + ",\"preprocessorDefinitions\":" + build_edit_definitions_json(_runtime, _edit_definition_scopes) + "}");
+				}
 				if (command.method == "list_state")
 				{
 					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
@@ -2304,6 +2362,9 @@ namespace
 					auto technique = _runtime->find_technique(effect_name.c_str(), name.c_str());
 					if (technique.handle == 0)
 						return make_error(command.id, "not_found", "Technique not found.");
+					bool no_save = false;
+					_runtime->get_annotation_bool_from_technique(technique, "nosave", &no_save, 1);
+					if (no_save) return make_error(command.id, "not_supported", "This shader-managed technique cannot be saved in a preset.");
 					_runtime->set_technique_state(technique, enabled);
 					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
@@ -2321,10 +2382,14 @@ namespace
 					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
 					const size_t count = std::max(1u, rows) * std::max(1u, columns);
 					if (count > 16 || array_length > 1) return make_error(command.id, "not_supported", "Uniform arrays require an indexed editor.");
+					if (uniform_annotation_bool(_runtime, variable, "hidden") || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
+						return make_error(command.id, "not_supported", "This uniform is not an editable FX parameter.");
 					if (base_type == reshade::api::format::r32_float)
 					{
 						auto numbers = json_get_number_values(command.params, "value");
 						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return std::abs(x) > std::numeric_limits<float>::max(); }))
+							return make_error(command.id, "bad_params", "Float value is outside its representable range or has too many components.");
 						float values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<float>(numbers[std::min(i, numbers.size() - 1)]);
 						_runtime->set_uniform_value_float(variable, values, count);
@@ -2334,6 +2399,8 @@ namespace
 					{
 						auto numbers = json_get_number_values(command.params, "value");
 						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return x < std::numeric_limits<int32_t>::min() || x > std::numeric_limits<int32_t>::max(); }))
+							return make_error(command.id, "bad_params", "Integer value is outside its representable range or has too many components.");
 						int32_t values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<int32_t>(numbers[std::min(i, numbers.size() - 1)]);
 						_runtime->set_uniform_value_int(variable, values, count);
@@ -2343,6 +2410,8 @@ namespace
 					{
 						auto numbers = json_get_number_values(command.params, "value");
 						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return x < 0 || x > std::numeric_limits<uint32_t>::max(); }))
+							return make_error(command.id, "bad_params", "Unsigned value is outside its representable range or has too many components.");
 						uint32_t values[16] = {};
 						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<uint32_t>(std::max(0.0, numbers[std::min(i, numbers.size() - 1)]));
 						_runtime->set_uniform_value_uint(variable, values, count);
@@ -2350,15 +2419,10 @@ namespace
 					}
 					else
 					{
-						bool value = false;
-						if (!json_get_bool(command.params, "value", value))
-						{
-							auto numbers = json_get_number_values(command.params, "value");
-							if (numbers.empty()) return make_error(command.id, "bad_params", "Missing bool value.");
-							value = numbers[0] != 0.0;
-						}
+						auto numbers = json_get_number_values(command.params, "value", true);
+						if (numbers.empty() || numbers.size() > count) return make_error(command.id, "bad_params", "Missing or invalid bool value.");
 						bool values[16] = {};
-						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = value;
+						for (size_t i = 0; i < count; ++i) values[i] = numbers[std::min(i, numbers.size() - 1)] != 0.0;
 						_runtime->set_uniform_value_bool(variable, values, count);
 						_runtime->save_current_preset();
 					}
@@ -2372,6 +2436,12 @@ namespace
 					auto variable = _runtime->find_uniform_variable(effect_name.c_str(), name.c_str());
 					if (variable.handle == 0)
 						return make_error(command.id, "not_found", "Uniform not found.");
+					reshade::api::format base_type = reshade::api::format::unknown;
+					uint32_t rows = 0, columns = 0, array_length = 0;
+					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+					if (array_length > 1 || std::max(1u, rows) * std::max(1u, columns) > 16 ||
+						uniform_annotation_bool(_runtime, variable, "hidden") || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
+						return make_error(command.id, "not_supported", "This uniform is not an editable FX parameter.");
 					_runtime->reset_uniform_value(variable);
 					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
@@ -2391,6 +2461,7 @@ namespace
 						techniques.push_back(technique);
 					}
 					_runtime->reorder_techniques(techniques.size(), techniques.data());
+					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "set_preprocessor_definition")
@@ -2398,14 +2469,19 @@ namespace
 					std::string effect_name, name, value;
 					if (!json_get_raw_string(command.params, "name", name) || !json_get_raw_string(command.params, "value", value))
 						return make_error(command.id, "bad_params", "Missing preprocessor name or value.");
-					if (json_get_raw_string(command.params, "effectName", effect_name) && !effect_name.empty())
+					json_get_raw_string(command.params, "effectName", effect_name);
+					if (effect_name.empty()) effect_name = "PRESET";
+					if (effect_name != "PRESET" && effect_name.find('.') == std::string::npos)
+						return make_error(command.id, "bad_params", "Choose an FX filename or PRESET scope; global application definitions are not preset edits.");
+					_edit_definition_scopes.insert(effect_name);
+					if (effect_name != "PRESET")
 					{
 						_runtime->set_preprocessor_definition_for_effect(effect_name.c_str(), name.c_str(), value.c_str());
 						_runtime->reload_effect_next_frame(effect_name.c_str());
 					}
 					else
 					{
-						_runtime->set_preprocessor_definition(name.c_str(), value.c_str());
+						_runtime->set_preprocessor_definition_for_effect("PRESET", name.c_str(), value.c_str());
 						_runtime->reload_effect_next_frame(nullptr);
 					}
 					_runtime->save_current_preset();

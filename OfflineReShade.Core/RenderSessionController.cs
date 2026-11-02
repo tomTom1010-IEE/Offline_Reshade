@@ -75,6 +75,21 @@ public class RenderSessionController : IAsyncDisposable
     public Task OpenAsync(RenderInput requested, CancellationToken token = default) => OpenCoreAsync(requested, false, token);
     public Task LoadPresetAsync(string path, CancellationToken token = default) => OpenCoreAsync(Current with { PresetPath = path }, true, token);
 
+    // Saving a new source must not reload it and replace the live editing session.
+    public async Task SetPresetSourceAsync(string path, CancellationToken token = default)
+    {
+        path = Path.GetFullPath(path);
+        if (!File.Exists(path)) throw new FileNotFoundException("Saved preset not found.", path);
+        await _changes.WaitAsync(token);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            Current = Current with { PresetPath = path };
+            if (IsConnected && State.Applied != null) State.AppliedSuccessfully(State.BeginApply(Current));
+        }
+        finally { _changes.Release(); }
+    }
+
     public async Task SetInputWatchAsync(bool enabled, CancellationToken token = default)
     {
         await _changes.WaitAsync(token);
@@ -139,9 +154,12 @@ public class RenderSessionController : IAsyncDisposable
                 File.Copy(persisted, snapshot);
                 ReplaceSnapshot(snapshot);
             }
+            var samePreset = string.Equals(input.PresetPath, previousInput.PresetPath, StringComparison.OrdinalIgnoreCase);
             var restart = replacePreset || !IsConnected || recovery || Flag(previous, "restartRequired") ||
-                input.EffectDir != previousInput.EffectDir || input.PresetPath != previousInput.PresetPath ||
+                !string.Equals(input.EffectDir, previousInput.EffectDir, StringComparison.OrdinalIgnoreCase) || !samePreset ||
                 input.Width != previousInput.Width || input.Height != previousInput.Height;
+            var requestedEffectsEnabled = replacePreset || previousInput.ColorPath.Length == 0 || !samePreset
+                ? PresetMetadata.ReadEffectsEnabled(input.PresetPath) : effectsEnabled;
             touchedRuntime = true;
             if (!restart)
             {
@@ -151,9 +169,9 @@ public class RenderSessionController : IAsyncDisposable
             if (restart)
             {
                 await ResetAsync();
-                await _host.StartAsync(input, !replacePreset && input.PresetPath == previousInput.PresetPath ? snapshot : null, ct);
+                await _host.StartAsync(input, !replacePreset && samePreset ? snapshot : null, ct);
             }
-            await CallAsync("set_effects_state", new { enabled = effectsEnabled }, ct);
+            await CallAsync("set_effects_state", new { enabled = requestedEffectsEnabled }, ct);
             await CallAsync("set_input_watch_enabled", new { enabled = input.WatchInput }, ct);
             // A connected process can still reject its input after startup. Do not publish it yet.
             var info = await CallAsync("get_runtime_info", cancellationToken: ct);
@@ -164,7 +182,7 @@ public class RenderSessionController : IAsyncDisposable
                 if (request != _request || _disposed) throw new OperationCanceledException("Input request superseded.");
                 Current = input;
                 State.AppliedSuccessfully(State.BeginApply(input));
-                if (replacePreset || input.PresetPath != previousInput.PresetPath) ClearSnapshot();
+                if (replacePreset || !samePreset) ClearSnapshot();
             }
         }
         catch (Exception original)
@@ -254,12 +272,15 @@ public class RenderSessionController : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
-        lock (_requests) { if (_disposed) return; _disposed = true; }
-        try { await StopAsync(); }
+        lock (_requests) { if (_disposed) return; _disposed = true; _request++; _activeChange?.Cancel(); }
+        await _changes.WaitAsync();
+        // Final release follows the caller's save/discard decision. Capturing another
+        // temporary preset here could fail after disposal and strand a closing window.
+        try { await ResetAsync(); }
         finally
         {
             try { await _host.DisposeAsync(); }
-            finally { ClearSnapshot(); }
+            finally { try { ClearSnapshot(); } finally { _changes.Release(); } }
         }
     }
 }

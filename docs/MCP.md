@@ -43,7 +43,7 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
-### Shared operation results (automation broker 4)
+### Shared operation results (automation broker 5)
 
 WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
 an exclusive operation (open, preset load/save, reload, export or batch) drains previously
@@ -68,6 +68,44 @@ It cannot undo an output file already atomically written by the native host.
 silent native write failures do not report success or overwrite the previous preset.
 Explicitly loading the same preset path reloads disk contents into the private working
 copy. Ordinary input switches continue preserving unsaved parameters.
+
+### FX history and preset state
+
+`get_edit_history` returns `canUndo`, `canRedo`, `isModified`, `revision`, labels,
+the active `transactionId`, and capability/warning messages. `get_status` and
+`get_operation_status` include its cached summary as `editHistory`. WinUI and
+attached MCP share this history; independent MCP owns a separate session.
+
+`set_parameters` is one atomic edit: if an update fails, earlier updates in that
+request are restored. `undo`, `redo`, `reset_parameter`, technique order/state,
+the global effects switch and preprocessor overrides participate in history.
+Preprocessor changes await recompilation; failures restore the previous state.
+Rollback failure is an explicit error that disables unsafe history until a known
+preset is loaded. Out-of-band native changes clear incompatible history with a warning.
+
+For a continuous gesture, call `begin_edit`, pass its `transactionId` on each FX
+mutation, then call `end_edit`. Other writers are rejected while it is active;
+`cancel_operation` releases an abandoned transaction and retains undo for values
+already applied. A WinUI slider drag uses the same mechanism. Unsupported arrays,
+source-driven/hidden uniforms and shader-managed `nosave` values are not editable
+through this contract. Third-party Add-on private state has its own save/history rules.
+
+`save_preset` with no path writes the external source INI. Supplying `path` performs
+Save As and rebinds the source without restarting. `export_preset_copy` writes a copy
+without rebinding or clearing the original unsaved marker. Native autosaves remain
+in the session's private working INI. Saving adds `[OfflineReShade] EffectsEnabled`
+metadata; ordinary presets without it default to enabled when explicitly loaded.
+Image export never marks a preset saved. Float values round-trip through RPC and INI.
+
+Loading another preset (including same-path explicit reload), opening/listening
+with a changed preset, or `export_image.applyInput` with a changed preset defaults
+to `unsavedChanges: "reject"`. Choose `"save"` or `"discard"` explicitly; `savePath`
+can provide a Save As destination. Pass the `revision` from `get_edit_history` as
+`expectedRevision` to reject a decision made before subsequent edits. Decision
+fields belong to the operation, not to persisted `RenderInput` or batch fingerprints.
+WinUI offers Save / Discard / Cancel before replacement and close. Saving failure
+keeps edits and prevents replacement. If a control value was rejected, correct it,
+reset that parameter, or use **Restore controls from renderer** before exporting.
 
 ### Export configuration and destination
 

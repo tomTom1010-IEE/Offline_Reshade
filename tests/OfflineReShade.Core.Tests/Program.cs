@@ -15,6 +15,7 @@ await SessionTests.RunAsync(folder);
 await OperationTests.RunAsync(folder);
 await InputWorkflowTests.RunAsync(folder);
 await ExportWorkflowTests.RunAsync(folder);
+await HistoryTests.RunAsync(folder);
 void Check(bool value, string message) { if (!value) throw new Exception(message); }
 async Task Expect<T>(Func<Task> action) where T : Exception { try { await action(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
 var source = Path.Combine(folder, "source.png"); await File.WriteAllTextAsync(source, "source");

@@ -1,7 +1,7 @@
 {
   "versions": {
-    "nativeRpc": 5,
-    "automationBroker": 4,
+    "nativeRpc": 6,
+    "automationBroker": 5,
     "offlineApi": 1,
     "previewBridge": 3
   },
@@ -26,6 +26,7 @@
   "nativeMethods": [
     "export_preset",
     "get_compatibility",
+    "get_edit_state",
     "get_runtime_info",
     "list_addon_imgui_capture",
     "list_addon_overlays",

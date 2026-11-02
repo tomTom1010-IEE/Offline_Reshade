@@ -7,8 +7,8 @@ namespace offline_contract
 	inline constexpr const char *UpstreamVersion = "6.7.3";
 	inline constexpr const char *UpstreamCommit = "0eff32e237578591a44946a0e0f9581620c026b4";
 	inline constexpr unsigned int ReShadeApi = 20;
-	inline constexpr unsigned int NativeRpc = 5;
-	inline constexpr unsigned int AutomationBroker = 4;
+	inline constexpr unsigned int NativeRpc = 6;
+	inline constexpr unsigned int AutomationBroker = 5;
 	inline constexpr unsigned int OfflineApi = 1;
 	inline constexpr unsigned int PreviewBridge = 3;
 }

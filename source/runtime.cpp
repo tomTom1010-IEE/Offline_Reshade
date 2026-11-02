@@ -17,6 +17,8 @@
 #include "platform_utils.hpp"
 #include "reshade_api_object_impl.hpp"
 #include <set>
+#include <charconv>
+#include <limits>
 #include <cmath> // std::abs, std::fmod
 #include <cctype> // std::toupper
 #include <cwctype> // std::towlower
@@ -1418,9 +1420,21 @@ void reshade::runtime::save_current_preset(ini_file &preset) const
 				preset.set(effect_name, variable.name, values.as_uint, components);
 				break;
 			case reshadefx::type::t_float:
+			{
 				get_uniform_value(variable, values.as_float, components);
-				preset.set(effect_name, variable.name, values.as_float, components);
+				// Working snapshots and user presets must round-trip actual shader values.
+				// std::to_string truncates tiny values and loses precision after a rebuild.
+				std::vector<std::string> encoded;
+				encoded.reserve(components);
+				for (unsigned int i = 0; i < components; ++i)
+				{
+					char buffer[64];
+					const auto result = std::to_chars(buffer, buffer + sizeof(buffer), values.as_float[i], std::chars_format::general, std::numeric_limits<float>::max_digits10);
+					encoded.emplace_back(buffer, result.ptr);
+				}
+				preset.set(effect_name, variable.name, encoded);
 				break;
+			}
 			}
 		}
 	}

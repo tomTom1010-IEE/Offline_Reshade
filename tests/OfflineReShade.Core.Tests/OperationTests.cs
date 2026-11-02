@@ -19,10 +19,12 @@ internal static class OperationTests
         async Task<JsonElement> Call(string method, object? args, CancellationToken token)
         {
             if (method == "get_runtime_info") return AutomationEngine.Json(new { frameCount = 1, inputGeneration = 1, loading = false, presetPath = preset });
+            if (method == "get_edit_state") return HistoryTests.SimpleState(value);
             if (method == "set_uniform")
             {
                 if (block) { block = false; entered.TrySetResult(); await release.Task.WaitAsync(token); }
-                value = AutomationEngine.Json(args).GetProperty("value").GetInt32(); calls.Add("edit" + value);
+                var component = AutomationEngine.Json(args).GetProperty("value");
+                value = (component.ValueKind == JsonValueKind.Array ? component[0] : component).GetInt32(); calls.Add("edit" + value);
             }
             if (method == "reload_effects" && failReload) throw new IOException("Broken reload");
             if (method is "save_output" or "save_screenshot") {
@@ -65,7 +67,7 @@ internal static class OperationTests
         Check(((OperationOutcome)silent.Data[nameof(OperationOutcome)]!).Code == "io_failure", "Preset failure lost its category.");
         exportPreset = true;
         await engine.RetryAsync();
-        Check(await File.ReadAllTextAsync(preset) == "new preset" && engine.Activity.Snapshot.Notice == null, "Successful retry did not clear the matching error.");
+        Check((await File.ReadAllTextAsync(preset)).StartsWith("new preset") && engine.Activity.Snapshot.Notice == null, "Successful retry did not clear the matching error.");
         Check(!Directory.EnumerateFiles(folder, ".OfflineReShade-*.ini").Any(), "Temporary preset leaked.");
         failReload = true;
         await Fails<IOException>(() => Run("reload_effects", new { }));

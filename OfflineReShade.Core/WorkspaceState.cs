@@ -99,7 +99,7 @@ public static class WorkspaceConfigurationCodec
 public sealed record AppliedInput(RenderInput Input, long Revision);
 public sealed record ApplyTicket(long Operation, long Revision, RenderInput Input);
 
-// Implemented by the shared operation layer when command transactions are introduced.
+// Implemented by the shared operation layer; views never own a separate history.
 public interface IEditHistory
 {
     bool CanUndo { get; }

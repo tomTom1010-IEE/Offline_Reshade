@@ -88,18 +88,18 @@ try:
     rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'correctness-tests','version':'1'}})
     p.stdin.write(json.dumps({'jsonrpc':'2.0','method':'notifications/initialized'})+'\n');p.stdin.flush()
     for name,code in [('mcp-compile',broken),('mcp-missing',missing)]:
-        folder,item=fixture(name,code);tool('open_input',**item)
+        folder,item=fixture(name,code);tool('open_input',**item,unsavedChanges='discard')
         for shot in (False,True):tool('export_image',expect_error=True,path=item['outputPath'],reShadeShot=shot,warmupFrames=2)
         tool('start_batch',items=[item],warmupFrames=2,retries=0)
         result=job();assert result['state']=='failed',result
         assert not Path(item['outputPath']).exists()
-    folder,item=fixture('mcp-black',black);tool('open_input',**item)
+    folder,item=fixture('mcp-black',black);tool('open_input',**item,unsavedChanges='discard')
     for shot in (False,True):
         result=tool('export_image',path=item['outputPath'],reShadeShot=shot,warmupFrames=2)
         assert 'black' in result['warning'];assert pixel(item['outputPath'])==(0,0,0)
     print('PASS: both MCP export paths and batch reject damaged effects; black remains a successful export with warning',flush=True)
 
-    folder,item=fixture('watch',green);tool('open_input',**item,watchInput=True)
+    folder,item=fixture('watch',green);tool('open_input',**item,watchInput=True,unsavedChanges='discard')
     tool('export_image',path=item['outputPath'],warmupFrames=2)
     Image.new('RGB',(480,320),(255,0,0)).save(folder/'next.png');(folder/'next.png').replace(folder/'color.png')
     time.sleep(.5)
@@ -148,7 +148,7 @@ try:
     folder,item=fixture('texture-resume',missing)
     textures=folder/'Effects/Textures';textures.mkdir(exist_ok=True)
     Image.new('RGB',(16,16),(255,0,0)).save(textures/'missing.png')
-    tool('open_input',**item);batch();assert pixel(item['outputPath'])==(255,0,0)
+    tool('open_input',**item,unsavedChanges='discard');batch();assert pixel(item['outputPath'])==(255,0,0)
     Image.new('RGB',(16,16),(0,0,255)).save(textures/'missing.png')
     batch();assert pixel(item['outputPath'])==(0,0,255)
     (textures/'missing.png').unlink()

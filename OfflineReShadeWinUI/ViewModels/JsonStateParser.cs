@@ -46,7 +46,7 @@ public static class JsonStateParser
                 GetStringArray(item, "items"),
                 GetNullableDouble(item, "min"),
                 GetNullableDouble(item, "max"),
-                GetNullableDouble(item, "step")));
+                GetNullableDouble(item, "step"), item.TryGetProperty("readOnly", out var readOnly) && readOnly.ValueKind == JsonValueKind.True));
         }
 
         return result;

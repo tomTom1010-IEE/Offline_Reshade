@@ -51,6 +51,16 @@ public sealed class SettingsPickerService
         return file?.Path;
     }
 
+    public async Task<string?> PickPresetSaveAsync()
+    {
+        var picker = new FileSavePicker();
+        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
+        picker.FileTypeChoices.Add("ReShade preset", new List<string> { ".ini" });
+        picker.SuggestedFileName = "Preset.ini";
+        var file = await picker.PickSaveFileAsync();
+        return file?.Path;
+    }
+
     public async Task<string?> PickFolderAsync()
     {
         var picker = new FolderPicker();

@@ -118,7 +118,7 @@ def tool(name,**params):
 try:
     rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'d3d-tests','version':'1'}})
     proc.stdin.write(json.dumps({'jsonrpc':'2.0','method':'notifications/initialized'})+'\n');proc.stdin.flush()
-    tool('open_input',colorPath=str(source),outputPath=str(output),effectDir=str(effects),presetPath=str(preset))
+    tool('open_input',colorPath=str(source),outputPath=str(output),effectDir=str(effects),presetPath=str(preset),unsavedChanges='discard')
     tool('export_image',path=str(output),warmupFrames=2)
     initial=tool('get_status');assert initial['adapterLuid'] and initial['previewSynchronization']=='keyed-mutex',initial
     tool('set_effects_enabled',enabled=False)

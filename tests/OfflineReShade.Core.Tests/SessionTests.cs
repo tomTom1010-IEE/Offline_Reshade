@@ -66,6 +66,18 @@ internal static class SessionTests
         host.Gain = 0.38;
         await session.LoadPresetAsync(diskPreset);
         Check(host.Gain == 1, "Explicitly loading the same preset retained unsaved parameters instead of loading disk contents.");
+        await PresetMetadata.WriteEffectsEnabledAsync(diskPreset, false, CancellationToken.None);
+        await session.LoadPresetAsync(diskPreset);
+        Check(!host.EffectsEnabled, "Explicit preset loading ignored global-effects metadata.");
+        await session.CallAsync("set_effects_state", new { enabled = true });
+        await session.OpenAsync(session.Current with { Width = 96, Height = 64 });
+        Check(host.EffectsEnabled, "Input rebuild restored stale saved global-effects metadata.");
+        var rebound = Path.Combine(folder, "rebound.ini"); await File.WriteAllTextAsync(rebound, "saved");
+        starts = host.Starts;
+        await session.SetPresetSourceAsync(rebound);
+        Check(host.Starts == starts && session.Current.PresetPath == rebound && session.State.Applied!.Input.PresetPath == rebound,
+            "Save As source rebind restarted or desynchronized applied state.");
+        host.FailCapture = true;
         await session.DisposeAsync();
         Check(host.Disposed && !host.IsConnected, "Dispose did not release the owned host.");
         await Fails<ObjectDisposedException>(() => session.OpenAsync(input));

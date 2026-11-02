@@ -4,7 +4,7 @@ namespace OfflineReShade.WinUI.ViewModels;
 
 public sealed class UniformViewModel : ObservableObject
 {
-    public UniformViewModel(string id, string effectName, string name, string label, string type, string uiType, string category, IReadOnlyList<object?> values, IReadOnlyList<string> items, double? minimum, double? maximum, double? step)
+    public UniformViewModel(string id, string effectName, string name, string label, string type, string uiType, string category, IReadOnlyList<object?> values, IReadOnlyList<string> items, double? minimum, double? maximum, double? step, bool readOnly = false)
     {
         Id = id;
         EffectName = effectName;
@@ -18,6 +18,7 @@ public sealed class UniformViewModel : ObservableObject
         Minimum = minimum;
         Maximum = maximum;
         Step = step;
+        IsReadOnly = readOnly;
     }
 
     public string Id { get; }
@@ -32,6 +33,7 @@ public sealed class UniformViewModel : ObservableObject
     public double? Minimum { get; }
     public double? Maximum { get; }
     public double? Step { get; }
+    public bool IsReadOnly { get; }
 
     public void SetValues(object?[] values)
     {

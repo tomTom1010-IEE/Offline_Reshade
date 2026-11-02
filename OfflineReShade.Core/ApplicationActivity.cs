@@ -30,14 +30,15 @@ public sealed class ApplicationActivity
     public ActivitySnapshot Snapshot { get { lock (_gate) return new(_waitingPath == null ? _runtime : _runtime with {
         WaitingForInput = true, HasFrame = false, InputPath = _waitingPath, Error = _waitingError }, _active, _last, _notice); } }
     public OperationRequest? RetryRequest { get; private set; }
-    public static bool CanRetry(string method) => method is "open_input" or "set_preset" or "reload_effects" or "export_image" or "save_preset" or "export_preset";
-    public static bool IsExclusive(string method) => CanRetry(method) || method is "listen_input" or "stop_listening" or "render_preview" or "batch_start" or "stop_session" or "set_preprocessor_definition";
+    public static bool CanRetry(string method) => method is "open_input" or "set_preset" or "reload_effects" or "export_image" or "save_preset" or "save_preset_as" or "export_preset";
+    public static bool IsExclusive(string method) => CanRetry(method) || method is "listen_input" or "stop_listening" or "render_preview" or "batch_start" or "stop_session" or "set_preprocessor_definition" or "undo" or "redo" or "check_unsaved_changes";
     public static string Label(string method) => method switch
     {
         "open_input" => "Opening input", "set_preset" => "Loading preset", "reload_effects" => "Reloading effects",
         "listen_input" => "Starting input listener", "stop_listening" => "Stopping input listener",
         "export_image" => "Exporting image", "render_preview" => "Rendering preview", "batch_start" => "Exporting batch",
-        "save_preset" or "export_preset" => "Saving preset", "stop_session" or "close_session" => "Stopping renderer",
+        "save_preset" or "save_preset_as" or "export_preset" => "Saving preset", "stop_session" or "close_session" => "Stopping renderer",
+        "undo" => "Undoing edit", "redo" => "Redoing edit",
         "save_settings" => "Saving settings", "load_settings" => "Loading settings", "preview_transport" => "Displaying preview",
         "recover_session" => "Recovering renderer", "runtime_exit" or "observe_runtime" => "Monitoring renderer", _ => "Updating parameters"
     };

@@ -10,7 +10,7 @@ public sealed record RenderInput(string ColorPath, string DepthPath = "", string
 public sealed record BatchRequest(RenderInput[] Items, int WarmupFrames = 5, bool ReShadeShot = true, bool Resume = true, int Retries = 1);
 public sealed record BatchStatus(string Id, string State, int Completed, int Total, string? Current, string? Error, string? Warning = null);
 
-public sealed class AutomationEngine
+public sealed partial class AutomationEngine
 {
     public static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
     private readonly Func<string, object?, CancellationToken, Task<JsonElement>> _call;
@@ -24,7 +24,7 @@ public sealed class AutomationEngine
     private readonly InputArrivalMonitor _listener;
     private bool _restoreAfterBatch;
     public PendingInput? WaitingInput => _listener.Pending;
-    public bool IsBusy => _operations.IsBusy || WaitingInput != null;
+    public bool IsBusy => _operations.IsBusy || WaitingInput != null || History.TransactionId != null;
     public bool IsExclusive => _operations.IsExclusive || WaitingInput != null;
     public bool IsOperationExclusive => _operations.IsExclusive;
     public ApplicationActivity Activity => _operations.Activity;
@@ -32,13 +32,17 @@ public sealed class AutomationEngine
     public event Action? Changed;
     public AutomationEngine(Func<string, object?, CancellationToken, Task<JsonElement>> call, Func<RenderInput, CancellationToken, Task> open, Func<RenderInput> current,
         Func<string, CancellationToken, Task>? loadPreset = null, Func<bool, CancellationToken, Task>? setInputWatch = null,
-        Func<Task>? submitPendingEdits = null, Func<RenderInput?>? pendingInput = null)
+        Func<Task>? submitPendingEdits = null, Func<RenderInput?>? pendingInput = null,
+        Func<string, CancellationToken, Task>? setPresetSource = null)
     {
         _call = async (m, a, t) => { var result = await call(m, a, t); if (m == "get_runtime_info") ObserveRuntime(result); return result; };
         _open = open; _current = current; _loadPreset = loadPreset; _setInputWatch = setInputWatch;
         _submitPendingEdits = submitPendingEdits; _pendingInput = pendingInput;
+        _setPresetSource = setPresetSource;
+        _history = new(_call, WaitForEditStateAsync, ct => RuntimeOperations.WaitForFramesAsync(_call, 2, ct));
+        _history.Changed += () => Changed?.Invoke();
         _listener = new InputArrivalMonitor((input, token) => _operations.RunAsync(Activity.Create("open_input", Json(input), _current()),
-            ct => ExecuteMutationAsync("open_input", Json(input), ct), token), ObserveRuntime, () => _operations.IsBusy);
+            ct => ExecuteGuardedMutationAsync("open_input", ListenerArguments(input), ct), token), ObserveRuntime, () => _operations.IsBusy);
         _listener.Changed += () => { if (WaitingInput is { } waiting) Activity.WaitForInput(waiting.Input.ColorPath, waiting.Error); else Activity.ClearWaiting(); Changed?.Invoke(); };
         _operations.Changed += () => Changed?.Invoke();
         Activity.Changed += () => Changed?.Invoke();
@@ -57,7 +61,7 @@ public sealed class AutomationEngine
     // Only the pending-edit owner uses this entry to avoid recursively flushing itself.
     public Task<JsonElement> ExecuteSubmittedEditAsync(string method, JsonElement args, CancellationToken token = default)
     {
-        if (method is not ("set_uniform" or "set_addon_imgui_value" or "send_addon_overlay_input")) throw new ArgumentException("Not a submitted edit.");
+        if (method is not ("set_uniform" or "reset_uniform" or "begin_edit" or "end_edit" or "set_addon_imgui_value" or "send_addon_overlay_input")) throw new ArgumentException("Not a submitted edit.");
         return ExecuteCoreAsync(method, args, false, token);
     }
     private async Task<JsonElement> ExecuteCoreAsync(string method, JsonElement args, bool submitPending, CancellationToken token)
@@ -68,12 +72,14 @@ public sealed class AutomationEngine
             node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
             node["appliedInput"] = JsonSerializer.SerializeToNode(Activity.Snapshot.Runtime.Connected ? _current() : null, JsonOptions);
             node["pendingConfiguration"] = PendingConfiguration();
+            node["editHistory"] = JsonSerializer.SerializeToNode(History, JsonOptions);
             return Json(node);
         }
         if (method == "batch_status") return Json(Job ?? new BatchStatus("", "idle", 0, 0, null, null));
         if (method is "batch_cancel" or "cancel_operation") {
             var cancelling = method == "cancel_operation" ? IsBusy : Job?.State == "running";
             if (cancelling) Cancel();
+            if (cancelling) await _cancelTransaction;
             return Json(new { cancelling });
         }
         if (method == "get_runtime_info") {
@@ -84,11 +90,14 @@ public sealed class AutomationEngine
                 node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
                 node["appliedInput"] = JsonSerializer.SerializeToNode(_current(), JsonOptions);
                 node["pendingConfiguration"] = PendingConfiguration();
+                node["editHistory"] = JsonSerializer.SerializeToNode(History, JsonOptions);
                 return JsonSerializer.SerializeToElement(node);
             } catch (IOException) { if (!_operations.IsBusy) Activity.Disconnected(); return Json(new { busy = IsBusy, connected = false, reconnecting = _operations.IsBusy,
                 loading = _operations.IsBusy, width = 0, height = 0, activity = Activity.Snapshot, waitingInput = WaitingInput,
-                appliedInput = (RenderInput?)null, pendingConfiguration = PendingConfiguration() }); }
+                appliedInput = (RenderInput?)null, pendingConfiguration = PendingConfiguration(), editHistory = History }); }
         }
+        if (method == "get_edit_history" && (_operations.IsBusy || WaitingInput != null || _current().ColorPath.Length == 0)) return Json(History);
+        if (method == "get_edit_history") submitPending = false; // A read observes applied state; it does not commit unfinished UI text.
         if (method is "list_state" or "list_addons" or "list_addon_imgui_capture") return await _call(method, args, token);
         if (method is "open_input" or "listen_input" or "stop_listening") { token.ThrowIfCancellationRequested(); await _listener.StopAsync(); }
         var operation = Activity.Create(method, args, _current());
@@ -111,7 +120,7 @@ public sealed class AutomationEngine
             _ = StartBatchAsync(operation, accepted, edits, token);
             return await accepted.Task;
         }
-        return await _operations.RunAsync(operation, async ct => { await edits.WaitAsync(ct); return await ExecuteMutationAsync(method, args, ct); }, token);
+        return await _operations.RunAsync(operation, async ct => { await edits.WaitAsync(ct); return await ExecuteGuardedMutationAsync(method, args, ct); }, token);
     }
 
     private JsonNode? PendingConfiguration()
@@ -127,6 +136,7 @@ public sealed class AutomationEngine
             await _operations.RunAsync(operation, async ct =>
             {
                 await edits.WaitAsync(ct);
+                _history.RequireAccess(null);
                 var args = operation.Arguments;
                 var request = args.Deserialize<BatchRequest>(JsonOptions) ?? throw new ArgumentException("Missing batch request.");
                 if (request.Items == null || request.Items.Length == 0) throw new ArgumentException("Batch needs at least one item.");
@@ -176,7 +186,7 @@ public sealed class AutomationEngine
             else await _open(_current() with { PresetPath = preset }, token);
             return await _call("get_runtime_info", null, token);
         }
-        if (method is "save_preset" or "export_preset") return await SavePresetAsync(method, args, token);
+        if (method is "save_preset" or "save_preset_as" or "export_preset") return await SavePresetAsync(method, args, token);
         if (method == "export_image")
         {
             var request = args.Deserialize<ImageExportRequest>(JsonOptions) ?? throw new ArgumentException("Missing export request.");
@@ -190,7 +200,7 @@ public sealed class AutomationEngine
             if (_current().ColorPath.Length > 0) RuntimeOperations.OutputPath(destination, _current().ColorPath, _current().DepthPath);
             if (request.ConflictPolicy == "fail" && File.Exists(destination))
                 throw new IOException("The output file already exists. Choose another path or conflict policy.");
-            if (request.ApplyInput != null) await ExecuteMutationAsync("open_input", Json(intended), token);
+            if (request.ApplyInput != null) await ExecuteGuardedMutationAsync("open_input", CopyPresetDecision(Json(intended), args), token);
             await PrepareExportAsync(request.WarmupFrames, token);
             return await ImageExport.WriteAsync(destination, request.ConflictPolicy,
                 (temporary, ct) => _call(request.ReShadeShot ? "save_screenshot" : "save_output", new { path = temporary }, ct), token);
@@ -226,18 +236,28 @@ public sealed class AutomationEngine
 
     private async Task<JsonElement> SavePresetAsync(string method, JsonElement args, CancellationToken token)
     {
-        var runtime = await _call("get_runtime_info", null, token);
-        var path = Path.GetFullPath(method == "export_preset" ? args.GetProperty("path").GetString()! : runtime.GetProperty("presetPath").GetString()!);
+        _history.RequireAccess(null);
+        var state = await _history.SynchronizeAsync(token);
+        if (!History.Available) throw new InvalidOperationException("The current FX state is unverified. Reload a known preset before saving.");
+        var source = method == "save_preset" ? _current().PresetPath : args.GetProperty("path").GetString();
+        if (string.IsNullOrWhiteSpace(source)) throw new InvalidOperationException("This session has no source preset. Use Save As and choose an INI file.");
+        var path = Path.GetFullPath(source);
+        if (method == "save_preset_as" && _setPresetSource == null) throw new InvalidOperationException("This session cannot change its source preset.");
         if (!path.EndsWith(".ini", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Preset path must end with .ini.");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = Path.Combine(Path.GetDirectoryName(path)!, ".OfflineReShade-" + Guid.NewGuid().ToString("N") + ".ini");
         try
         {
-            await RuntimeOperations.WaitForFramesAsync(_call, 0, token);
             await _call("export_preset", new { path = temporary }, token);
             if (!File.Exists(temporary) || new FileInfo(temporary).Length == 0) throw new IOException("The renderer did not write the preset. Check the destination and permissions.");
+            await PresetMetadata.WriteEffectsEnabledAsync(temporary, state.EffectsEnabled, token);
+            if (!state.SameAs(EffectSnapshot.Read(await _call("get_edit_state", null, token))))
+                throw new IOException("FX state changed during preset export. Review it and save again.");
             token.ThrowIfCancellationRequested();
             File.Move(temporary, path, true);
+            // Publication is the commit point. Cancellation afterwards must not pretend the file was not saved.
+            if (method == "save_preset_as") await _setPresetSource!(path, CancellationToken.None);
+            if (method != "export_preset") _history.MarkSaved();
             return Json(new { path });
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
@@ -305,12 +325,14 @@ public sealed class AutomationEngine
             Changed?.Invoke();
         }
     }
-    public async Task StopAsync() { _listener.Cancel(); await _operations.StopAsync(); await _listener.StopAsync(); }
-    public async Task StopSessionAsync(Func<Task> stop)
+    public async Task StopAsync() { _listener.Cancel(); await _operations.StopAsync(() => { _history.CloseTransaction(); return Task.CompletedTask; }); await _listener.StopAsync(); }
+    public async Task StopSessionAsync(Func<Task> stop, JsonElement? unsavedDecision = null)
     {
         _restoreAfterBatch = false;
         _listener.Cancel();
         await _operations.StopAsync(async () => {
+            _history.CloseTransaction();
+            if (unsavedDecision.HasValue) await CheckUnsavedAsync(unsavedDecision.Value, CancellationToken.None);
             await _listener.StopAsync();
             var request = Activity.Create("stop_session", Json(new { }), _current());
             Activity.Begin(request);
@@ -331,6 +353,7 @@ public sealed class AutomationEngine
         var pending = WaitingInput;
         if (pending != null && !_operations.IsBusy) Activity.Finish(Activity.Create("listen_input", Json(pending.Input), _current()), "cancelled", "cancelled", "Stopped waiting for game output.");
         _listener.Cancel(); _operations.Cancel();
+        _cancelTransaction = _operations.StopAsync(() => { _history.CloseTransaction(); return Task.CompletedTask; });
     }
     public static RenderInput ValidateInput(RenderInput input) => NormalizeInput(input, requireFiles: true);
     private static RenderInput NormalizeInput(RenderInput input, bool requireFiles)
@@ -343,7 +366,9 @@ public sealed class AutomationEngine
         if (input.Width is < 0 or > 16384 || input.Height is < 0 or > 16384 || ((input.Width == 0) != (input.Height == 0))) throw new ArgumentException("Width and height must both be zero (source size) or both 1–16384.");
         if ((long)input.Width * input.Height > PreviewGeometry.MaxRenderPixels) throw new ArgumentException("Output exceeds the 64 megapixel resource limit. Reduce output dimensions.");
         if (input.DepthFormat is not ("raw" or "rgba") || input.DepthProfile is not ("kk" or "kks") || input.DepthDownsample is not ("max2x2" or "box")) throw new ArgumentException("Invalid depth format, profile or downsampling mode.");
-        return input with { ColorPath = color, DepthPath = depth, OutputPath = RuntimeOperations.OutputPath(input.OutputPath, color, depth) };
+        return input with { ColorPath = color, DepthPath = depth, OutputPath = RuntimeOperations.OutputPath(input.OutputPath, color, depth),
+            EffectDir = string.IsNullOrWhiteSpace(input.EffectDir) ? "" : Path.GetFullPath(input.EffectDir),
+            PresetPath = string.IsNullOrWhiteSpace(input.PresetPath) ? "" : Path.GetFullPath(input.PresetPath) };
     }
     public static JsonElement Json<T>(T value) => JsonSerializer.SerializeToElement(value, JsonOptions);
     private async Task PrepareExportAsync(int frames, CancellationToken token)

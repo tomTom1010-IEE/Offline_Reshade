@@ -52,10 +52,10 @@ def exported(size):
 try:
     rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'input-workflow','version':'1'}})
     p.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');p.stdin.flush()
-    tool('listen_input',**waiting)
+    tool('listen_input',**waiting,unsavedChanges='discard')
     status=tool('get_operation_status');assert status['waitingInput'] and status['showEmpty'],status
     tool('stop_listening')
-    tool('open_input',**base)
+    tool('open_input',**base,unsavedChanges='discard')
     tool('render_preview',warmupFrames=1) # Wait for effect metadata before setting the uniform.
     tool('set_parameters',updates=[{'id':'Input.fx::Gain','value':.4}]);exported((64,48))
     previous=output.read_bytes()

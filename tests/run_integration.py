@@ -81,9 +81,9 @@ try:
     names={t['name'] for t in rpc('tools/list',{})['tools']}
     assert {'open_input','render_preview','export_image','start_batch','cancel_job','attach_session','get_diagnostics','get_operation_status','cancel_operation'}<=names,names
     diagnostics=data(tool('get_diagnostics'))
-    assert diagnostics['schemaVersion']==1 and diagnostics['expected']['protocolVersion']==5,diagnostics
+    assert diagnostics['schemaVersion']==1 and diagnostics['expected']['protocolVersion']==6,diagnostics
     def config(c,d,out): return dict(colorPath=str(c),depthPath=str(d),effectDir=str(effects),outputPath=str(out),presetPath=str(preset))
-    tool('open_input',**config(c1,d1,work/'mcp-first.png'))
+    tool('open_input',**config(c1,d1,work/'mcp-first.png'),unsavedChanges='discard')
     diagnostics=data(tool('get_diagnostics'))
     assert diagnostics['runtime']['upstreamCommit']==diagnostics['expected']['upstreamCommit'] and diagnostics['runtimeError'] is None,diagnostics
     preview=tool('render_preview',maxWidth=128,warmupFrames=3)
@@ -92,7 +92,7 @@ try:
     metadata=data(tool('list_effects',effectName='Integration.fx',limit=10))
     assert {u['id'] for u in metadata['uniforms']} >= {'Integration.fx::Gain','Integration.fx::UseDepth'},metadata
     tool('reorder_techniques',ids=[t['id'] for t in metadata['techniques']])
-    tool('save_preset',path=str(work/'saved.ini'));assert (work/'saved.ini').exists()
+    tool('export_preset_copy',path=str(work/'saved.ini'));assert (work/'saved.ini').exists()
     tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':0}])
     black=data(tool('export_image',path=str(work/'black.png'),warmupFrames=3))
     assert black['operation']['status']=='warning' and 'black' in black['operation']['message'],black
@@ -101,7 +101,7 @@ try:
     assert notice['status']=='warning',notice
     for _ in range(2):
         tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':0.2}])
-        tool('load_preset',path=str(preset))
+        tool('load_preset',path=str(preset),unsavedChanges='discard')
         tool('export_image',path=str(work/'reloaded-preset.png'),warmupFrames=2)
         assert Image.open(work/'reloaded-preset.png').getpixel((8,6))[1]>240,'Same-path preset load retained old edits'
     tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':1}])

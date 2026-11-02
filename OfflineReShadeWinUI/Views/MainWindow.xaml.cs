@@ -22,6 +22,8 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
     private readonly List<MappedSlider> _fxMappedSliders = new();
+    private readonly List<(FrameworkElement Owner, Func<Task> Commit)> _uniformTextCommits = new();
+    private long _controlEpoch;
     private readonly List<MappedSlider> _addonMappedSliders = new();
     private readonly List<FrameworkElement> _fxLogIndicators = new();
     private readonly List<FrameworkElement> _addonLogIndicators = new();
@@ -140,7 +142,7 @@ public sealed partial class MainWindow : Window
         };
         PreviewSurface.PointerWheelChanged += OnPreviewPointerWheelChanged;
         ViewModel.ExportRequested += OnExportRequested;
-        ViewModel.SubmitVisualEdits += FlushAddonOverlayMouseMove;
+        ViewModel.SubmitVisualEdits += FlushVisibleEdits;
         PreviewSurface.PointerPressed += OnPreviewPointerPressed;
         PreviewSurface.PointerMoved += OnPreviewPointerMoved;
         PreviewSurface.PointerReleased += OnPreviewPointerReleased;
@@ -175,11 +177,20 @@ public sealed partial class MainWindow : Window
                 _closePrepared = true;
                 Close();
             }
+            catch (OperationCanceledException) { _closeRequested = false; }
             catch (Exception ex)
             {
                 _closeRequested = false;
                 ViewModel.ReportUiError(ex, "close_session");
             }
+        };
+        ViewModel.UnsavedDecisionRequested = async (preset, canSave) =>
+        {
+            var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, RequestedTheme = RootGrid.ActualTheme,
+                Title = "Save preset changes?", Content = "Current FX changes have not been saved.\n" + preset,
+                PrimaryButtonText = "Save", IsPrimaryButtonEnabled = canSave, SecondaryButtonText = "Discard", CloseButtonText = "Cancel",
+                DefaultButton = canSave ? ContentDialogButton.Primary : ContentDialogButton.Close };
+            return await dialog.ShowAsync() switch { ContentDialogResult.Primary => "save", ContentDialogResult.Secondary => "discard", _ => "cancel" };
         };
         Closed += (_, _) =>
         {
@@ -198,7 +209,7 @@ public sealed partial class MainWindow : Window
             ViewModel.AddonControlValuesChanged -= UpdateAddonControlValues;
             ViewModel.ControlsChanged -= BuildControls;
             ViewModel.ExportRequested -= OnExportRequested;
-            ViewModel.SubmitVisualEdits -= FlushAddonOverlayMouseMove;
+            ViewModel.SubmitVisualEdits -= FlushVisibleEdits;
             ViewModel.Dispose();
         };
 
@@ -628,6 +639,18 @@ public sealed partial class MainWindow : Window
 
     private void OnRootKeyDown(object sender, KeyRoutedEventArgs args)
     {
+        var control = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (control && !args.KeyStatus.WasKeyDown && !IsTextEntryFocused() && !_exportDialogOpen)
+        {
+            System.Windows.Input.ICommand? command = args.Key switch
+            {
+                Windows.System.VirtualKey.Z => ViewModel.UndoCommand,
+                Windows.System.VirtualKey.Y => ViewModel.RedoCommand,
+                Windows.System.VirtualKey.S => ViewModel.SavePresetCommand,
+                _ => null
+            };
+            if (command?.CanExecute(null) == true) { command.Execute(null); args.Handled = true; return; }
+        }
         if (args.Key != Windows.System.VirtualKey.L || args.KeyStatus.WasKeyDown || IsTextEntryFocused())
             return;
         if (_fxMappedSliders.Any(static slider => slider.IsDragging) ||
@@ -932,6 +955,8 @@ public sealed partial class MainWindow : Window
 
     private void BuildControls()
     {
+        _controlEpoch++;
+        _uniformTextCommits.Clear();
         ControlsPanel.Children.Clear();
         _fxMappedSliders.Clear();
         _fxLogIndicators.Clear();
@@ -2202,6 +2227,17 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(hasNumericSlider
             ? CreateMappedSliderLabel(uniform.Label, _fxLogIndicators)
             : new TextBlock { Text = uniform.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        if (uniform.IsReadOnly)
+        {
+            panel.Children.Add(new TextBlock { Text = "Shader-managed value — not stored in presets", TextWrapping = TextWrapping.Wrap });
+            panel.Children.Add(new TextBlock { Text = string.Join(", ", uniform.Values.Select(x => Convert.ToString(x, CultureInfo.InvariantCulture))), TextWrapping = TextWrapping.Wrap });
+            return panel;
+        }
+        var reset = new Button { Content = "Reset", HorizontalAlignment = HorizontalAlignment.Right };
+        AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
+        ToolTipService.SetToolTip(reset, "Restore the shader default (can be undone)");
+        reset.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.ResetUniformAsync(uniform));
+        panel.Children.Add(reset);
 
         if (hasChoiceEditor)
         {
@@ -2220,16 +2256,39 @@ public sealed partial class MainWindow : Window
 
         if (uniform.Type == "bool")
         {
-            var checkBox = new CheckBox { Content = uniform.EffectName, IsChecked = ToBool(uniform.Values.FirstOrDefault()), Tag = uniform };
-            checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetUniformAsync((UniformViewModel)checkBox.Tag, true));
-            checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetUniformAsync((UniformViewModel)checkBox.Tag, false));
-            panel.Children.Add(checkBox);
+            var components = uniform.Values.Length == 0 ? new[] { false } : uniform.Values.Select(ToBool).ToArray();
+            for (var index = 0; index < components.Length; index++)
+            {
+                var component = index;
+                var checkBox = new CheckBox { Content = components.Length == 1 ? uniform.EffectName : "Component " + (index + 1), IsChecked = components[index] };
+                AutomationProperties.SetName(checkBox, uniform.Label + (components.Length == 1 ? "" : " component " + (index + 1)));
+                async void Changed(object sender, RoutedEventArgs e)
+                {
+                    components[component] = checkBox.IsChecked == true;
+                    await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, components.Length == 1 ? components[0] : components.ToArray()));
+                }
+                checkBox.Checked += Changed; checkBox.Unchecked += Changed;
+                panel.Children.Add(checkBox);
+            }
             return panel;
         }
 
         var numericValues = uniform.Values.Length == 0 ? new[] { 0.0 } : uniform.Values.Select(ToDouble).ToArray();
         var textBoxes = new List<TextBox>();
         var sliders = new List<MappedSlider>();
+        var editorEpoch = _controlEpoch;
+        var textDirty = false;
+        var textRevision = 0;
+        var updatingText = false;
+        async Task CommitTextAsync()
+        {
+            if (!textDirty || editorEpoch != _controlEpoch) return;
+            var revision = textRevision;
+            if (!TryBuildNumericValue(textBoxes, out var value)) { await ViewModel.RejectUniformEditAsync(uniform); return; }
+            await ViewModel.SetUniformAsync(uniform, value);
+            if (revision == textRevision) { textDirty = false; ApplyTextValuesToSliders(textBoxes, sliders); }
+        }
+        _uniformTextCommits.Add((panel, CommitTextAsync));
         for (var i = 0; i < numericValues.Length; ++i)
         {
             var componentIndex = i;
@@ -2254,28 +2313,30 @@ public sealed partial class MainWindow : Window
             slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
             slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
             _fxMappedSliders.Add(slider);
-            var textBox = new TextBox { Text = numericValues[i].ToString("0.######", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
+            slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
+            slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            var textBox = new TextBox { Text = numericValues[i].ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
+            textBox.TextChanged += (_, _) => { if (!updatingText) { textDirty = true; textRevision++; } };
             textBoxes.Add(textBox);
             sliders.Add(slider);
             slider.MappedValueChanged += (_, args) =>
             {
-                textBox.Text = args.Value.ToString("0.######", CultureInfo.InvariantCulture);
+                updatingText = true;
+                textBox.Text = args.Value.ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture);
+                updatingText = false;
                 QueueUniformUpdate(uniform, BuildNumericValue(textBoxes, componentIndex, args.Value));
             };
             textBox.KeyDown += async (_, args) =>
             {
                 if (args.Key == Windows.System.VirtualKey.Enter)
                 {
-                    ApplyTextValuesToSliders(textBoxes, sliders);
-                    if (TryBuildNumericValue(textBoxes, out var value))
-                        await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, value));
+                    args.Handled = true;
+                    await RunUiCommandAsync(CommitTextAsync);
                 }
             };
             textBox.LostFocus += async (_, _) =>
             {
-                ApplyTextValuesToSliders(textBoxes, sliders);
-                if (TryBuildNumericValue(textBoxes, out var value))
-                    await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, value));
+                await RunUiCommandAsync(CommitTextAsync);
             };
 
             row.Children.Add(slider);
@@ -2295,11 +2356,16 @@ public sealed partial class MainWindow : Window
                 continue;
 
             sliders[i].SetMappedValue(value, false);
-            boxes[i].Text = sliders[i].MappedValue.ToString("0.######", CultureInfo.InvariantCulture);
         }
     }
 
     private void QueueUniformUpdate(UniformViewModel uniform, object value) => ViewModel.QueueUniformEdit(uniform, value);
+    private void FlushVisibleEdits()
+    {
+        FlushAddonOverlayMouseMove();
+        _uniformTextCommits.RemoveAll(x => x.Owner.XamlRoot == null);
+        foreach (var entry in _uniformTextCommits.ToArray()) _ = RunUiCommandAsync(entry.Commit);
+    }
 
     private static object BuildNumericValue(IReadOnlyList<TextBox> boxes, int changedIndex, double changedValue)
     {
@@ -2308,7 +2374,7 @@ public sealed partial class MainWindow : Window
         {
             if (i == changedIndex)
                 values[i] = changedValue;
-            else if (!double.TryParse(boxes[i].Text, out values[i]))
+            else if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]))
                 values[i] = 0;
         }
 
@@ -2320,7 +2386,7 @@ public sealed partial class MainWindow : Window
         var values = new double[boxes.Count];
         for (var i = 0; i < values.Length; ++i)
         {
-            if (!double.TryParse(boxes[i].Text, out values[i]))
+            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]) || !double.IsFinite(values[i]))
             {
                 value = 0.0;
                 return false;
@@ -2365,6 +2431,7 @@ public sealed partial class MainWindow : Window
         _exportDialogOpen = true;
         try
         {
+            await ViewModel.PrepareExportReviewAsync();
             var dialog = new ContentDialog
             {
                 XamlRoot = RootGrid.XamlRoot,

@@ -97,7 +97,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _pendingEdits = new(error => ReportUiError(error));
         _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current,
             (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true), ApplyInputWatchAsync,
-            () => { SubmitVisualEdits?.Invoke(); return _pendingEdits.FlushAsync(); }, () => HasPendingConfiguration ? CurrentRenderInput() : null);
+            () => { SubmitVisualEdits?.Invoke(); return _pendingEdits.FlushAsync(); }, () => HasPendingConfiguration ? CurrentRenderInput() : null, RebindPresetSourceAsync);
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
@@ -110,6 +110,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         LocateExportedImageCommand = CreateCommand(() => OpenExportedAsync(true), () => HasExportedImage);
         ReloadCommand = CreateCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
         SavePresetCommand = CreateCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
+        SavePresetAsCommand = CreateCommand(SavePresetAsAsync, () => _session.IsConnected && CanEditSession);
+        UndoCommand = CreateCommand(() => MoveHistoryAsync(false), () => _session.IsConnected && CanEditSession && _automation.History.CanUndo);
+        RedoCommand = CreateCommand(() => MoveHistoryAsync(true), () => _session.IsConnected && CanEditSession && _automation.History.CanRedo);
+        RestoreControlsCommand = CreateCommand(RestoreControlsAsync, () => _session.IsConnected && CanEditSession);
         ToggleInputModeCommand = CreateCommand(ToggleInputModeAsync, () => CanEditSession);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
@@ -130,7 +134,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         PickGalleryInputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
         PickGalleryOutputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
 
-        CancelOperationCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.IsBusy);
+        CancelOperationCommand = CreateCommand(CancelUserOperationAsync, () => _automation.IsBusy);
         RetryOperationCommand = CreateCommand(async () => { await _automation.RetryAsync(); if (_session.IsConnected) await RefreshControlStateAsync(); }, () => CanRetryOperation && CanEditSession);
         LocateFeedbackCommand = CreateCommand(LocateFeedbackAsync, () => FeedbackPath.Length > 0);
         if (_settingsStore.LoadError != null) ReportUiError(new IOException(_settingsStore.LoadError), "load_settings");
@@ -282,7 +286,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public string FeedbackDetails => System.Text.Json.JsonSerializer.Serialize(Activity, AutomationEngine.JsonOptions) + Environment.NewLine + LogText;
     public bool CanRetryOperation => _automation.Activity.RetryRequest != null;
     public string FeedbackPath => Activity.Notice?.TargetPath ?? Activity.Notice?.SourcePath ?? Activity.Runtime.InputPath;
-    public RelayCommand CancelOperationCommand { get; }
+    public AsyncRelayCommand CancelOperationCommand { get; }
     public AsyncRelayCommand RetryOperationCommand { get; }
     public AsyncRelayCommand LocateFeedbackCommand { get; }
     private AsyncRelayCommand CreateCommand(Func<Task> action, Func<bool>? canExecute = null) => new(action, error => ReportUiError(error), canExecute);
@@ -291,8 +295,19 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AppendLog(error.ToString());
         _automation.Activity.Report(error, operation, _session.Current);
     }
-    private Task<JsonElement> ExecuteOperationAsync(string method, object? args = null, CancellationToken token = default)
-        => _automation.ExecuteAsync(method, AutomationEngine.Json(args ?? new { }), token);
+    private async Task<JsonElement> ExecuteOperationAsync(string method, object? args = null, CancellationToken token = default)
+    {
+        await FinishUniformGestureAsync();
+        var request = AutomationEngine.Json(args ?? new { });
+        if (_automation.ReplacesPreset(method, request))
+        {
+            var decision = method == "export_image" ? _exportPresetDecision ?? throw new InvalidOperationException("Close and reopen Export image to review the changed preset.") : await ReviewUnsavedAsync();
+            if (method == "export_image" && request.GetProperty("applyInput").GetProperty("presetPath").GetString() != _reviewedExportPreset)
+                throw new InvalidOperationException("The pending preset changed. Close and reopen Export image to review it.");
+            request = AutomationEngine.CopyPresetDecision(request, decision);
+        }
+        return await _automation.ExecuteAsync(method, request, token);
+    }
     private Task LocateFeedbackAsync()
     {
         var path = Path.GetFullPath(FeedbackPath);
@@ -513,8 +528,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public Task SetUniformAsync(UniformViewModel uniform, object value) =>
         _pendingEdits.SubmitNowAsync("uniform:" + uniform.Id, () => SubmitEditAsync("set_uniform", new { id = uniform.Id, value }));
 
-    public void QueueUniformEdit(UniformViewModel uniform, object value) =>
-        _pendingEdits.Enqueue("uniform:" + uniform.Id, () => SubmitEditAsync("set_uniform", new { id = uniform.Id, value }));
+    public void QueueUniformEdit(UniformViewModel uniform, object value)
+    {
+        var gesture = _uniformGesture;
+        _pendingEdits.Enqueue("uniform:" + uniform.Id, async () => {
+            var transactionId = gesture == null ? null : await gesture;
+            await SubmitEditAsync("set_uniform", new { id = uniform.Id, value, transactionId });
+        });
+    }
     public void QueueAddonEdit(AddonImGuiControlViewModel control, string value) =>
         _pendingEdits.Enqueue("addon:" + control.Id, () => SubmitEditAsync("set_addon_imgui_value", new { id = control.Id, value }));
 
@@ -598,10 +619,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private Task StartPreviewAsync() => StartPreviewCoreAsync(false);
     private async Task StartPreviewCoreAsync(bool preserveBatch) => await ExecuteOperationAsync("open_input", CurrentRenderInput() with { WatchInput = false });
     private Task StopPreviewAsync() => StopPreviewAsync(updateStatus: true);
-    private Task StopPreviewAsync(bool updateStatus)
+    private async Task StopPreviewAsync(bool updateStatus)
     {
         _pendingEdits.Clear();
-        return _automation.StopSessionAsync(_session.StopAsync);
+        try { await _automation.StopSessionAsync(_session.StopAsync); }
+        finally { await ResetLocalEditsAsync(); }
     }
 
     private void ResetPreviewPresentation()
@@ -689,7 +711,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         async void Execute(object? _) {
             try {
                 var result = await _automation.ExecuteAsync(method, args, token);
-                if (method is "set_parameters" or "set_uniform" or "reset_uniform" or "set_technique_state" or "reorder_techniques" or "set_preset" or "set_effects_state") await RefreshControlStateAsync();
+                if ((method is "cancel_operation" or "batch_cancel") && result.TryGetProperty("cancelling", out var cancelling) && cancelling.GetBoolean())
+                {
+                    await ResetLocalEditsAsync();
+                    if (_session.IsConnected) await RefreshControlStateAsync();
+                }
+                if (method is "set_parameters" or "set_uniform" or "reset_uniform" or "set_technique_state" or "reorder_techniques" or "set_preset" or "set_effects_state" or "undo" or "redo" or "set_preprocessor_definition") await RefreshControlStateAsync();
                 completion.TrySetResult(result);
             } catch (Exception ex) { completion.TrySetException(ex); }
         }
@@ -712,6 +739,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             CancelBatchCommand.RaiseCanExecuteChanged(); CancelOperationCommand.RaiseCanExecuteChanged();
             RetryOperationCommand.RaiseCanExecuteChanged(); LocateFeedbackCommand.RaiseCanExecuteChanged();
             StartPreviewCommand.RaiseCanExecuteChanged(); NotifyExportState();
+            NotifyHistoryState();
             ToggleInputModeCommand.RaiseCanExecuteChanged(); RefreshGalleryCommand.RaiseCanExecuteChanged(); RaiseControlCommandStates();
         }
         if (_syncContext != null && SynchronizationContext.Current != _syncContext) _syncContext.Post(_ => Update(), null); else Update();
@@ -727,6 +755,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task SavePresetAsync()
     {
+        if (string.IsNullOrWhiteSpace(_session.Current.PresetPath)) { await SavePresetAsAsync(); return; }
         await ExecuteOperationAsync("save_preset");
         AppendLog("Preset saved.");
     }
@@ -1313,14 +1342,16 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task PrepareCloseAsync()
     {
-        _pendingEdits.Clear();
+        await FinishUniformGestureAsync();
+        if (_automation.IsOperationExclusive) throw new InvalidOperationException("Finish or cancel the current operation before closing.");
+        var decision = await ReviewUnsavedAsync();
         _automation.Cancel(restore: false);
         await _automation.StopSessionAsync(async () => {
             if (_settingsStore.LoadError == null) await SaveSettingsNowAsync();
             else AppendLog(_settingsStore.LoadError);
             StopFpsPolling();
             await _session.DisposeAsync();
-        });
+        }, decision);
     }
 
     private void RaiseControlCommandStates()
@@ -1328,6 +1359,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         NotifyExportState();
         ReloadCommand.RaiseCanExecuteChanged();
         SavePresetCommand.RaiseCanExecuteChanged();
+        SavePresetAsCommand?.RaiseCanExecuteChanged(); UndoCommand?.RaiseCanExecuteChanged(); RedoCommand?.RaiseCanExecuteChanged(); RestoreControlsCommand?.RaiseCanExecuteChanged();
         RaiseBatchApplyCanExecuteChanged();
     }
 

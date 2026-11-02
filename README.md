@@ -366,6 +366,15 @@ listener. The source summary distinguishes pending input from the applied image.
 
 ### Export Image
 
+FX editing supports shared `Undo` / `Redo`, per-parameter `Reset`, and unsaved
+markers. A slider drag is one undo entry; MCP edits join the same history. Input
+and resolution changes preserve current FX values. `Save preset` writes the source
+INI (or asks for a destination if none exists); `Save preset as…` writes and binds
+a new source. Exporting an image does not save the preset. Loading a preset or
+closing offers Save / Discard / Cancel. Add-on private state and shader-managed
+read-only values have separate capabilities. Correct a rejected numeric value,
+reset its parameter, or use `Restore controls from renderer` before exporting.
+
 The single `Export image` entry opens a panel with the source, final dimensions,
 destination and file conflict policy. The UI defaults to a numbered filename when
 the destination exists; you can explicitly replace it after a successful export

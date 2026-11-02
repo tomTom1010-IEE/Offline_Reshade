@@ -68,6 +68,8 @@ public sealed class MappedSlider : UserControl
     }
 
     public event EventHandler<MappedSliderValueChangedEventArgs>? MappedValueChanged;
+    public event EventHandler? DragStarted;
+    public event EventHandler? DragCompleted;
     public event EventHandler<MappedSliderWheelEventArgs>? DragSensitivityWheelChanged;
 
     public double MappedMinimum => _mappedMinimum;
@@ -127,6 +129,7 @@ public sealed class MappedSlider : UserControl
         _dragStartX = point.Position.X;
         _dragStartNormalized = _visualSlider.Value;
         CapturePointer(e.Pointer);
+        DragStarted?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
 
@@ -192,8 +195,10 @@ public sealed class MappedSlider : UserControl
 
     protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
     {
+        var wasDragging = _isDragging;
         _isDragging = false;
         _capturedPointerId = 0;
+        if (wasDragging) DragCompleted?.Invoke(this, EventArgs.Empty);
         base.OnPointerCaptureLost(e);
     }
 
@@ -230,6 +235,7 @@ public sealed class MappedSlider : UserControl
         _isDragging = false;
         _capturedPointerId = 0;
         ReleasePointerCapture(e.Pointer);
+        DragCompleted?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
 

@@ -1006,7 +1006,7 @@ void reshade::runtime::set_preprocessor_definition_for_effect(const char *effect
 						[name](const std::pair<std::string, std::string> &definition) { return definition.first == name; });
 					it != definitions.end())
 				{
-					definitions.erase(it, definitions.end());
+					definitions.erase(it);
 					scope_mask_updated |= scope_flag;
 				}
 			};

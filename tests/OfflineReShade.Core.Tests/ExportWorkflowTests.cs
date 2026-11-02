@@ -28,10 +28,13 @@ internal static class ExportWorkflowTests
         async Task<JsonElement> Call(string method, object? args, CancellationToken token)
         {
             if (method == "get_runtime_info") return AutomationEngine.Json(new { loading = false, frameCount = 1, inputGeneration = 1 });
+            if (method == "get_edit_state") return HistoryTests.SimpleState(value);
             if (method == "set_uniform")
             {
-                value = AutomationEngine.Json(args).GetProperty("value").GetInt32();
-                if (value < 0) throw new ArgumentException("Parameter rejected");
+                var component = AutomationEngine.Json(args).GetProperty("value");
+                var requested = (component.ValueKind == JsonValueKind.Array ? component[0] : component).GetInt32();
+                if (requested < 0) throw new ArgumentException("Parameter rejected");
+                value = requested;
                 calls.Add("edit" + value);
             }
             if (method is "save_screenshot" or "save_output")

@@ -52,7 +52,7 @@ def pixels(path,size):
 try:
     rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'export-workflow','version':'1'}})
     p.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');p.stdin.flush()
-    tool('open_input',**base);tool('render_preview',warmupFrames=1)
+    tool('open_input',**base,unsavedChanges='discard');tool('render_preview',warmupFrames=1)
     tool('set_parameters',updates=[{'id':'Export.fx::Gain','value':.4}])
     assert count()==0,'Preview triggered screenshot events'
     result=tool('export_image',path=str(output),warmupFrames=1)
