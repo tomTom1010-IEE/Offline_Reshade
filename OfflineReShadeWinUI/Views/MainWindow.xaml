@@ -188,6 +188,9 @@
 
             <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
             <TextBlock Text="Leave blank to use the color PNG size." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind ViewModel.ConfigurationStatusText, Mode=OneWay}"
+                       AutomationProperties.AutomationId="ConfigurationStatus"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             <Grid ColumnSpacing="10">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />

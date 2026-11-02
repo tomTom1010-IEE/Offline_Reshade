@@ -19,7 +19,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly AutomationBroker _broker;
     private readonly string _workDir = Path.Combine(AutomationBroker.SessionDirectory, "work", Guid.NewGuid().ToString("N"));
     private RenderInput? _inputOverride;
-    private RenderInput? _runtimeInput;
+    private RenderInput? _runtimeInput => Settings.Session.Applied?.Input;
     private readonly DeviceRecoveryBudget _deviceRecovery = new();
     private bool _cpuPreviewFallback;
     private string _lastPreviewError = "";
@@ -53,7 +53,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _addonSearchPath = string.Empty;
     private string _addonLogPath = string.Empty;
     private bool _allAddonsLoaded = true;
-    private string _inputMode = "RealTime";
     private bool _isGalleryPanelOpen = true;
     private GalleryItemViewModel? _selectedGalleryItem;
     private ulong _sharedPreviewHandle;
@@ -72,8 +71,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _hasPersistedDepthProfile;
     private bool _isApplyingProfilePaths;
     private string _currentDepthProfile = "kks";
-    private PersistedProfilePaths _kksPaths = new();
-    private PersistedProfilePaths _kkPaths = new();
 
     public MainWindowViewModel(AppPaths paths, SynchronizationContext? uiContext = null)
     {
@@ -83,6 +80,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         RestorePersistedSettings();
         _currentDepthProfile = NormalizeDepthProfile(Settings.DepthProfile);
         Settings.PropertyChanged += OnSettingsPropertyChanged;
+        Settings.Session.Changed += OnEditingSessionChanged;
         NormalizeDepthSettings();
         InferDepthProfileIfNeeded(saveIfInferred: true);
         InitializeProfilePathState();
@@ -193,11 +191,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public bool AllAddonsLoaded { get => _allAddonsLoaded; private set => SetProperty(ref _allAddonsLoaded, value); }
     public string InputMode
     {
-        get => _inputMode;
+        get => Settings.InputMode;
         private set
         {
-            if (SetProperty(ref _inputMode, value))
+            if (Settings.InputMode != value)
             {
+                Settings.InputMode = value;
+                OnPropertyChanged();
                 OnPropertyChanged(nameof(IsGalleryMode));
                 OnPropertyChanged(nameof(InputModeButtonText));
                 RaiseBatchApplyCanExecuteChanged();
@@ -239,7 +239,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void RestorePersistedSettings()
     {
-        var settings = _settingsStore.Load();
+        var settings = _settingsStore.Load(new WorkspaceConfiguration { Editor = Settings.Editor with { DepthProfile = "" }, Preferences = Settings.Preferences });
+        if (_settingsStore.LoadError != null) AppendLog(_settingsStore.LoadError);
         if (settings == null)
             return;
 
@@ -250,36 +251,33 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _isRestoringSettings = true;
         try
         {
-            ApplyIfNotNull(settings.ColorPath, value => Settings.ColorPath = value);
-            ApplyIfNotNull(settings.DepthPath, value => Settings.DepthPath = value);
-            ApplyIfNotNull(settings.DepthFormat, value => Settings.DepthFormat = value);
-            if (!string.IsNullOrWhiteSpace(settings.DepthProfile))
+            ApplyIfNotNull(settings.Editor.ColorPath, value => Settings.ColorPath = value);
+            ApplyIfNotNull(settings.Editor.DepthPath, value => Settings.DepthPath = value);
+            ApplyIfNotNull(settings.Editor.DepthFormat, value => Settings.DepthFormat = value);
+            if (!string.IsNullOrWhiteSpace(settings.Editor.DepthProfile))
             {
-                Settings.DepthProfile = settings.DepthProfile;
+                Settings.DepthProfile = settings.Editor.DepthProfile;
                 _hasPersistedDepthProfile = true;
             }
-            ApplyIfNotNull(settings.DepthDownsample, value => Settings.DepthDownsample = value);
-            ApplyIfNotNull(settings.EffectDir, value => Settings.EffectDir = value);
-            ApplyIfNotNull(settings.PresetPath, value => Settings.PresetPath = value);
-            ApplyIfNotNull(settings.OutputPath, value => Settings.OutputPath = value);
-            ApplyIfNotNull(settings.RenderWidth, value => Settings.RenderWidth = value);
-            ApplyIfNotNull(settings.RenderHeight, value => Settings.RenderHeight = value);
-            ApplyIfNotNull(settings.PreviewTransport, value => Settings.PreviewTransport = value);
-            ApplyIfNotNull(settings.GalleryInputFolder, value => Settings.GalleryInputFolder = value);
-            ApplyIfNotNull(settings.GalleryOutputFolder, value => Settings.GalleryOutputFolder = value);
-            ApplyIfNotNull(settings.GalleryBatchFrameDelay, value => Settings.GalleryBatchFrameDelay = value);
-            if (settings.ShowFps.HasValue)
-                Settings.ShowFps = settings.ShowFps.Value;
-            if (settings.SliderDragSensitivity.HasValue)
-                Settings.SliderDragSensitivity = settings.SliderDragSensitivity.Value;
-            if (settings.SliderSymLog.HasValue)
-                Settings.SliderSymLog = settings.SliderSymLog.Value;
-            _kksPaths = settings.KksPaths ?? new PersistedProfilePaths();
-            _kkPaths = settings.KkPaths ?? new PersistedProfilePaths();
-            if (string.Equals(settings.InputMode, "Gallery", StringComparison.OrdinalIgnoreCase))
-                _inputMode = "Gallery";
-            else if (string.Equals(settings.InputMode, "RealTime", StringComparison.OrdinalIgnoreCase))
-                _inputMode = "RealTime";
+            ApplyIfNotNull(settings.Editor.DepthDownsample, value => Settings.DepthDownsample = value);
+            ApplyIfNotNull(settings.Editor.EffectDir, value => Settings.EffectDir = value);
+            ApplyIfNotNull(settings.Editor.PresetPath, value => Settings.PresetPath = value);
+            ApplyIfNotNull(settings.Editor.OutputPath, value => Settings.OutputPath = value);
+            ApplyIfNotNull(settings.Editor.RenderWidth, value => Settings.RenderWidth = value);
+            ApplyIfNotNull(settings.Editor.RenderHeight, value => Settings.RenderHeight = value);
+            ApplyIfNotNull(settings.Preferences.PreviewTransport, value => Settings.PreviewTransport = value);
+            ApplyIfNotNull(settings.Preferences.GalleryInputFolder, value => Settings.GalleryInputFolder = value);
+            ApplyIfNotNull(settings.Preferences.GalleryOutputFolder, value => Settings.GalleryOutputFolder = value);
+            ApplyIfNotNull(settings.Preferences.GalleryBatchFrameDelay, value => Settings.GalleryBatchFrameDelay = value);
+            Settings.ShowFps = settings.Preferences.ShowFps;
+            Settings.SliderDragSensitivity = settings.Preferences.SliderDragSensitivity;
+            Settings.SliderSymLog = settings.Preferences.SliderSymLog;
+            Settings.KksPaths = settings.Preferences.KksPaths ?? new ProfilePaths();
+            Settings.KkPaths = settings.Preferences.KkPaths ?? new ProfilePaths();
+            if (string.Equals(settings.Editor.InputMode, "Gallery", StringComparison.OrdinalIgnoreCase))
+                Settings.InputMode = "Gallery";
+            else if (string.Equals(settings.Editor.InputMode, "RealTime", StringComparison.OrdinalIgnoreCase))
+                Settings.InputMode = "RealTime";
         }
         catch (Exception ex)
         {
@@ -486,7 +484,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             StopPreview(updateStatus: false, cancelBatch: !preserveBatch);
             if (IsGalleryMode && _inputOverride == null)
                 EnsureGallerySelection();
-            AutomationEngine.ValidateInput(CurrentRenderInput());
+            var launchingInput = CurrentRenderInput();
+            AutomationEngine.ValidateInput(launchingInput);
+            var apply = Settings.Session.BeginApply(launchingInput);
             LogText = string.Empty;
             ControlStatusText = "Connecting";
             var pipeName = "OfflineReShade-" + Guid.NewGuid().ToString("N");
@@ -503,7 +503,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             await _rpc.ConnectAsync(pipeName, CancellationToken.None);
             await Compatibility.VerifyAsync(_rpc, "native");
             await _rpc.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
-            _runtimeInput = CurrentRenderInput();
+            if (!Settings.Session.AppliedSuccessfully(apply)) return;
             ControlStatusText = "Connected";
             RaiseControlCommandStates();
             await RefreshControlStateAsync();
@@ -527,6 +527,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (cancelBatch) _automation.Cancel(restore: false);
         StopFpsPolling();
         _rpc.Close();
+        Settings.Session.Disconnected();
         _previewFrames.Stop();
         _prototype.StopPreview();
         IsPreviewRunning = false;
@@ -577,9 +578,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         } catch (Exception ex) { AppendLog(ex.Message); StatusText = "Batch failed"; }
     }
 
-    private RenderInput CurrentRenderInput() => _inputOverride ?? new RenderInput(ActiveColorPath, ActiveDepthPath, ActiveDepthFormat,
+    private RenderInput CurrentRenderInput()
+    {
+        if (_inputOverride != null) return _inputOverride;
+        Settings.Editor.ToRenderInput();
+        return new RenderInput(ActiveColorPath, ActiveDepthPath, ActiveDepthFormat,
         ActiveDepthProfile, Settings.DepthDownsample, ActiveOutputPath, Settings.EffectDir, Settings.PresetPath,
-        ParseNonNegativeInt(Settings.RenderWidth, 0), ParseNonNegativeInt(Settings.RenderHeight, 0), WatchInput: !IsGalleryMode);
+        EditorDocument.ParseDimension(Settings.RenderWidth, "Width"), EditorDocument.ParseDimension(Settings.RenderHeight, "Height"), WatchInput: !IsGalleryMode);
+    }
     private RenderInput InputForGallery(GalleryItemViewModel item) => CurrentRenderInput() with {
         ColorPath = item.ColorPath, DepthPath = item.DepthPath, DepthFormat = item.DepthFormat,
         DepthProfile = EffectiveDepthProfile(item.DepthFormat), OutputPath = item.OutputPath, WatchInput = false };
@@ -600,9 +606,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (result.TryGetProperty("restartRequired", out var r) && r.GetBoolean()) await StartPreviewCoreAsync(true);
             else ApplyInputSwitchResult(result);
         }
-        _runtimeInput = input;
         await _rpc.CallAsync("set_effects_state", new { enabled = effectsEnabled }, token);
         await _rpc.CallAsync("set_input_watch_enabled", new { enabled = input.WatchInput }, token);
+        Settings.Session.AppliedSuccessfully(Settings.Session.BeginApply(input));
         PreviewInfoText = Path.GetFileName(input.ColorPath);
         var galleryItem = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, input.ColorPath, StringComparison.OrdinalIgnoreCase));
         if (galleryItem != null) SelectedGalleryItem = galleryItem;
@@ -899,9 +905,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public bool HasPendingConfiguration
+    {
+        get { try { return Settings.Session.ValidationError != null || _runtimeInput == null || CurrentRenderInput() != _runtimeInput; } catch (ArgumentException) { return true; } }
+    }
+    public string ConfigurationStatusText => Settings.Session.ValidationError ?? (HasPendingConfiguration ? "Changes pending - apply before export" : "Configuration applied");
+    private void OnEditingSessionChanged()
+    {
+        OnPropertyChanged(nameof(HasPendingConfiguration));
+        OnPropertyChanged(nameof(ConfigurationStatusText));
+    }
+
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (CanEditSession && e.PropertyName is "ColorPath" or "DepthPath" or "DepthFormat" or "EffectDir" or "PresetPath" or "RenderWidth" or "RenderHeight") _inputOverride = null;
+        OnEditingSessionChanged();
         ScheduleSettingsSave();
         if (e.PropertyName == nameof(SettingsViewModel.PreviewTransport)) _ = UpdatePreviewTransportAsync();
 
@@ -992,34 +1010,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _settingsStore.Save(CreatePersistedSettings());
     }
 
-    private PersistedUiSettings CreatePersistedSettings()
+    private WorkspaceConfiguration CreatePersistedSettings()
     {
         StoreCurrentProfilePaths(_currentDepthProfile);
 
-        return new PersistedUiSettings
-        {
-            SessionPresetPath = Path.Combine(_workDir, "OfflinePreset.ini"),
-            ColorPath = Settings.ColorPath,
-            DepthPath = Settings.DepthPath,
-            DepthFormat = Settings.DepthFormat,
-            DepthProfile = Settings.DepthProfile,
-            DepthDownsample = Settings.DepthDownsample,
-            EffectDir = Settings.EffectDir,
-            PresetPath = Settings.PresetPath,
-            OutputPath = Settings.OutputPath,
-            RenderWidth = Settings.RenderWidth,
-            RenderHeight = Settings.RenderHeight,
-            PreviewTransport = Settings.PreviewTransport,
-            GalleryInputFolder = Settings.GalleryInputFolder,
-            GalleryOutputFolder = Settings.GalleryOutputFolder,
-            GalleryBatchFrameDelay = Settings.GalleryBatchFrameDelay,
-            ShowFps = Settings.ShowFps,
-            SliderDragSensitivity = Settings.SliderDragSensitivity,
-            SliderSymLog = Settings.SliderSymLog,
-            InputMode = InputMode,
-            KksPaths = _kksPaths,
-            KkPaths = _kkPaths
-        };
+        return new WorkspaceConfiguration { SessionPresetPath = Path.Combine(_workDir, "OfflinePreset.ini"),
+            Editor = Settings.Editor, Preferences = Settings.Preferences };
     }
 
     private string BuildExportArguments() => BuildCommonArguments().ToString();
@@ -1124,7 +1120,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void StoreCurrentProfilePaths(string profile)
     {
-        var paths = new PersistedProfilePaths
+        var paths = new ProfilePaths
         {
             ColorPath = Settings.ColorPath,
             DepthPath = Settings.DepthPath,
@@ -1135,14 +1131,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         };
 
         if (string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase))
-            _kkPaths = paths;
+            Settings.KkPaths = paths;
         else
-            _kksPaths = paths;
+            Settings.KksPaths = paths;
     }
 
-    private PersistedProfilePaths GetProfilePaths(string profile)
+    private ProfilePaths GetProfilePaths(string profile)
     {
-        return string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase) ? _kkPaths : _kksPaths;
+        return string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase) ? Settings.KkPaths : Settings.KksPaths;
     }
 
     private void ApplyProfilePaths(string profile)
@@ -1173,12 +1169,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         StoreCurrentProfilePaths(normalized);
     }
 
-    private PersistedProfilePaths CreateDefaultProfilePaths(string profile)
+    private ProfilePaths CreateDefaultProfilePaths(string profile)
     {
         if (string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase))
         {
             const string kkExportDir = @"D:\Program Files\Koikatu\UserData\cap\OfflineReShade";
-            return new PersistedProfilePaths
+            return new ProfilePaths
             {
                 ColorPath = Path.Combine(kkExportDir, "coloroutput.png"),
                 DepthPath = Path.Combine(kkExportDir, "depthoutput.rfloat"),
@@ -1189,7 +1185,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             };
         }
 
-        return new PersistedProfilePaths
+        return new ProfilePaths
         {
             ColorPath = _paths.DefaultColorPath,
             DepthPath = _paths.DefaultDepthPath,
@@ -1205,7 +1201,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         return string.IsNullOrWhiteSpace(savedPath) ? defaultPath ?? string.Empty : savedPath;
     }
 
-    private static bool HasAnyProfilePath(PersistedProfilePaths paths)
+    private static bool HasAnyProfilePath(ProfilePaths paths)
     {
         return !string.IsNullOrWhiteSpace(paths.ColorPath) ||
             !string.IsNullOrWhiteSpace(paths.DepthPath) ||
@@ -1476,6 +1472,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         Settings.PropertyChanged -= OnSettingsPropertyChanged;
+        Settings.Session.Changed -= OnEditingSessionChanged;
         _prototype.OutputReceived -= OnPrototypeOutputReceived;
         StopFpsPolling();
         _rpc.Dispose();

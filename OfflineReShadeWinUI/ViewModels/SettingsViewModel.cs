@@ -1,59 +1,49 @@
+using OfflineReShade.Core;
 using OfflineReShade.WinUI.Mvvm;
 using OfflineReShade.WinUI.Services;
+using System.Runtime.CompilerServices;
 
 namespace OfflineReShade.WinUI.ViewModels;
 
+// Binding adapter; values are owned by the document or preferences, never duplicate fields.
 public sealed class SettingsViewModel : ObservableObject
 {
-    private string _colorPath;
-    private string _depthPath;
-    private string _depthFormat = "raw";
-    private string _depthProfile = "kks";
-    private string _depthDownsample = "max2x2";
-    private string _effectDir;
-    private string _presetPath = string.Empty;
-    private string _outputPath;
-    private string _renderWidth = string.Empty;
-    private string _renderHeight = string.Empty;
-    private string _previewTransport = "GPU";
-    private string _galleryInputFolder = string.Empty;
-    private string _galleryOutputFolder = string.Empty;
-    private string _galleryBatchFrameDelay = "5";
-    private bool _showFps = true;
-    private int _sliderDragSensitivity = 1;
-    private bool _sliderSymLog;
-
+    public EditingSession Session { get; }
+    public EditorDocument Editor => Session.Draft;
+    public ApplicationPreferences Preferences { get; private set; } = new();
     public SettingsViewModel(AppPaths paths)
     {
-        _colorPath = paths.DefaultColorPath;
-        _depthPath = paths.DefaultDepthPath;
-        _effectDir = paths.DefaultEffectDir;
-        _outputPath = paths.DefaultOutputPath;
+        Session = new(new EditorDocument { ColorPath = paths.DefaultColorPath, DepthPath = paths.DefaultDepthPath,
+            EffectDir = paths.DefaultEffectDir, OutputPath = paths.DefaultOutputPath });
     }
-
-    public string ColorPath { get => _colorPath; set => SetProperty(ref _colorPath, value); }
-    public string DepthPath { get => _depthPath; set => SetProperty(ref _depthPath, value); }
-    public string DepthFormat { get => _depthFormat; set => SetProperty(ref _depthFormat, value); }
-    public string DepthProfile { get => _depthProfile; set => SetProperty(ref _depthProfile, value); }
-    public string DepthDownsample { get => _depthDownsample; set => SetProperty(ref _depthDownsample, value); }
-    public string EffectDir { get => _effectDir; set => SetProperty(ref _effectDir, value); }
-    public string PresetPath { get => _presetPath; set => SetProperty(ref _presetPath, value); }
-    public string OutputPath { get => _outputPath; set => SetProperty(ref _outputPath, value); }
-    public string RenderWidth { get => _renderWidth; set => SetProperty(ref _renderWidth, value); }
-    public string RenderHeight { get => _renderHeight; set => SetProperty(ref _renderHeight, value); }
-    public string PreviewTransport { get => _previewTransport; set => SetProperty(ref _previewTransport, value); }
-    public string GalleryInputFolder { get => _galleryInputFolder; set => SetProperty(ref _galleryInputFolder, value); }
-    public string GalleryOutputFolder { get => _galleryOutputFolder; set => SetProperty(ref _galleryOutputFolder, value); }
-    public string GalleryBatchFrameDelay { get => _galleryBatchFrameDelay; set => SetProperty(ref _galleryBatchFrameDelay, value); }
-    public bool ShowFps { get => _showFps; set => SetProperty(ref _showFps, value); }
-    public int SliderDragSensitivity { get => _sliderDragSensitivity; set => SetProperty(ref _sliderDragSensitivity, NormalizeSliderDragSensitivity(value)); }
-    public bool SliderSymLog { get => _sliderSymLog; set => SetProperty(ref _sliderSymLog, value); }
-
-    private static int NormalizeSliderDragSensitivity(int value) => value switch
+    private void Edit(EditorDocument next, [CallerMemberName] string? name = null)
     {
-        2 => 2,
-        4 => 4,
-        8 => 8,
-        _ => 1
-    };
+        if (next == Editor) return;
+        Session.Edit(next); OnPropertyChanged(name);
+    }
+    private void Prefer(ApplicationPreferences next, [CallerMemberName] string? name = null)
+    {
+        if (next == Preferences) return;
+        Preferences = next; OnPropertyChanged(name);
+    }
+    public string ColorPath { get => Editor.ColorPath; set => Edit(Editor with { ColorPath = value }); }
+    public string DepthPath { get => Editor.DepthPath; set => Edit(Editor with { DepthPath = value }); }
+    public string DepthFormat { get => Editor.DepthFormat; set => Edit(Editor with { DepthFormat = value }); }
+    public string DepthProfile { get => Editor.DepthProfile; set => Edit(Editor with { DepthProfile = value }); }
+    public string DepthDownsample { get => Editor.DepthDownsample; set => Edit(Editor with { DepthDownsample = value }); }
+    public string EffectDir { get => Editor.EffectDir; set => Edit(Editor with { EffectDir = value }); }
+    public string PresetPath { get => Editor.PresetPath; set => Edit(Editor with { PresetPath = value }); }
+    public string OutputPath { get => Editor.OutputPath; set => Edit(Editor with { OutputPath = value }); }
+    public string RenderWidth { get => Editor.RenderWidth; set => Edit(Editor with { RenderWidth = value }); }
+    public string RenderHeight { get => Editor.RenderHeight; set => Edit(Editor with { RenderHeight = value }); }
+    public string InputMode { get => Editor.InputMode; set => Edit(Editor with { InputMode = value }); }
+    public string PreviewTransport { get => Preferences.PreviewTransport; set => Prefer(Preferences with { PreviewTransport = value }); }
+    public string GalleryInputFolder { get => Preferences.GalleryInputFolder; set => Prefer(Preferences with { GalleryInputFolder = value }); }
+    public string GalleryOutputFolder { get => Preferences.GalleryOutputFolder; set => Prefer(Preferences with { GalleryOutputFolder = value }); }
+    public string GalleryBatchFrameDelay { get => Preferences.GalleryBatchFrameDelay; set => Prefer(Preferences with { GalleryBatchFrameDelay = value }); }
+    public bool ShowFps { get => Preferences.ShowFps; set => Prefer(Preferences with { ShowFps = value }); }
+    public int SliderDragSensitivity { get => Preferences.SliderDragSensitivity; set => Prefer(Preferences with { SliderDragSensitivity = value is 2 or 4 or 8 ? value : 1 }); }
+    public bool SliderSymLog { get => Preferences.SliderSymLog; set => Prefer(Preferences with { SliderSymLog = value }); }
+    public ProfilePaths KksPaths { get => Preferences.KksPaths; set => Prefer(Preferences with { KksPaths = value }); }
+    public ProfilePaths KkPaths { get => Preferences.KkPaths; set => Prefer(Preferences with { KkPaths = value }); }
 }
