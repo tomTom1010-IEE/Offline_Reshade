@@ -1,0 +1,148 @@
+<UserControl x:Class="OfflineReShade.WinUI.Views.EffectsPanel"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
+ xmlns:views="using:OfflineReShade.WinUI.Views">
+        <Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0" Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <Button Content="Effects panel" AutomationProperties.AutomationId="EffectsPanelOptions" ToolTipService.ToolTip="Resize or hide the effects panel">
+                <Button.Flyout><Flyout><StackPanel Spacing="12" Width="240">
+                  <TextBlock Text="Panel width" />
+                  <Slider Minimum="280" Maximum="640" StepFrequency="20" Value="{x:Bind ViewModel.Settings.EffectsPaneWidth, Mode=TwoWay}" AutomationProperties.Name="Effects panel width" AutomationProperties.AutomationId="EffectsPanelWidth" />
+                  <Button Content="Hide effects panel" Click="OnHidePanel" AutomationProperties.AutomationId="HideEffectsPanel"  />
+                </StackPanel></Flyout></Button.Flyout>
+              </Button>
+              <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" MaxWidth="120" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+            <TabView x:Name="ControlsTabView"
+                     IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
+                     Grid.Row="1"
+                     IsAddTabButtonVisible="False"
+                     CanDragTabs="False"
+                     TabWidthMode="Equal"
+                     SelectionChanged="OnControlsTabSelectionChanged">
+              <TabViewItem Header="FX"
+                           IsClosable="False">
+                <Grid Padding="12" RowSpacing="8">
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" /><RowDefinition Height="Auto" />
+                  </Grid.RowDefinitions>
+                  <TextBox x:Name="EffectSearchBox" Header="Search effects and parameters" TextChanged="OnEffectSearchChanged"
+                           AutomationProperties.AutomationId="EffectSearch"  />
+                  <StackPanel x:Name="ControlsPanel" Grid.Row="1" Spacing="8" />
+                  <ListView x:Name="EffectsList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch"
+                            ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="ReShade effects" AutomationProperties.AutomationId="EffectsPanelControl5">
+                    <ListView.ItemContainerStyle>
+                      <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="0" />
+                      </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                      <DataTemplate x:DataType="vm:EffectControlViewModel">
+                        <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,0,0,8"
+                                  Loaded="OnEffectExpanderLoaded" Unloaded="OnEffectExpanderUnloaded"
+                                  Expanding="OnEffectExpanding" Collapsed="OnEffectCollapsed"  AutomationProperties.AutomationId="EffectsPanelControl8" />
+                      </DataTemplate>
+                    </ListView.ItemTemplate>
+                  </ListView>
+                  <Expander Grid.Row="3" Header="Log" AutomationProperties.AutomationId="EffectsPanelControl9">
+                    <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="Wrap" FontFamily="Consolas" Height="180"  AutomationProperties.AutomationId="EffectsPanelControl10" />
+                  </Expander>
+                </Grid>
+              </TabViewItem>
+              <TabViewItem Header="Add-ons"
+                           AutomationProperties.AutomationId="TabAddons"
+                           IsClosable="False">
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                  <StackPanel Padding="12"
+                              Spacing="10">
+                    <Grid ColumnSpacing="10">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Text="Native add-on overlays"
+                                 FontWeight="SemiBold"
+                                 VerticalAlignment="Center" />
+                      <ToggleSwitch x:Name="NativeAddonOverlaySwitch"
+                                    AutomationProperties.AutomationId="TglNativeAddonOverlay"
+                                    AutomationProperties.Name="Show native add-on overlay"
+                                    Grid.Column="1"
+                                    Header="Show"
+                                    Toggled="OnNativeAddonOverlayToggled"  />
+                    </Grid>
+                    <TabView x:Name="AddonOverlayTabView"
+                             AutomationProperties.AutomationId="TabsAddonOverlays"
+                             Height="48"
+                             IsAddTabButtonVisible="False"
+                             CanDragTabs="False"
+                             TabWidthMode="SizeToContent"
+                             SelectionChanged="OnAddonOverlayTabSelectionChanged" />
+                    <Border x:Name="AddonNativeSurfaceBorder"
+                            Height="360"
+                            Background="Black"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1">
+                      <Grid x:Name="AddonNativeSurface">
+                        <SwapChainPanel x:Name="AddonOverlaySwapChainPanel"
+                                        AutomationProperties.AutomationId="SurfaceNativeAddonOverlay"
+                                        AutomationProperties.Name="Native add-on overlay surface"
+                                        Visibility="Collapsed"
+                                        PointerMoved="OnAddonOverlayPointerMoved"
+                                        PointerExited="OnAddonOverlayPointerExited"
+                                        PointerPressed="OnAddonOverlayPointerPressed"
+                                        PointerReleased="OnAddonOverlayPointerReleased"
+                                        PointerCanceled="OnAddonOverlayPointerCaptureLost"
+                                        PointerCaptureLost="OnAddonOverlayPointerCaptureLost"
+                                        PointerWheelChanged="OnAddonOverlayPointerWheelChanged"
+                                        GotFocus="OnAddonOverlayGotFocus"
+                                        LostFocus="OnAddonOverlayLostFocus"
+                                        KeyDown="OnAddonOverlayKeyDown"
+                                        KeyUp="OnAddonOverlayKeyUp"
+                                        CharacterReceived="OnAddonOverlayCharacterReceived"
+                                        SizeChanged="OnAddonOverlaySurfaceSizeChanged" />
+                        <TextBlock x:Name="AddonOverlayPlaceholder"
+                                   Text="Select an add-on overlay tab"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                    <StackPanel x:Name="AddonsPanel"
+                                Spacing="10" />
+                    <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Expander Header="WinUI Add-on Controls"
+                              IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl12">
+                      <StackPanel x:Name="AddonControlsPanel"
+                                  Spacing="10" />
+                    </Expander>
+                    <Expander Header="ImGui Capture Debug"
+                              IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl13">
+                      <TextBox Text="{x:Bind ViewModel.AddonDebugText, Mode=OneWay}"
+                               IsReadOnly="True"
+                               AcceptsReturn="True"
+                               TextWrapping="NoWrap"
+                               FontFamily="Consolas"
+                               MinHeight="260"  AutomationProperties.AutomationId="EffectsPanelControl14" />
+                    </Expander>
+                  </StackPanel>
+                </ScrollViewer>
+              </TabViewItem>
+            </TabView>
+          </Grid>
+        </Border>
+
+
+</UserControl>

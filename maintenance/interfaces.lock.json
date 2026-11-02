@@ -1,7 +1,7 @@
 {
   "versions": {
-    "nativeRpc": 6,
-    "automationBroker": 5,
+    "nativeRpc": 7,
+    "automationBroker": 6,
     "offlineApi": 1,
     "previewBridge": 3
   },
@@ -49,6 +49,7 @@
     "set_native_addon_overlay",
     "set_preprocessor_definition",
     "set_preset",
+    "set_preview_comparison",
     "set_preview_transport",
     "set_technique_state",
     "set_uniform",

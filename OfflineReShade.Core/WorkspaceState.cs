@@ -58,6 +58,9 @@ public sealed record ApplicationPreferences
     public bool ShowFps { get; init; } = true;
     public int SliderDragSensitivity { get; init; } = 1;
     public bool SliderSymLog { get; init; }
+    public bool EffectsPaneOpen { get; init; } = true;
+    public double EffectsPaneWidth { get; init; } = 400;
+    public string Theme { get; init; } = "System";
     public ProfilePaths KksPaths { get; init; } = new();
     public ProfilePaths KkPaths { get; init; } = new();
 }

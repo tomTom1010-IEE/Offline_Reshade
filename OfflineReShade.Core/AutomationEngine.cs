@@ -66,6 +66,8 @@ public sealed partial class AutomationEngine
     }
     private async Task<JsonElement> ExecuteCoreAsync(string method, JsonElement args, bool submitPending, CancellationToken token)
     {
+        // Display selection neither submits pending edits nor enters preset history.
+        if (method == "set_preview_comparison") return await _call(method, args, token);
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
         if (method == "get_operation_status") {
             var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();

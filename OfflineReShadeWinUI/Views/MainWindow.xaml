@@ -30,26 +30,28 @@
       </Grid.ColumnDefinitions>
 
       <CommandBar Grid.ColumnSpan="3" DefaultLabelPosition="Right" IsOpen="False" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-        <AppBarButton Label="Open image" Icon="OpenFile" Command="{x:Bind ViewModel.OpenImageCommand}" AutomationProperties.AutomationId="OpenImage" />
-        <AppBarButton Label="Listen for game output" Icon="Play" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="ConfigureInputListener" />
-        <AppBarButton Label="Export image" Icon="Save" Command="{x:Bind ViewModel.OpenExportCommand}" AutomationProperties.AutomationId="ExportImage" />
-        <AppBarButton Label="Undo" Icon="Undo" Command="{x:Bind ViewModel.UndoCommand}" ToolTipService.ToolTip="Undo FX edit (Ctrl+Z)" AutomationProperties.AutomationId="UndoEdit" />
-        <AppBarButton Label="Redo" Icon="Redo" Command="{x:Bind ViewModel.RedoCommand}" ToolTipService.ToolTip="Redo FX edit (Ctrl+Y)" AutomationProperties.AutomationId="RedoEdit" />
+        <AppBarButton Label="Open image" Icon="OpenFile" Command="{x:Bind ViewModel.OpenImageCommand}" AutomationProperties.AutomationId="OpenImage"  />
+        <AppBarButton Label="Listen for game output" Icon="Play" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="ConfigureInputListener"  />
+        <AppBarButton Label="Export image" Icon="Save" Command="{x:Bind ViewModel.OpenExportCommand}" AutomationProperties.AutomationId="ExportImage"  />
+        <AppBarButton Label="Undo" Icon="Undo" Command="{x:Bind ViewModel.UndoCommand}" ToolTipService.ToolTip="Undo FX edit (Ctrl+Z)" AutomationProperties.AutomationId="UndoEdit"  />
+        <AppBarButton Label="Redo" Icon="Redo" Command="{x:Bind ViewModel.RedoCommand}" ToolTipService.ToolTip="Redo FX edit (Ctrl+Y)" AutomationProperties.AutomationId="RedoEdit"  />
         <CommandBar.SecondaryCommands>
-          <AppBarButton Label="Input and preset" Command="{x:Bind ViewModel.OpenInputPanelCommand}" />
-          <AppBarButton Label="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}" />
-          <AppBarButton Label="Reload effects" Command="{x:Bind ViewModel.ReloadCommand}" />
-          <AppBarButton Label="Save preset" Command="{x:Bind ViewModel.SavePresetCommand}" />
-          <AppBarButton Label="Save preset as…" Command="{x:Bind ViewModel.SavePresetAsCommand}" AutomationProperties.AutomationId="SavePresetAs" />
-          <AppBarButton Label="Restore controls from renderer" Command="{x:Bind ViewModel.RestoreControlsCommand}" ToolTipService.ToolTip="Discard failed pending control edits and display actual renderer values" />
-          <AppBarButton Label="Settings" Icon="Setting" Command="{x:Bind ViewModel.ToggleSettingsCommand}" />
+          <AppBarButton Label="Keyboard shortcuts" AutomationProperties.AutomationId="KeyboardShortcuts">
+            <AppBarButton.Flyout><Flyout>
+              <TextBlock Text="Ctrl+O: Open image&#10;Ctrl+E: Export image&#10;Ctrl+S: Save preset&#10;Ctrl+Z / Ctrl+Y: Undo / redo&#10;Ctrl+F: Search effects&#10;Ctrl+0 / Ctrl+1: Fit / 100%&#10;Ctrl+B: Original / processed preview&#10;Canvas arrows: Pan&#10;L: Toggle logarithmic sliders&#10;Drag + wheel: Slider sensitivity&#10;Text fields retain their normal editing shortcuts." TextWrapping="Wrap" MaxWidth="320" />
+            </Flyout></AppBarButton.Flyout>
+          </AppBarButton>
+          <AppBarButton Label="Show or hide effects" Click="OnToggleEffects" AutomationProperties.AutomationId="ToggleEffects"  />
+          <AppBarButton Label="Show or hide gallery" Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}" AutomationProperties.AutomationId="ToggleGallery"  />
+          <AppBarButton Label="Input and preset" Command="{x:Bind ViewModel.OpenInputPanelCommand}"  AutomationProperties.AutomationId="MainWindowControl8" />
+          <AppBarButton Label="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}"  AutomationProperties.AutomationId="MainWindowControl9" />
+          <AppBarButton Label="Reload effects" Command="{x:Bind ViewModel.ReloadCommand}"  AutomationProperties.AutomationId="MainWindowControl10" />
+          <AppBarButton Label="Save preset" Command="{x:Bind ViewModel.SavePresetCommand}"  AutomationProperties.AutomationId="MainWindowControl11" />
+          <AppBarButton Label="Save preset as…" Command="{x:Bind ViewModel.SavePresetAsCommand}" AutomationProperties.AutomationId="SavePresetAs"  />
+          <AppBarButton Label="Restore controls from renderer" Command="{x:Bind ViewModel.RestoreControlsCommand}" ToolTipService.ToolTip="Discard failed pending control edits and display actual renderer values"  AutomationProperties.AutomationId="MainWindowControl13" />
+          <AppBarButton Label="Settings" Icon="Setting" Command="{x:Bind ViewModel.ToggleSettingsCommand}"  AutomationProperties.AutomationId="MainWindowControl14" />
         </CommandBar.SecondaryCommands>
-        <CommandBar.Content>
-          <StackPanel Spacing="2" Margin="0,0,16,0" VerticalAlignment="Center">
-            <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" FontWeight="SemiBold" />
-            <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
-          </StackPanel>
-        </CommandBar.Content>
+
       </CommandBar>
 
       <ProgressBar Grid.Row="1"
@@ -61,13 +63,13 @@
                    AutomationProperties.Name="ReShade effect compilation progress" />
       <Button Grid.Row="1" Grid.Column="2" Content="Cancel operation" HorizontalAlignment="Right" Margin="8,4,0,0"
               Command="{x:Bind ViewModel.CancelOperationCommand}" AutomationProperties.AutomationId="CancelOperation"
-              Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsOperationRunning), Mode=OneWay}" />
+              Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsOperationRunning), Mode=OneWay}"  />
       <Grid Grid.Row="2" Grid.ColumnSpan="3" ColumnSpacing="12" Margin="0,8,0,0" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.HasBatchTask), Mode=OneWay}">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
         <ProgressBar Value="{x:Bind ViewModel.BatchProgress, Mode=OneWay}" Maximum="{x:Bind ViewModel.BatchMaximum, Mode=OneWay}"
                      AutomationProperties.Name="Batch export progress" VerticalAlignment="Center" />
         <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" VerticalAlignment="Center" />
-        <Button Grid.Column="2" Content="Cancel batch" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="CancelBatch" />
+        <Button Grid.Column="2" Content="Cancel batch" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="CancelBatch"  />
       </Grid>
       <InfoBar Grid.Row="3" Grid.ColumnSpan="3" Margin="0,8,0,0"
                IsOpen="{x:Bind ViewModel.FeedbackOpen, Mode=TwoWay}"
@@ -75,13 +77,13 @@
                Title="{x:Bind ViewModel.FeedbackTitle, Mode=OneWay}" Message="{x:Bind ViewModel.FeedbackMessage, Mode=OneWay}"
                AutomationProperties.AutomationId="OperationFeedback" AutomationProperties.LiveSetting="Polite">
         <StackPanel Orientation="Horizontal" Spacing="8">
-          <Button Content="Retry" AutomationProperties.AutomationId="RetryOperation" Command="{x:Bind ViewModel.RetryOperationCommand}" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.CanRetryOperation), Mode=OneWay}" />
-          <Button Content="Locate files" AutomationProperties.AutomationId="LocateOperationFiles" Command="{x:Bind ViewModel.LocateFeedbackCommand}" />
+          <Button Content="Retry" AutomationProperties.AutomationId="RetryOperation" Command="{x:Bind ViewModel.RetryOperationCommand}" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.CanRetryOperation), Mode=OneWay}"  />
+          <Button Content="Locate files" AutomationProperties.AutomationId="LocateOperationFiles" Command="{x:Bind ViewModel.LocateFeedbackCommand}"  />
           <Button Content="Details" AutomationProperties.AutomationId="OperationDetails">
             <Button.Flyout>
               <Flyout>
                 <ScrollViewer MaxHeight="360" MaxWidth="640">
-                  <TextBox Header="Operation details" AutomationProperties.AutomationId="OperationDetailsText" Text="{x:Bind ViewModel.FeedbackDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinWidth="300" />
+                  <TextBox Header="Operation details" AutomationProperties.AutomationId="OperationDetailsText" Text="{x:Bind ViewModel.FeedbackDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinWidth="300"  />
                 </ScrollViewer>
               </Flyout>
             </Button.Flyout>
@@ -90,100 +92,7 @@
       </InfoBar>
     </Grid>
 
-    <Border Grid.Row="1" Margin="14,0,14,8" Padding="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-      <StackPanel Spacing="8">
-        <TextBlock Text="{x:Bind ViewModel.InputSourceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.AutomationId="InputSourceStatus" />
-        <TextBlock Text="{x:Bind ViewModel.PresetEditStatus, Mode=OneWay}" AutomationProperties.AutomationId="PresetEditStatus" AutomationProperties.LiveSetting="Polite" />
-        <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-        <Grid ColumnSpacing="16">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-          <StackPanel><TextBlock Text="Current image" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.AutomationId="CurrentInputPath" /></StackPanel>
-          <StackPanel Grid.Column="1"><TextBlock Text="Depth association" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
-          <StackPanel Grid.Column="2"><TextBlock Text="Current preset" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
-        </Grid>
-        <Expander Header="Input, depth and preset" IsExpanded="{x:Bind ViewModel.IsInputPanelOpen, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChooseSource, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-          <ScrollViewer MaxHeight="340" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel Spacing="8">
-              <TextBlock Text="{x:Bind ViewModel.InputSelectionMessage, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button Content="Apply files to preview" Command="{x:Bind ViewModel.StartPreviewCommand}" AutomationProperties.AutomationId="ApplyInput" />
-                <Button Content="Choose game export folder" Command="{x:Bind ViewModel.PickWatchFolderCommand}" AutomationProperties.AutomationId="ChooseWatchFolder" />
-                <Button Content="Start listening" Command="{x:Bind ViewModel.StartListeningCommand}" AutomationProperties.AutomationId="StartListening" />
-                <Button Content="Stop listening" Command="{x:Bind ViewModel.StopListeningCommand}" AutomationProperties.AutomationId="StopListening" />
-              </StackPanel>
-              <TextBlock Text="Edits below are pending until applied. Listening can wait for files that do not exist yet." TextWrapping="Wrap" />
-            <TextBlock Text="Depth profile" />
-            <ComboBox x:Name="DepthProfileBox"
-                      MinWidth="180"
-                      SelectionChanged="OnDepthProfileSelectionChanged">
-              <ComboBoxItem Content="Koikatsu Sunshine (KKS)" Tag="kks" />
-              <ComboBoxItem Content="Koikatsu (KK)" Tag="kk" />
-            </ComboBox>
-
-            <TextBlock Text="Color PNG" />
-            <Grid ColumnSpacing="8">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.ColorPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="Choose image" Command="{x:Bind ViewModel.PickColorCommand}" AutomationProperties.AutomationId="ChooseInputColor" />
-            </Grid>
-
-            <TextBlock Text="Depth Encoding" />
-            <ComboBox x:Name="DepthFormatBox"
-                      MinWidth="240"
-                      SelectionChanged="OnDepthFormatSelectionChanged">
-              <ComboBoxItem Content="Raw Float32 device depth (.rfloat)" Tag="raw" />
-              <ComboBoxItem Content="RGBA8 packed device depth PNG" Tag="rgba" />
-            </ComboBox>
-
-            <TextBlock Text="Depth File" />
-            <Grid ColumnSpacing="8">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.DepthPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="Associate depth" Command="{x:Bind ViewModel.PickDepthCommand}" AutomationProperties.AutomationId="AssociateDepth" />
-            </Grid>
-
-            <TextBlock Text="Preset INI" />
-            <Grid ColumnSpacing="8">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.PresetPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="Load preset" Command="{x:Bind ViewModel.PickPresetCommand}" AutomationProperties.AutomationId="LoadPreset" />
-            </Grid>
-
-            <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
-            <TextBlock Text="Leave blank to use the color PNG size." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-            <TextBlock Text="{x:Bind ViewModel.ConfigurationStatusText, Mode=OneWay}"
-                       AutomationProperties.AutomationId="ConfigurationStatus"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-            <Grid ColumnSpacing="10">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-              </Grid.ColumnDefinitions>
-              <StackPanel Spacing="4">
-                <TextBlock Text="Width" />
-                <TextBox Text="{x:Bind ViewModel.Settings.RenderWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              </StackPanel>
-              <StackPanel Grid.Column="1" Spacing="4">
-                <TextBlock Text="Height" />
-                <TextBox Text="{x:Bind ViewModel.Settings.RenderHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              </StackPanel>
-            </Grid>
-
-              <Button Content="Use color only (clear depth)" Command="{x:Bind ViewModel.ClearDepthCommand}" AutomationProperties.AutomationId="ClearInputDepth" />
-            </StackPanel>
-          </ScrollViewer>
-        </Expander>
-      </StackPanel>
-    </Border>
+    <ContentControl x:Name="InputHost" Grid.Row="1" HorizontalContentAlignment="Stretch" />
 
     <Grid Grid.Row="2">
       <ScrollViewer x:Name="SettingsContent" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
@@ -199,15 +108,7 @@
           <StackPanel Spacing="12">
             <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
             <TextBox Header="MCP session ID" Text="{x:Bind ViewModel.AutomationSessionId, Mode=OneWay}" IsReadOnly="True"
-                     AutomationProperties.AutomationId="AutomationSessionId" />
-
-            <TextBlock Text="Depth Downsample Filter" />
-            <ComboBox x:Name="DepthDownsampleBox"
-                      MinWidth="180"
-                      SelectionChanged="OnDepthDownsampleSelectionChanged">
-              <ComboBoxItem Content="Max 2x2" Tag="max2x2" />
-              <ComboBoxItem Content="Smooth Box 2x2" Tag="box" />
-            </ComboBox>
+                     AutomationProperties.AutomationId="AutomationSessionId"  />
 
             <TextBlock Text="Effect Folder" />
             <Grid ColumnSpacing="8">
@@ -215,8 +116,8 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
               </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.EffectDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickEffectDirCommand}" />
+              <TextBox Text="{x:Bind ViewModel.Settings.EffectDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl23" AutomationProperties.Name="Effects folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickEffectDirCommand}"  AutomationProperties.AutomationId="MainWindowControl24" AutomationProperties.Name="Choose effects folder" />
             </Grid>
 
             <TextBlock Text="Gallery" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
@@ -226,8 +127,8 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
               </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.GalleryInputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryInputFolderCommand}" />
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryInputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl25" AutomationProperties.Name="Gallery input folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryInputFolderCommand}"  AutomationProperties.AutomationId="MainWindowControl26" AutomationProperties.Name="Choose gallery input folder" />
             </Grid>
 
             <TextBlock Text="Gallery Output Folder" />
@@ -236,199 +137,32 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
               </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.GalleryOutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryOutputFolderCommand}" />
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryOutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl27" AutomationProperties.Name="Gallery output folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryOutputFolderCommand}"  AutomationProperties.AutomationId="MainWindowControl28" AutomationProperties.Name="Choose gallery output folder" />
             </Grid>
 
-            <TextBlock Text="Status" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
+            <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}" />
+            <ComboBox x:Name="ThemeBox" Header="Theme" SelectionChanged="OnThemeSelectionChanged" AutomationProperties.AutomationId="ThemePreference">
+              <ComboBoxItem Content="Use Windows setting" Tag="System" />
+              <ComboBoxItem Content="Light" Tag="Light" /><ComboBoxItem Content="Dark" Tag="Dark" />
+            </ComboBox>
             <TextBlock Text="Preview Transport" />
             <ComboBox x:Name="PreviewTransportBox"
                       MinWidth="180"
-                      SelectionChanged="OnPreviewTransportSelectionChanged">
+                      SelectionChanged="OnPreviewTransportSelectionChanged" AutomationProperties.AutomationId="MainWindowControl30">
               <ComboBoxItem Content="GPU" Tag="GPU" />
               <ComboBoxItem Content="CPU" Tag="CPU" />
             </ComboBox>
             <ToggleSwitch Header="Show FPS"
-                          IsOn="{x:Bind ViewModel.Settings.ShowFps, Mode=TwoWay}" />
+                          IsOn="{x:Bind ViewModel.Settings.ShowFps, Mode=TwoWay}"  AutomationProperties.AutomationId="MainWindowControl31" />
           </StackPanel>
         </Border>
       </ScrollViewer>
 
-      <Grid x:Name="MainContent" Padding="14" ColumnSpacing="14">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="430" />
-          <ColumnDefinition Width="*" />
-          <ColumnDefinition x:Name="GalleryColumn" Width="0" />
-        </Grid.ColumnDefinitions>
-
-        <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-          <Grid>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-            <Grid Grid.Row="0" Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <TextBlock Text="ReShade Controls" FontWeight="SemiBold" />
-              <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </Grid>
-            <TabView x:Name="ControlsTabView"
-                     IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
-                     Grid.Row="1"
-                     IsAddTabButtonVisible="False"
-                     CanDragTabs="False"
-                     TabWidthMode="Equal"
-                     SelectionChanged="OnControlsTabSelectionChanged">
-              <TabViewItem Header="FX"
-                           IsClosable="False">
-                <Grid Padding="12" RowSpacing="8">
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" /><RowDefinition Height="Auto" />
-                  </Grid.RowDefinitions>
-                  <TextBox x:Name="EffectSearchBox" Header="Search effects and parameters" TextChanged="OnEffectSearchChanged"
-                           AutomationProperties.AutomationId="EffectSearch" />
-                  <StackPanel x:Name="ControlsPanel" Grid.Row="1" Spacing="8" />
-                  <ListView x:Name="EffectsList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch"
-                            ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="ReShade effects">
-                    <ListView.ItemContainerStyle>
-                      <Style TargetType="ListViewItem">
-                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Padding" Value="0" />
-                      </Style>
-                    </ListView.ItemContainerStyle>
-                    <ListView.ItemTemplate>
-                      <DataTemplate x:DataType="vm:EffectControlViewModel">
-                        <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,0,0,8"
-                                  Loaded="OnEffectExpanderLoaded" Unloaded="OnEffectExpanderUnloaded"
-                                  Expanding="OnEffectExpanding" Collapsed="OnEffectCollapsed" />
-                      </DataTemplate>
-                    </ListView.ItemTemplate>
-                  </ListView>
-                  <Expander Grid.Row="3" Header="Log">
-                    <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True"
-                             TextWrapping="Wrap" FontFamily="Consolas" Height="180" />
-                  </Expander>
-                </Grid>
-              </TabViewItem>
-              <TabViewItem Header="Add-ons"
-                           AutomationProperties.AutomationId="TabAddons"
-                           IsClosable="False">
-                <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-                  <StackPanel Padding="12"
-                              Spacing="10">
-                    <Grid ColumnSpacing="10">
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                      </Grid.ColumnDefinitions>
-                      <TextBlock Text="Native add-on overlays"
-                                 FontWeight="SemiBold"
-                                 VerticalAlignment="Center" />
-                      <ToggleSwitch x:Name="NativeAddonOverlaySwitch"
-                                    AutomationProperties.AutomationId="TglNativeAddonOverlay"
-                                    AutomationProperties.Name="Show native add-on overlay"
-                                    Grid.Column="1"
-                                    Header="Show"
-                                    Toggled="OnNativeAddonOverlayToggled" />
-                    </Grid>
-                    <TabView x:Name="AddonOverlayTabView"
-                             AutomationProperties.AutomationId="TabsAddonOverlays"
-                             Height="48"
-                             IsAddTabButtonVisible="False"
-                             CanDragTabs="False"
-                             TabWidthMode="SizeToContent"
-                             SelectionChanged="OnAddonOverlayTabSelectionChanged" />
-                    <Border x:Name="AddonNativeSurfaceBorder"
-                            Height="360"
-                            Background="Black"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1">
-                      <Grid x:Name="AddonNativeSurface">
-                        <SwapChainPanel x:Name="AddonOverlaySwapChainPanel"
-                                        AutomationProperties.AutomationId="SurfaceNativeAddonOverlay"
-                                        AutomationProperties.Name="Native add-on overlay surface"
-                                        Visibility="Collapsed"
-                                        PointerMoved="OnAddonOverlayPointerMoved"
-                                        PointerExited="OnAddonOverlayPointerExited"
-                                        PointerPressed="OnAddonOverlayPointerPressed"
-                                        PointerReleased="OnAddonOverlayPointerReleased"
-                                        PointerCanceled="OnAddonOverlayPointerCaptureLost"
-                                        PointerCaptureLost="OnAddonOverlayPointerCaptureLost"
-                                        PointerWheelChanged="OnAddonOverlayPointerWheelChanged"
-                                        GotFocus="OnAddonOverlayGotFocus"
-                                        LostFocus="OnAddonOverlayLostFocus"
-                                        KeyDown="OnAddonOverlayKeyDown"
-                                        KeyUp="OnAddonOverlayKeyUp"
-                                        CharacterReceived="OnAddonOverlayCharacterReceived"
-                                        SizeChanged="OnAddonOverlaySurfaceSizeChanged" />
-                        <TextBlock x:Name="AddonOverlayPlaceholder"
-                                   Text="Select an add-on overlay tab"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center" />
-                      </Grid>
-                    </Border>
-                    <StackPanel x:Name="AddonsPanel"
-                                Spacing="10" />
-                    <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <Expander Header="WinUI Add-on Controls"
-                              IsExpanded="True">
-                      <StackPanel x:Name="AddonControlsPanel"
-                                  Spacing="10" />
-                    </Expander>
-                    <Expander Header="ImGui Capture Debug"
-                              IsExpanded="True">
-                      <TextBox Text="{x:Bind ViewModel.AddonDebugText, Mode=OneWay}"
-                               IsReadOnly="True"
-                               AcceptsReturn="True"
-                               TextWrapping="NoWrap"
-                               FontFamily="Consolas"
-                               MinHeight="260" />
-                    </Expander>
-                  </StackPanel>
-                </ScrollViewer>
-              </TabViewItem>
-            </TabView>
-          </Grid>
-        </Border>
-
-        <Border Grid.Column="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="#15171B">
-          <Grid>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-            <Grid Grid.Row="0" Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
-              <TextBlock Text="{x:Bind ViewModel.PreviewInfoText, Mode=OneWay}" FontWeight="SemiBold" />
-            </Grid>
-            <Grid x:Name="PreviewSurface" Grid.Row="1" Background="Black">
-              <SwapChainPanel x:Name="PreviewSwapChainPanel" Visibility="Collapsed" />
-              <Image x:Name="PreviewImage" Stretch="Uniform">
-                <Image.RenderTransform>
-                  <CompositeTransform x:Name="PreviewTransform" />
-                </Image.RenderTransform>
-              </Image>
-              <Border Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="24"
-                      Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.ShowEmptyCanvas), Mode=OneWay}">
-                <StackPanel Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420">
-                  <TextBlock Text="{x:Bind ViewModel.EmptyTitle, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-                  <TextBlock Text="{x:Bind ViewModel.EmptyMessage, Mode=OneWay}" TextWrapping="Wrap" />
-                  <Button Content="Open image" AutomationProperties.AutomationId="EmptyOpenInput" Command="{x:Bind ViewModel.OpenImageCommand}" />
-                  <Button Content="Listen for game output" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="EmptyListenInput" />
-                  <Button Content="Cancel operation" AutomationProperties.AutomationId="EmptyCancelOperation" Command="{x:Bind ViewModel.CancelOperationCommand}" />
-                </StackPanel>
-              </Border>
-            </Grid>
-          </Grid>
-        </Border>
-
+      <Grid x:Name="MainContent" Padding="12" SizeChanged="OnWorkspaceSizeChanged">
+        <SplitView x:Name="GallerySplit" PanePlacement="Right" DisplayMode="Overlay" OpenPaneLength="280" IsPaneOpen="{x:Bind ViewModel.IsGalleryPanelOpen, Mode=TwoWay}">
+          <SplitView.Pane>
         <Border x:Name="GalleryPanel"
-                Grid.Column="2"
-                Visibility="Collapsed"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
@@ -446,9 +180,10 @@
               <Button Grid.Column="1"
                       MinWidth="34"
                       Padding="8,4"
+                      AutomationProperties.Name="Hide gallery" AutomationProperties.AutomationId="HideGallery"
                       Content="&#xE70D;"
                       FontFamily="Segoe MDL2 Assets"
-                      Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}" />
+                      Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}"  />
             </Grid>
 
             <Grid x:Name="GalleryExpandedContent" Grid.Row="1" RowSpacing="10" Padding="10">
@@ -457,7 +192,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
               </Grid.RowDefinitions>
-              <Button Content="Refresh" HorizontalAlignment="Stretch" Command="{x:Bind ViewModel.RefreshGalleryCommand}" />
+              <Button Content="Refresh" HorizontalAlignment="Stretch" Command="{x:Bind ViewModel.RefreshGalleryCommand}"  AutomationProperties.AutomationId="MainWindowControl33" />
               <Grid Grid.Row="1" ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*" />
@@ -470,16 +205,16 @@
                   </Grid.RowDefinitions>
                   <Button Content="Batch Save"
                           HorizontalAlignment="Stretch"
-                          Command="{x:Bind ViewModel.BatchApplySavePngCommand}" />
+                          Command="{x:Bind ViewModel.BatchApplySavePngCommand}"  AutomationProperties.AutomationId="MainWindowControl34" />
                   <Button Grid.Row="1"
                           Content="Batch Shot"
                           HorizontalAlignment="Stretch"
-                          Command="{x:Bind ViewModel.BatchApplyReShadeShotCommand}" />
+                          Command="{x:Bind ViewModel.BatchApplyReShadeShotCommand}"  AutomationProperties.AutomationId="MainWindowControl35" />
                 </Grid>
                 <TextBox Grid.Column="1"
                          Header="Warmup frames" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                          Text="{x:Bind ViewModel.Settings.GalleryBatchFrameDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         InputScope="Number" />
+                         InputScope="Number"  AutomationProperties.AutomationId="MainWindowControl36" AutomationProperties.Name="Warmup frames" />
               </Grid>
               <ListView x:Name="GalleryList" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                         Grid.Row="2"
@@ -489,7 +224,7 @@
                         ScrollViewer.VerticalScrollBarVisibility="Auto"
                         ScrollViewer.VerticalScrollMode="Enabled"
                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                        ScrollViewer.HorizontalScrollMode="Disabled">
+                        ScrollViewer.HorizontalScrollMode="Disabled" AutomationProperties.AutomationId="MainWindowControl37">
                 <ListView.ItemTemplate>
                   <DataTemplate x:DataType="vm:GalleryItemViewModel">
                     <Grid ColumnSpacing="10" Padding="4">
@@ -511,6 +246,12 @@
             </Grid>
           </Grid>
         </Border>
+          </SplitView.Pane>
+          <SplitView x:Name="EffectsSplit" DisplayMode="Inline" OpenPaneLength="400" IsPaneOpen="{x:Bind ViewModel.Settings.EffectsPaneOpen, Mode=TwoWay}">
+            <SplitView.Pane><ContentControl x:Name="EffectsHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" /></SplitView.Pane>
+            <ContentControl x:Name="CanvasHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+          </SplitView>
+        </SplitView>
       </Grid>
     </Grid>
 

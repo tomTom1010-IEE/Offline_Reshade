@@ -53,6 +53,9 @@ public sealed class SettingsViewModel : ObservableObject
     public bool ShowFps { get => Preferences.ShowFps; set => Prefer(Preferences with { ShowFps = value }); }
     public int SliderDragSensitivity { get => Preferences.SliderDragSensitivity; set => Prefer(Preferences with { SliderDragSensitivity = value is 2 or 4 or 8 ? value : 1 }); }
     public bool SliderSymLog { get => Preferences.SliderSymLog; set => Prefer(Preferences with { SliderSymLog = value }); }
+    public bool EffectsPaneOpen { get => Preferences.EffectsPaneOpen; set => Prefer(Preferences with { EffectsPaneOpen = value }); }
+    public double EffectsPaneWidth { get => Preferences.EffectsPaneWidth; set => Prefer(Preferences with { EffectsPaneWidth = double.IsFinite(value) ? Math.Clamp(value, 280, 640) : 400 }); }
+    public string Theme { get => Preferences.Theme; set => Prefer(Preferences with { Theme = value is "Light" or "Dark" ? value : "System" }); }
     public ProfilePaths KksPaths { get => Preferences.KksPaths; set => Prefer(Preferences with { KksPaths = value }); }
     public ProfilePaths KkPaths { get => Preferences.KkPaths; set => Prefer(Preferences with { KkPaths = value }); }
 }

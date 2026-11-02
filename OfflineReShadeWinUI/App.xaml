@@ -7,6 +7,17 @@
       <ResourceDictionary.MergedDictionaries>
         <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
       </ResourceDictionary.MergedDictionaries>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light"><SolidColorBrush x:Key="CanvasBackgroundBrush" Color="#15171B" /></ResourceDictionary>
+        <ResourceDictionary x:Key="Dark"><SolidColorBrush x:Key="CanvasBackgroundBrush" Color="#15171B" /></ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast"><SolidColorBrush x:Key="CanvasBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" /></ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+      <Style x:Key="SecondaryTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextBlockStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+      </Style>
+      <Style x:Key="SectionBorderStyle" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+      </Style>
     </ResourceDictionary>
   </Application.Resources>
 </Application>

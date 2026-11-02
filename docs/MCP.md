@@ -43,7 +43,7 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
-### Shared operation results (automation broker 5)
+### Shared operation results (automation broker 6)
 
 WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
 an exclusive operation (open, preset load/save, reload, export or batch) drains previously
@@ -287,7 +287,7 @@ system GPU; it does not replace hardware driver-reset testing.
 
 ## Maintenance contract (0.8.3)
 
-Native RPC is now **5**, automation broker **3**, custom offline DLL API **1**,
+Native RPC is now **7**, automation broker **6**, custom offline DLL API **1**,
 and preview bridge ABI **3**. These are internal component contracts, separate
 from MCP's negotiated stdio protocol. Connecting or attaching validates the
 contract and pinned upstream before any mutation; update the whole package together.
@@ -299,3 +299,17 @@ package status is `ok`, `mismatch`, `invalid`, or `unpackaged` for a development
 It does not reload effects, change settings, or reset the graphics driver.
 Use `python tools/verify_offline_package.py <release.zip>` for complete archive
 verification. See [maintenance baseline and upgrade procedure](MAINTENANCE.md).
+
+
+## Preview-only comparison
+
+`set_preview_comparison(original: true)` shows the applied color input in the live
+WinUI/GPU/CPU preview; `false` restores the processed image. `get_status` reports
+`previewOriginal`. Comparison does not submit pending UI edits, change FX global
+enablement, enter undo history, mark a preset modified, or change output dimensions.
+It is transient and resets when the native runtime is rebuilt. `export_image` and
+preview-capture tools continue to return processed pixels even while comparison is
+active. For an intentional output without effects, use `set_effects_enabled`.
+
+Native RPC 7 and broker 6 are required; this does not change the upstream ReShade
+API or preview bridge ABI.

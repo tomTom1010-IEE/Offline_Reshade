@@ -21,7 +21,8 @@ public static class PreviewGeometry
     {
         if (!double.IsFinite(panelWidth) || !double.IsFinite(panelHeight) || !double.IsFinite(sourceWidth) || !double.IsFinite(sourceHeight) || panelWidth <= 0 || panelHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
             return new(0, 0, 1, 1, 0, 0);
-        zoom = double.IsFinite(zoom) ? Math.Clamp(zoom, 1, 16) : 1;
+        // A 100% view may be smaller than Fit for tiny inputs, or much larger for panoramas.
+        zoom = double.IsFinite(zoom) && zoom > 0 ? Math.Clamp(zoom, 1.0 / 65536, 65536) : 1;
         var fit = Math.Min(panelWidth / sourceWidth, panelHeight / sourceHeight);
         var fitWidth = sourceWidth * fit; var fitHeight = sourceHeight * fit;
         var width = fitWidth * zoom; var height = fitHeight * zoom;

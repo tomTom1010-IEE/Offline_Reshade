@@ -4,6 +4,7 @@
 #include <vector>
 #include <stdexcept>
 #include <limits>
+#include <string>
 
 static void check(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
 struct test_panel : ISwapChainPanelNative
@@ -21,9 +22,34 @@ struct test_panel : ISwapChainPanelNative
     HRESULT STDMETHODCALLTYPE SetSwapChain(IDXGISwapChain *value) override { attached = value; return S_OK; }
 };
 
-int main()
+int main(int argc, char **argv)
 {
     try {
+        // Sample a real host's shared texture through the production bridge, without a window.
+        if (argc == 6 && std::string(argv[1]) == "--sample-shared") {
+            const auto luid = std::stoull(argv[2]), handle = std::stoull(argv[3]);
+            const auto width = std::stoul(argv[4]), height = std::stoul(argv[5]);
+            test_panel panel; void *opaque = nullptr;
+            check(SUCCEEDED(ORPreview_CreateV2(&panel, 32, 32, luid, &opaque)), "sample bridge creation failed");
+            auto bridge = static_cast<preview_bridge *>(opaque);
+            // Several frames release the producer after any old queued image.
+            for (int i = 0; i < 12; ++i) {
+                check(SUCCEEDED(ORPreview_RenderShared(opaque, handle, width, height, 0, 0, 32, 32)), "sample render failed");
+                Sleep(20);
+            }
+            check(bridge->has_frame, "host did not publish a shared frame");
+            ComPtr<ID3D11Texture2D> target, staging;
+            check(SUCCEEDED(bridge->swapchain->GetBuffer(1, IID_PPV_ARGS(&target))), "sample target failed");
+            D3D11_TEXTURE2D_DESC desc = {}; target->GetDesc(&desc);
+            desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = desc.MiscFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            check(SUCCEEDED(bridge->device->CreateTexture2D(&desc, nullptr, &staging)), "sample allocation failed");
+            bridge->context->CopyResource(staging.Get(), target.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            check(SUCCEEDED(bridge->context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "sample map failed");
+            const auto p = static_cast<uint8_t *>(mapped.pData) + 16 * mapped.RowPitch + 16 * 4;
+            std::cout << ((p[2] << 16) | (p[1] << 8) | p[0]) << '\n';
+            bridge->context->Unmap(staging.Get(), 0); ORPreview_Destroy(opaque); return 0;
+        }
         ComPtr<ID3D11Device> producer;
         ComPtr<ID3D11DeviceContext> context;
         HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &producer, nullptr, &context);

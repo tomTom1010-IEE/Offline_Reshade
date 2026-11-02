@@ -1,0 +1,1808 @@
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
+using System.Globalization;
+using OfflineReShade.Core;
+using OfflineReShade.WinUI.Controls;
+using OfflineReShade.WinUI.Services;
+using OfflineReShade.WinUI.ViewModels;
+using WinRT.Interop;
+
+namespace OfflineReShade.WinUI.Views;
+
+public sealed partial class EffectsPanel : UserControl, IDisposable
+{
+    private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Expander, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
+    private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
+    private readonly List<MappedSlider> _fxMappedSliders = new();
+    private readonly List<(FrameworkElement Owner, Func<Task> Commit)> _uniformTextCommits = new();
+    private long _controlEpoch;
+    private readonly List<MappedSlider> _addonMappedSliders = new();
+    private readonly List<FrameworkElement> _fxLogIndicators = new();
+    private readonly List<FrameworkElement> _addonLogIndicators = new();
+    private readonly D3DPreviewBridge _addonOverlayPreview = new();
+    private readonly DispatcherTimer _addonOverlayPreviewTimer = new();
+    private readonly DispatcherTimer _addonInputMoveTimer = new();
+    private bool _isClosing;
+    private int _addonGpuFailures;
+    private DateTimeOffset _addonRetryAt;
+    private bool _addonGpuFailed;
+    private bool _buildingAddonOverlayTabs;
+    private bool _updatingAddonControlValues;
+    private string _activeNativeAddonOverlayId = string.Empty;
+    private string? _draggedEffectName;
+    private PreviewHostInputMessage? _pendingAddonMouseMove;
+    private uint? _capturedAddonPointerId;
+    private uint _lastRequestedAddonOverlayWidth;
+    private uint _lastRequestedAddonOverlayHeight;
+
+    private bool _paneVisible = true;
+    private XamlRoot? _root;
+    public event Action<string>? SliderModeChanged;
+    public MainWindowViewModel ViewModel { get; }
+    private double AddonOverlayRasterizationScale => AddonNativeSurface.XamlRoot?.RasterizationScale ?? 1;
+    public EffectsPanel(MainWindowViewModel vm)
+    {
+        ViewModel = vm; InitializeComponent();
+        _effectSearchTimer.Tick += (_, _) => { _effectSearchTimer.Stop(); FilterEffects(); };
+        _addonOverlayPreviewTimer.Interval = TimeSpan.FromMilliseconds(16);
+        _addonOverlayPreviewTimer.Tick += (_, _) => RenderAddonOverlayFrame();
+        _addonInputMoveTimer.Interval = TimeSpan.FromMilliseconds(16);
+        _addonInputMoveTimer.Tick += (_, _) => FlushAddonOverlayMouseMove();
+        EffectsList.SizeChanged += (_, _) => UpdateControlsPanelWidth();
+        ViewModel.ControlsChanged += BuildControls;
+        ViewModel.AddonControlsChanged += BuildAddonControls;
+        ViewModel.AddonControlValuesChanged += UpdateAddonControlValues;
+        ViewModel.SubmitVisualEdits += FlushVisibleEdits;
+        ViewModel.PropertyChanged += OnViewModelChanged;
+        ViewModel.Settings.PropertyChanged += OnSettingsChanged;
+        NativeAddonOverlaySwitch.IsOn = true;
+        Loaded += (_, _) =>
+        {
+            if (_root != null) _root.Changed -= OnRootChanged;
+            _root = XamlRoot;
+            if (_root != null) _root.Changed += OnRootChanged;
+        };
+        BuildControls();
+    }
+    private void OnRootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        ResizeAddonOverlayBridge();
+        _ = SyncAddonOverlaySurfaceSizeAsync();
+    }
+    private void OnSettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName is nameof(SettingsViewModel.SliderDragSensitivity) or nameof(SettingsViewModel.SliderSymLog)) UpdateSliderInteractionMode();
+    }
+    private void OnViewModelChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        if (_isClosing) return;
+        if (args.PropertyName == nameof(MainWindowViewModel.IsPreviewRunning))
+        {
+            if (!ViewModel.IsPreviewRunning) { _addonOverlayPreview.Dispose(); _addonGpuFailures = 0; _addonRetryAt = DateTimeOffset.MinValue; _addonGpuFailed = false; }
+            _activeNativeAddonOverlayId = string.Empty;
+        }
+        if (args.PropertyName == nameof(MainWindowViewModel.SharedAddonOverlayHandle)) { _lastRequestedAddonOverlayWidth = _lastRequestedAddonOverlayHeight = 0; }
+        if (args.PropertyName is nameof(MainWindowViewModel.IsSettingsOpen) or nameof(MainWindowViewModel.IsPreviewRunning) or nameof(MainWindowViewModel.SharedAddonOverlayHandle) or nameof(MainWindowViewModel.SharedAddonOverlayWidth) or nameof(MainWindowViewModel.SharedAddonOverlayHeight)) UpdateAddonOverlayHostVisibility();
+    }
+    public void SetPaneVisible(bool visible) { _paneVisible = visible; UpdateAddonOverlayHostVisibility(); }
+    private void OnHidePanel(object sender, RoutedEventArgs args) => ViewModel.Settings.EffectsPaneOpen = false;
+    public void FocusSearch() => EffectSearchBox.Focus(FocusState.Keyboard);
+    public bool IsNativeFocused => XamlRoot is { } root && ReferenceEquals(FocusManager.GetFocusedElement(root), AddonOverlaySwapChainPanel);
+    public void ToggleLogMode()
+    {
+        if (_fxMappedSliders.Concat(_addonMappedSliders).Any(x => x.IsDragging)) return;
+        ViewModel.Settings.SliderSymLog = !ViewModel.Settings.SliderSymLog;
+        SliderModeChanged?.Invoke(ViewModel.Settings.SliderSymLog ? "L  SYMLOG" : "LINEAR");
+    }
+    private void TryPreviewGraphics(Action render)
+    {
+        if (_isClosing || !_paneVisible || _addonGpuFailed || DateTimeOffset.UtcNow < _addonRetryAt) return;
+        try { render(); _addonGpuFailures = 0; }
+        catch (Exception ex)
+        {
+            _addonOverlayPreview.Dispose(); var attempts = ++_addonGpuFailures;
+            _addonRetryAt = DateTimeOffset.UtcNow.AddMilliseconds(400);
+            ViewModel.ReportPreviewError($"Add-on preview rebuild {attempts}/3: {ex.Message} (0x{ex.HResult:X8})");
+            if (attempts >= 3) { _addonGpuFailed = true; UpdateAddonOverlayHostVisibility(); }
+        }
+    }
+    public void Dispose()
+    {
+        _isClosing = true;
+        if (_root != null) _root.Changed -= OnRootChanged;
+        _effectSearchTimer.Stop(); _addonInputMoveTimer.Stop(); _addonOverlayPreviewTimer.Stop(); _addonOverlayPreview.Dispose();
+        ViewModel.ControlsChanged -= BuildControls; ViewModel.AddonControlsChanged -= BuildAddonControls;
+        ViewModel.AddonControlValuesChanged -= UpdateAddonControlValues; ViewModel.SubmitVisualEdits -= FlushVisibleEdits;
+        ViewModel.PropertyChanged -= OnViewModelChanged; ViewModel.Settings.PropertyChanged -= OnSettingsChanged;
+    }
+    private void OnControlsTabSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        UpdateAddonOverlayHostVisibility();
+    }
+
+    private void OnAddonOverlayTabSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (!_buildingAddonOverlayTabs)
+            UpdateAddonOverlayHostVisibility();
+    }
+
+    private void OnNativeAddonOverlayToggled(object sender, RoutedEventArgs args)
+    {
+        UpdateAddonOverlayHostVisibility();
+    }
+
+    private void UpdateAddonOverlayHostVisibility()
+    {
+        var selectedOverlay = (AddonOverlayTabView.SelectedItem as TabViewItem)?.Tag as AddonOverlayViewModel;
+        var visible = !_addonGpuFailed && ViewModel.IsPreviewRunning &&
+                      !ViewModel.IsSettingsOpen && _paneVisible &&
+                      ControlsTabView.SelectedIndex == 1 &&
+                      NativeAddonOverlaySwitch.IsOn &&
+                      selectedOverlay != null;
+
+        AddonNativeSurfaceBorder.Visibility = selectedOverlay != null ? Visibility.Visible : Visibility.Collapsed;
+        AddonOverlaySwapChainPanel.Visibility = visible && ViewModel.SharedAddonOverlayHandle != 0 ? Visibility.Visible : Visibility.Collapsed;
+        AddonOverlayPlaceholder.Visibility = AddonOverlaySwapChainPanel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        AddonOverlayPlaceholder.Text = selectedOverlay == null
+            ? "Select an add-on overlay tab"
+            : !ViewModel.IsPreviewRunning
+                ? "Start preview to load the native add-on overlay"
+                : !NativeAddonOverlaySwitch.IsOn
+                    ? "Native add-on overlays are turned off"
+                    : _addonGpuFailed ? "GPU add-on overlay unavailable; restart preview to retry" : "Preparing native add-on overlay";
+
+        if (visible)
+        {
+            EnsureAddonOverlayBridge();
+            _addonOverlayPreviewTimer.Start();
+        }
+        else
+        {
+            _addonOverlayPreviewTimer.Stop();
+            if (!ViewModel.IsPreviewRunning)
+            {
+                _lastRequestedAddonOverlayWidth = 0;
+                _lastRequestedAddonOverlayHeight = 0;
+            }
+        }
+
+        _ = SyncNativeAddonOverlayAsync(visible ? selectedOverlay : null);
+    }
+
+    private async Task SyncNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
+    {
+        var requestedId = overlay?.Id ?? string.Empty;
+        if (!ViewModel.IsPreviewRunning)
+            return;
+        if (string.Equals(requestedId, _activeNativeAddonOverlayId, StringComparison.Ordinal))
+            return;
+
+        if (await RunUiCommandAsync(() => ViewModel.SelectNativeAddonOverlayAsync(overlay)))
+            _activeNativeAddonOverlayId = requestedId;
+    }
+
+    private void QueueAddonOverlayInput(PreviewHostInputMessage input)
+    {
+        const uint mouseMove = 0x0200;
+        if (input.Message == mouseMove)
+        {
+            _pendingAddonMouseMove = input;
+            if (!_addonInputMoveTimer.IsEnabled)
+                _addonInputMoveTimer.Start();
+            return;
+        }
+
+        FlushAddonOverlayMouseMove();
+        _ = ViewModel.SendAddonOverlayInputAsync(input);
+    }
+
+    private void FlushAddonOverlayMouseMove()
+    {
+        if (_pendingAddonMouseMove is not { } input)
+        {
+            _addonInputMoveTimer.Stop();
+            return;
+        }
+
+        _pendingAddonMouseMove = null;
+        _ = ViewModel.SendAddonOverlayInputAsync(input);
+    }
+
+    private void OnAddonOverlayPointerMoved(object sender, PointerRoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0200, 0, GetAddonOverlayPointerLParam(args)));
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayPointerPressed(object sender, PointerRoutedEventArgs args)
+    {
+        AddonOverlaySwapChainPanel.Focus(FocusState.Pointer);
+        AddonOverlaySwapChainPanel.CapturePointer(args.Pointer);
+        _capturedAddonPointerId = args.Pointer.PointerId;
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0200, 0, GetAddonOverlayPointerLParam(args)));
+
+        var properties = args.GetCurrentPoint(AddonOverlaySwapChainPanel).Properties;
+        if (properties.IsLeftButtonPressed)
+            QueueAddonOverlayInput(new PreviewHostInputMessage(0x0201, 0, GetAddonOverlayPointerLParam(args)));
+        else if (properties.IsRightButtonPressed)
+            QueueAddonOverlayInput(new PreviewHostInputMessage(0x0204, 0, GetAddonOverlayPointerLParam(args)));
+        else if (properties.IsMiddleButtonPressed)
+            QueueAddonOverlayInput(new PreviewHostInputMessage(0x0207, 0, GetAddonOverlayPointerLParam(args)));
+
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayPointerReleased(object sender, PointerRoutedEventArgs args)
+    {
+        var kind = args.GetCurrentPoint(AddonOverlaySwapChainPanel).Properties.PointerUpdateKind;
+        var message = kind switch
+        {
+            Microsoft.UI.Input.PointerUpdateKind.LeftButtonReleased => 0x0202u,
+            Microsoft.UI.Input.PointerUpdateKind.RightButtonReleased => 0x0205u,
+            Microsoft.UI.Input.PointerUpdateKind.MiddleButtonReleased => 0x0208u,
+            _ => 0u
+        };
+        if (message != 0)
+            QueueAddonOverlayInput(new PreviewHostInputMessage(message, 0, GetAddonOverlayPointerLParam(args)));
+        _capturedAddonPointerId = null;
+        AddonOverlaySwapChainPanel.ReleasePointerCapture(args.Pointer);
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayPointerExited(object sender, PointerRoutedEventArgs args)
+    {
+        if (args.Pointer.IsInContact)
+            return;
+
+        ClearPendingAddonMouseMove();
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x02A3, 0, 0));
+    }
+
+    private void OnAddonOverlayPointerCaptureLost(object sender, PointerRoutedEventArgs args)
+    {
+        if (_capturedAddonPointerId != args.Pointer.PointerId)
+            return;
+
+        _capturedAddonPointerId = null;
+        ClearPendingAddonMouseMove();
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0202, 0, 0));
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0205, 0, 0));
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0208, 0, 0));
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x02A3, 0, 0));
+    }
+
+    private void ClearPendingAddonMouseMove()
+    {
+        _pendingAddonMouseMove = null;
+        _addonInputMoveTimer.Stop();
+    }
+
+    private void OnAddonOverlayPointerWheelChanged(object sender, PointerRoutedEventArgs args)
+    {
+        var delta = args.GetCurrentPoint(AddonOverlaySwapChainPanel).Properties.MouseWheelDelta;
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x020A, (long)(delta << 16), GetAddonOverlayPointerLParam(args)));
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayGotFocus(object sender, RoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0007, 0, 0));
+    }
+
+    private void OnAddonOverlayLostFocus(object sender, RoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0008, 0, 0));
+    }
+
+    private void OnAddonOverlayKeyDown(object sender, KeyRoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0100, (long)args.Key, 0));
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayKeyUp(object sender, KeyRoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0101, (long)args.Key, 0));
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlayCharacterReceived(object sender, CharacterReceivedRoutedEventArgs args)
+    {
+        QueueAddonOverlayInput(new PreviewHostInputMessage(0x0102, args.Character, 0));
+        args.Handled = true;
+    }
+
+    private void OnAddonOverlaySurfaceSizeChanged(object sender, SizeChangedEventArgs args)
+    {
+        ResizeAddonOverlayBridge();
+        _ = SyncAddonOverlaySurfaceSizeAsync();
+    }
+
+    private long GetAddonOverlayPointerLParam(PointerRoutedEventArgs args)
+    {
+        var point = args.GetCurrentPoint(AddonOverlaySwapChainPanel).Position;
+        var sx = ViewModel.SharedAddonOverlayWidth / Math.Max(1.0, AddonOverlaySwapChainPanel.ActualWidth);
+        var sy = ViewModel.SharedAddonOverlayHeight / Math.Max(1.0, AddonOverlaySwapChainPanel.ActualHeight);
+        var x = Math.Clamp((int)Math.Round(point.X * sx), 0, ushort.MaxValue);
+        var y = Math.Clamp((int)Math.Round(point.Y * sy), 0, ushort.MaxValue);
+        return (long)(uint)(x | (y << 16));
+    }
+
+    private void OnSliderDragSensitivityWheelChanged(object? sender, MappedSliderWheelEventArgs args)
+    {
+        var factors = new[] { 1, 2, 4, 8 };
+        var currentIndex = Array.IndexOf(factors, ViewModel.Settings.SliderDragSensitivity);
+        if (currentIndex < 0)
+            currentIndex = 0;
+        var nextIndex = Math.Clamp(currentIndex + (args.Delta > 0 ? 1 : -1), 0, factors.Length - 1);
+        ViewModel.Settings.SliderDragSensitivity = factors[nextIndex];
+        SliderModeChanged?.Invoke("x" + factors[nextIndex].ToString(CultureInfo.InvariantCulture));
+    }
+
+    private void UpdateSliderInteractionMode()
+    {
+        var sensitivity = ViewModel.Settings.SliderDragSensitivity;
+        var logarithmic = ViewModel.Settings.SliderSymLog;
+        foreach (var slider in _fxMappedSliders.Concat(_addonMappedSliders))
+        {
+            if (!slider.IsDragging)
+                slider.SetInteractionMode(sensitivity, logarithmic);
+        }
+
+        var visibility = logarithmic ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var indicator in _fxLogIndicators.Concat(_addonLogIndicators))
+            indicator.Visibility = visibility;
+    }
+
+    private void EnsureAddonOverlayBridge() => TryPreviewGraphics(EnsureAddonOverlayBridgeCore);
+    private void EnsureAddonOverlayBridgeCore()
+    {
+        if (_isClosing || !ViewModel.IsPreviewRunning ||
+            ViewModel.IsSettingsOpen ||
+            ControlsTabView.SelectedIndex != 1 ||
+            !NativeAddonOverlaySwitch.IsOn ||
+            ViewModel.SharedAddonOverlayHandle == 0 ||
+            ViewModel.SharedAddonOverlayWidth == 0 ||
+            ViewModel.SharedAddonOverlayHeight == 0)
+            return;
+
+        var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
+        _addonOverlayPreview.EnsureCreated(AddonOverlaySwapChainPanel, width, height, ViewModel.AdapterLuid);
+        _addonOverlayPreview.SetViewTransform(0.0, 0.0, width, height);
+        _addonOverlayPreview.Render(ViewModel.SharedAddonOverlayHandle, ViewModel.SharedAddonOverlayWidth, ViewModel.SharedAddonOverlayHeight);
+
+        AddonOverlaySwapChainPanel.Visibility = Visibility.Visible;
+        AddonOverlayPlaceholder.Visibility = Visibility.Collapsed;
+        _ = SyncAddonOverlaySurfaceSizeAsync();
+    }
+
+    private void ResizeAddonOverlayBridge()
+    {
+        if (!_addonOverlayPreview.IsCreated)
+            return;
+
+        TryPreviewGraphics(() => {
+            var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
+            _addonOverlayPreview.Resize(width, height);
+            _addonOverlayPreview.SetViewTransform(0.0, 0.0, width, height);
+        });
+    }
+
+    private async Task SyncAddonOverlaySurfaceSizeAsync()
+    {
+        if (!ViewModel.IsPreviewRunning ||
+            ViewModel.IsSettingsOpen ||
+            ControlsTabView.SelectedIndex != 1 ||
+            !NativeAddonOverlaySwitch.IsOn)
+            return;
+
+        var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
+        if (width == _lastRequestedAddonOverlayWidth && height == _lastRequestedAddonOverlayHeight)
+            return;
+
+        _lastRequestedAddonOverlayWidth = width;
+        _lastRequestedAddonOverlayHeight = height;
+        try
+        {
+            await ViewModel.SetAddonOverlaySurfaceSizeAsync(width, height);
+        }
+        catch
+        {
+            _lastRequestedAddonOverlayWidth = 0;
+            _lastRequestedAddonOverlayHeight = 0;
+        }
+    }
+
+    private void RenderAddonOverlayFrame()
+    {
+        EnsureAddonOverlayBridge();
+    }
+
+    private void BuildControls()
+    {
+        _controlEpoch++;
+        _uniformTextCommits.Clear();
+        ControlsPanel.Children.Clear();
+        _fxMappedSliders.Clear();
+        _fxLogIndicators.Clear();
+        AddonsPanel.Children.Clear();
+        AddonControlsPanel.Children.Clear();
+        UpdateControlsPanelWidth();
+
+        var effectsEnabled = new CheckBox
+        {
+            Content = "Effects Enabled",
+            IsChecked = ViewModel.EffectsEnabled,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+        effectsEnabled.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetEffectsEnabledAsync(true));
+        effectsEnabled.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetEffectsEnabledAsync(false));
+        AutomationProperties.SetAutomationId(effectsEnabled, "EffectsEnabled");
+        ControlsPanel.Children.Add(effectsEnabled);
+
+        var techniquePanel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var techniques = CreateSectionExpander("Techniques", false, new ScrollViewer { Content = techniquePanel, MaxHeight = 180 });
+        techniques.MaxHeight = 240;
+        techniques.Expanding += (_, _) => {
+            if (techniquePanel.Children.Count != 0) return;
+            foreach (var technique in ViewModel.Techniques) {
+                var checkBox = new CheckBox { Content = technique.Label, IsChecked = technique.IsEnabled, Tag = technique };
+                checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, true));
+                checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, false));
+                AutomationProperties.SetAutomationId(checkBox, "Technique_" + MakeAutomationId(technique.Id));
+                techniquePanel.Children.Add(checkBox);
+            }
+        };
+        ControlsPanel.Children.Add(techniques);
+        FilterEffects();
+
+        if (ViewModel.Techniques.Count == 0 && ViewModel.Effects.Count == 0)
+        {
+            ControlsPanel.Children.Add(new TextBlock
+            {
+                Text = "Start preview to load ReShade controls.",
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+
+        BuildAddons();
+        BuildAddonControls();
+    }
+
+    private void OnEffectSearchChanged(object sender, TextChangedEventArgs args) { _effectSearchTimer.Stop(); _effectSearchTimer.Start(); }
+    private void FilterEffects()
+    {
+        if (EffectsList == null) return;
+        var query = EffectSearchBox.Text.Trim();
+        EffectsList.ItemsSource = ViewModel.Effects.Where(e => query.Length == 0 || e.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+            e.Uniforms.Any(u => u.Label.Contains(query, StringComparison.OrdinalIgnoreCase) || u.Name.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+    }
+    private void OnEffectExpanderLoaded(object sender, RoutedEventArgs args)
+    {
+        var expander = (Expander)sender;
+        if (expander.DataContext is not EffectControlViewModel effect) return;
+        expander.Tag = effect.Name; expander.Header = CreateEffectHeader(effect);
+        expander.AllowDrop = true; expander.DragOver -= OnEffectDragOver; expander.Drop -= OnEffectDrop;
+        expander.DragOver += OnEffectDragOver; expander.Drop += OnEffectDrop;
+        expander.IsExpanded = _expandedEffects.Contains(effect.Name);
+        if (expander.IsExpanded) PopulateEffect(expander);
+    }
+    private void OnEffectExpanding(Expander sender, ExpanderExpandingEventArgs args) { if (sender.Tag is string name) _expandedEffects.Add(name); PopulateEffect(sender); }
+    private void OnEffectCollapsed(Expander sender, ExpanderCollapsedEventArgs args) { if (sender.Tag is string name) _expandedEffects.Remove(name); ReleaseEffect(sender); }
+    private void OnEffectExpanderUnloaded(object sender, RoutedEventArgs args) => ReleaseEffect((Expander)sender);
+    private void PopulateEffect(Expander expander)
+    {
+        if (_effectEditors.ContainsKey(expander) || expander.DataContext is not EffectControlViewModel effect) return;
+        var sliders = _fxMappedSliders.Count; var indicators = _fxLogIndicators.Count;
+        expander.Content = BuildEffectPanel(effect);
+        _effectEditors[expander] = (_fxMappedSliders.Skip(sliders).ToList(), _fxLogIndicators.Skip(indicators).ToList());
+    }
+    private void ReleaseEffect(Expander expander)
+    {
+        if (_effectEditors.Remove(expander, out var editor)) {
+            foreach (var slider in editor.Sliders) _fxMappedSliders.Remove(slider);
+            foreach (var indicator in editor.Indicators) _fxLogIndicators.Remove(indicator);
+        }
+        expander.Content = null;
+    }
+
+    private void BuildAddons()
+    {
+        AddonsPanel.Children.Clear();
+        BuildNativeAddonOverlayTabs();
+
+        var pathsPanel = new StackPanel { Spacing = 4 };
+        pathsPanel.Children.Add(new TextBlock
+        {
+            Text = "AddonPath",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+        });
+        pathsPanel.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(ViewModel.AddonSearchPath) ? "Not reported by the ReShade runtime" : ViewModel.AddonSearchPath,
+            FontFamily = new FontFamily("Consolas"),
+            Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true
+        });
+        pathsPanel.Children.Add(new TextBlock
+        {
+            Text = "ReShade log: " + (string.IsNullOrWhiteSpace(ViewModel.AddonLogPath) ? "Not available" : ViewModel.AddonLogPath),
+            FontFamily = new FontFamily("Consolas"),
+            Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true
+        });
+        AddonsPanel.Children.Add(pathsPanel);
+
+        var failedCount = ViewModel.AddonDiagnostics.Count(static diagnostic => diagnostic.IsFailure);
+        var disabledCount = ViewModel.AddonDiagnostics.Count(static diagnostic => diagnostic.IsDisabled);
+        var loadedCount = ViewModel.AddonDiagnostics.Count(static diagnostic => diagnostic.IsLoaded);
+        AddonsPanel.Children.Add(new InfoBar
+        {
+            IsOpen = true,
+            IsClosable = false,
+            Severity = failedCount != 0 || !ViewModel.AllAddonsLoaded
+                ? InfoBarSeverity.Error
+                : disabledCount != 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success,
+            Title = failedCount != 0 || !ViewModel.AllAddonsLoaded ? "Some add-ons did not load" : "Add-on scan completed",
+            Message = $"{loadedCount} loaded, {disabledCount} disabled, {failedCount} failed or skipped. Add-on changes require restarting the preview runtime."
+        });
+
+        if (ViewModel.AddonDiagnostics.Count != 0)
+        {
+            var diagnosticsPanel = new StackPanel { Spacing = 8 };
+            foreach (var diagnostic in ViewModel.AddonDiagnostics)
+            {
+                var diagnosticPanel = new StackPanel { Spacing = 3 };
+                diagnosticPanel.Children.Add(new TextBlock
+                {
+                    Text = diagnostic.DisplayName,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    TextWrapping = TextWrapping.Wrap
+                });
+                diagnosticPanel.Children.Add(new TextBlock
+                {
+                    Text = diagnostic.StatusText,
+                    TextWrapping = TextWrapping.Wrap
+                });
+                if (!string.IsNullOrWhiteSpace(diagnostic.DetailText))
+                {
+                    diagnosticPanel.Children.Add(new TextBlock
+                    {
+                        Text = diagnostic.DetailText,
+                        TextWrapping = TextWrapping.Wrap
+                    });
+                }
+                if (!string.IsNullOrWhiteSpace(diagnostic.Path))
+                {
+                    diagnosticPanel.Children.Add(new TextBlock
+                    {
+                        Text = diagnostic.Path,
+                        FontFamily = new FontFamily("Consolas"),
+                        Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                        TextWrapping = TextWrapping.Wrap,
+                        IsTextSelectionEnabled = true
+                    });
+                }
+
+                diagnosticsPanel.Children.Add(new Border
+                {
+                    Padding = new Thickness(10),
+                    Style = (Style)Application.Current.Resources["SectionBorderStyle"],
+                    BorderThickness = new Thickness(1),
+                    Child = diagnosticPanel
+                });
+            }
+            AddonsPanel.Children.Add(CreateSectionExpander("Load diagnostics", failedCount != 0, diagnosticsPanel));
+        }
+
+        if (ViewModel.AddonLogErrors.Count != 0)
+        {
+            var logPanel = new StackPanel { Spacing = 6 };
+            foreach (var line in ViewModel.AddonLogErrors)
+            {
+                logPanel.Children.Add(new TextBlock
+                {
+                    Text = line,
+                    FontFamily = new FontFamily("Consolas"),
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true
+                });
+            }
+            AddonsPanel.Children.Add(CreateSectionExpander("Add-on initialization log", true, logPanel));
+        }
+
+        var nativePanelButton = new Button
+        {
+            Content = "Open native add-on panel",
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        AutomationProperties.SetAutomationId(nativePanelButton, "BtnOpenNativeAddonPanel");
+        nativePanelButton.Click += async (_, _) => await RunUiCommandAsync(ViewModel.OpenNativeAddonPanelAsync);
+        AddonsPanel.Children.Add(nativePanelButton);
+        AddonsPanel.Children.Add(new TextBlock
+        {
+            Text = "Use this fallback for complex add-on UI that cannot be represented by standard WinUI controls yet.",
+            Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        if (ViewModel.Addons.Count == 0)
+        {
+            AddonsPanel.Children.Add(new TextBlock
+            {
+                Text = "No ReShade add-on registered successfully. Review the load diagnostics and ReShade log above.",
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var addon in ViewModel.Addons)
+        {
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = addon.StatusText + " - " + addon.OverlayText,
+                TextWrapping = TextWrapping.Wrap
+            });
+            panel.Children.Add(new InfoBar
+            {
+                IsOpen = true,
+                IsClosable = false,
+                Severity = addon.OfflineCompatibility == "runtime_compatible" ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
+                Title = addon.CompatibilityText,
+                Message = addon.Events.Count == 0
+                    ? "The add-on did not register event callbacks. UI-only add-ons may still work normally."
+                    : $"{addon.Events.Count(static item => item.IsSupported)} of {addon.Events.Count} registered event types are available in the offline host."
+            });
+
+            if (!string.IsNullOrWhiteSpace(addon.SourceText))
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = addon.SourceText,
+                    Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            if (!string.IsNullOrWhiteSpace(addon.Description))
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = addon.Description,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            if (addon.HasSettingsOverlay)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Settings overlay registered",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                });
+            }
+
+            if (addon.HasEventOverlay)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Event overlay registered",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                });
+            }
+
+            foreach (var overlay in addon.Overlays)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "Overlay: " + overlay,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            if (addon.Events.Count != 0)
+            {
+                var eventsPanel = new StackPanel { Spacing = 4 };
+                foreach (var addonEvent in addon.Events)
+                {
+                    var eventRow = new Grid { ColumnSpacing = 8 };
+                    eventRow.ColumnDefinitions.Add(new ColumnDefinition());
+                    eventRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    eventRow.Children.Add(new TextBlock
+                    {
+                        Text = addonEvent.Name,
+                        FontFamily = new FontFamily("Consolas"),
+                        TextWrapping = TextWrapping.Wrap
+                    });
+                    var support = new TextBlock
+                    {
+                        Text = addonEvent.SupportText,
+                        TextWrapping = TextWrapping.Wrap,
+                        MaxWidth = 210
+                    };
+                    Grid.SetColumn(support, 1);
+                    eventRow.Children.Add(support);
+                    eventsPanel.Children.Add(eventRow);
+                }
+                panel.Children.Add(CreateSectionExpander("Registered events", false, eventsPanel));
+            }
+
+            AddonsPanel.Children.Add(CreateSectionExpander(addon.Name, false, panel));
+        }
+    }
+
+    private void BuildNativeAddonOverlayTabs()
+    {
+        var previousSelection = (AddonOverlayTabView.SelectedItem as TabViewItem)?.Tag as AddonOverlayViewModel;
+        _buildingAddonOverlayTabs = true;
+        try
+        {
+            AddonOverlayTabView.TabItems.Clear();
+            var selectedIndex = -1;
+            foreach (var overlay in ViewModel.AddonOverlays)
+            {
+                var tab = new TabViewItem
+                {
+                    Header = overlay.DisplayTitle,
+                    IsClosable = false,
+                    Tag = overlay
+                };
+                AutomationProperties.SetAutomationId(tab, "AddonOverlay_" + MakeAutomationId(overlay.Id));
+                AutomationProperties.SetName(tab, overlay.DisplayTitle);
+                AddonOverlayTabView.TabItems.Add(tab);
+                if (previousSelection != null && string.Equals(previousSelection.Id, overlay.Id, StringComparison.Ordinal))
+                    selectedIndex = AddonOverlayTabView.TabItems.Count - 1;
+            }
+
+            AddonOverlayTabView.Visibility = AddonOverlayTabView.TabItems.Count != 0 ? Visibility.Visible : Visibility.Collapsed;
+            NativeAddonOverlaySwitch.IsEnabled = AddonOverlayTabView.TabItems.Count != 0;
+            AddonOverlayTabView.SelectedIndex = selectedIndex >= 0 ? selectedIndex : AddonOverlayTabView.TabItems.Count != 0 ? 0 : -1;
+        }
+        finally
+        {
+            _buildingAddonOverlayTabs = false;
+        }
+
+        UpdateAddonOverlayHostVisibility();
+    }
+
+    private void BuildAddonControls()
+    {
+        AddonControlsPanel.Children.Clear();
+        _addonControlValueUpdaters.Clear();
+        _addonMappedSliders.Clear();
+        _addonLogIndicators.Clear();
+
+        if (ViewModel.AddonImGuiControls.Count == 0)
+        {
+            AddonControlsPanel.Children.Add(new TextBlock
+            {
+                Text = "No standard add-on ImGui controls captured yet. Complex custom draw-list UI still needs the native panel fallback.",
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextWrapping = TextWrapping.Wrap
+            });
+            return;
+        }
+
+        foreach (var group in ViewModel.AddonImGuiControls.GroupBy(static control => control.GroupKey))
+        {
+            var controls = group.ToArray();
+            var index = 0;
+            var panel = BuildAddonControlSequence(controls, ref index);
+
+            AddonControlsPanel.Children.Add(CreateSectionExpander(group.Key, true, panel, new Thickness(0, 0, 0, 0)));
+        }
+    }
+
+    private StackPanel BuildAddonControlSequence(IReadOnlyList<AddonImGuiControlViewModel> controls, ref int index, params string[] stopKinds)
+    {
+        var panel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        FrameworkElement? lastElement = null;
+
+        while (index < controls.Count)
+        {
+            var control = controls[index];
+            if (stopKinds.Contains(control.Kind, StringComparer.Ordinal))
+                break;
+
+            if (control.IsTreeNode || control.IsCollapsingHeader)
+            {
+                ++index;
+                StackPanel childPanel;
+                if (control.IsTreeNode && control.IsOpen)
+                {
+                    childPanel = BuildAddonControlSequence(controls, ref index, "tree_end");
+                    if (index < controls.Count && controls[index].IsTreeEnd)
+                        ++index;
+                }
+                else if (control.IsCollapsingHeader && control.IsOpen)
+                {
+                    // ImGui collapsing headers have no matching End call. Treat the next
+                    // header as a sibling boundary, which matches the common add-on layout.
+                    childPanel = BuildAddonControlSequence(controls, ref index, "collapsing_header");
+                }
+                else
+                {
+                    childPanel = new StackPanel { Spacing = 8 };
+                }
+
+                var expander = CreateAddonNestedSectionExpander(control, childPanel, "AddonTree_");
+                panel.Children.Add(expander);
+                lastElement = expander;
+                continue;
+            }
+
+            if (control.IsCollapsingHeader)
+            {
+                ++index;
+                var childPanel = control.IsOpen
+                    ? BuildAddonControlSequence(controls, ref index, stopKinds.Append("collapsing_header").Distinct(StringComparer.Ordinal).ToArray())
+                    : new StackPanel { Spacing = 8 };
+                var expander = CreateAddonNestedSectionExpander(control, childPanel, "AddonHeader_");
+                panel.Children.Add(expander);
+                lastElement = expander;
+                continue;
+            }
+
+            if (control.IsTabBarBegin)
+            {
+                ++index;
+                if (!control.IsOpen)
+                {
+                    panel.Children.Add(new TextBlock
+                    {
+                        Text = control.Label,
+                        Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                        TextWrapping = TextWrapping.Wrap
+                    });
+                    continue;
+                }
+                var tabView = BuildAddonTabBar(controls, ref index);
+                panel.Children.Add(tabView);
+                lastElement = tabView;
+                continue;
+            }
+
+            if (control.IsPopupBegin)
+            {
+                ++index;
+                var popupPanel = control.IsOpen
+                    ? BuildAddonControlSequence(controls, ref index, "popup_end")
+                    : new StackPanel { Spacing = 8 };
+                if (index < controls.Count && controls[index].IsPopupEnd)
+                    ++index;
+                var popupExpander = CreateAddonNestedSectionExpander(control, popupPanel, "AddonPopup_");
+                panel.Children.Add(popupExpander);
+                lastElement = popupExpander;
+                continue;
+            }
+
+            if (control.IsMenuBegin)
+            {
+                ++index;
+                var menuPanel = control.IsOpen
+                    ? BuildAddonControlSequence(controls, ref index, "menu_end")
+                    : new StackPanel { Spacing = 8 };
+                if (index < controls.Count && controls[index].IsMenuEnd)
+                    ++index;
+                var menuExpander = CreateAddonNestedSectionExpander(control, menuPanel, "AddonMenu_");
+                panel.Children.Add(menuExpander);
+                lastElement = menuExpander;
+                continue;
+            }
+
+            if (control.IsTooltip)
+            {
+                ++index;
+                if (lastElement != null)
+                    ToolTipService.SetToolTip(lastElement, control.Label);
+                continue;
+            }
+
+            if (control.IsTreeEnd || control.IsTabBarEnd || control.IsTabItemEnd || control.IsPopupEnd || control.IsMenuEnd)
+                break;
+
+            var editor = BuildAddonControlEditor(control);
+            panel.Children.Add(editor);
+            lastElement = editor;
+            ++index;
+        }
+
+        return panel;
+    }
+
+    private FrameworkElement BuildAddonTabBar(IReadOnlyList<AddonImGuiControlViewModel> controls, ref int index)
+    {
+        var tabView = new TabView
+        {
+            IsAddTabButtonVisible = false,
+            CanDragTabs = false,
+            TabWidthMode = TabViewWidthMode.SizeToContent,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            MinHeight = 96
+        };
+        AutomationProperties.SetAutomationId(tabView, "AddonControlTabs_" + index.ToString(CultureInfo.InvariantCulture));
+        TabViewItem? activeTab = null;
+
+        while (index < controls.Count && !controls[index].IsTabBarEnd)
+        {
+            if (!controls[index].IsTabItemBegin)
+            {
+                ++index;
+                continue;
+            }
+
+            var tabControl = controls[index++];
+            var itemControls = new List<AddonImGuiControlViewModel>();
+            while (index < controls.Count &&
+                   !controls[index].IsTabItemBegin &&
+                   !controls[index].IsTabBarEnd)
+            {
+                if (controls[index].IsTabItemEnd)
+                {
+                    ++index;
+                    break;
+                }
+                itemControls.Add(controls[index++]);
+            }
+
+            var itemIndex = 0;
+            var tab = new TabViewItem
+            {
+                Header = tabControl.Label,
+                IsClosable = false,
+                Tag = tabControl,
+                Content = BuildAddonControlSequence(itemControls, ref itemIndex)
+            };
+            ApplyAddonAutomation(tab, tabControl);
+            AutomationProperties.SetAutomationId(tab, "AddonControlTab_" + MakeAutomationId(tabControl.Id));
+            tabView.TabItems.Add(tab);
+            if (tabControl.IsOpen)
+                activeTab = tab;
+        }
+
+        if (index < controls.Count && controls[index].IsTabBarEnd)
+            ++index;
+        tabView.SelectedItem = activeTab ?? tabView.TabItems.FirstOrDefault();
+        tabView.SelectionChanged += async (_, _) =>
+        {
+            if (tabView.SelectedItem is TabViewItem { Tag: AddonImGuiControlViewModel selected })
+                await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(selected, "true"));
+        };
+        return tabView;
+    }
+
+    private FrameworkElement BuildAddonControlEditor(AddonImGuiControlViewModel control)
+    {
+        if (control.IsText)
+        {
+            return new TextBlock
+            {
+                Text = control.Label,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true
+            };
+        }
+
+        if (control.IsTextInput)
+            return BuildAddonTextEditor(control);
+
+        if (control.IsColor)
+            return BuildAddonColorEditor(control);
+
+        if (control.IsNativeFallback)
+        {
+            return new InfoBar
+            {
+                IsOpen = true,
+                IsClosable = false,
+                Severity = InfoBarSeverity.Warning,
+                Title = control.Label,
+                Message = string.IsNullOrWhiteSpace(control.Value) ? "This element requires the native add-on overlay." : control.Value
+            };
+        }
+
+        if (control.IsMenuItem)
+        {
+            var button = new Button
+            {
+                Content = control.BoolValue ? "[x] " + control.Label : control.Label,
+                Tag = control,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            ApplyAddonAutomation(button, control);
+            AutomationProperties.SetAutomationId(button, "AddonMenuItem_" + MakeAutomationId(control.Id));
+            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, control.BoolValue ? "false" : "true"));
+            return button;
+        }
+
+        if (control.IsButton)
+        {
+            var button = new Button
+            {
+                Content = control.Label,
+                Tag = control,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            ApplyAddonAutomation(button, control);
+            AutomationProperties.SetAutomationId(button, "AddonButton_" + MakeAutomationId(control.Id));
+            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)button.Tag, "click"));
+            return button;
+        }
+
+        if (control.IsCheckbox)
+        {
+            var checkBox = new CheckBox
+            {
+                Content = control.Label,
+                IsChecked = control.BoolValue,
+                Tag = control
+            };
+            ApplyAddonAutomation(checkBox, control);
+            AutomationProperties.SetAutomationId(checkBox, "AddonCheckbox_" + MakeAutomationId(control.Id));
+            checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)checkBox.Tag, "true"));
+            checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)checkBox.Tag, "false"));
+            return checkBox;
+        }
+
+        if (control.IsCombo && control.Items.Count != 0)
+        {
+            return BuildAddonComboEditor(control);
+        }
+
+        if (control.IsNumeric || control.IsCombo)
+        {
+            return BuildAddonNumericEditor(control);
+        }
+
+        return new TextBlock
+        {
+            Text = control.Label,
+            TextWrapping = TextWrapping.Wrap
+        };
+    }
+
+    private FrameworkElement BuildAddonTextEditor(AddonImGuiControlViewModel control)
+    {
+        var textBox = new TextBox
+        {
+            Header = control.Label,
+            Text = control.Value,
+            PlaceholderText = control.Minimum,
+            AcceptsReturn = control.IsMultilineTextInput,
+            TextWrapping = control.IsMultilineTextInput ? TextWrapping.Wrap : TextWrapping.NoWrap,
+            MinHeight = control.IsMultilineTextInput ? 96 : 0,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Tag = control
+        };
+        ApplyAddonAutomation(textBox, control);
+        AutomationProperties.SetAutomationId(textBox, "AddonText_" + MakeAutomationId(control.Id));
+        textBox.TextChanged += (_, _) =>
+        {
+            if (!_updatingAddonControlValues)
+                QueueAddonControlUpdate(control, textBox.Text);
+        };
+        RegisterAddonControlValueUpdater(control.Id, updated =>
+        {
+            if (textBox.FocusState == FocusState.Unfocused)
+                textBox.Text = updated.Value;
+        });
+        return textBox;
+    }
+
+    private FrameworkElement BuildAddonColorEditor(AddonImGuiControlViewModel control)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock
+        {
+            Text = control.Label,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var values = control.NumericValues;
+        byte ToByte(int component, double fallback) => (byte)Math.Clamp(Math.Round((component < values.Count ? values[component] : fallback) * 255.0), 0.0, 255.0);
+        var picker = new ColorPicker
+        {
+            Color = Microsoft.UI.ColorHelper.FromArgb(ToByte(3, 1.0), ToByte(0, 0.0), ToByte(1, 0.0), ToByte(2, 0.0)),
+            IsAlphaEnabled = control.Components >= 4,
+            IsAlphaSliderVisible = control.Components >= 4,
+            IsAlphaTextInputVisible = control.Components >= 4,
+            IsMoreButtonVisible = true,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Tag = control
+        };
+        ApplyAddonAutomation(picker, control);
+        AutomationProperties.SetAutomationId(picker, "AddonColor_" + MakeAutomationId(control.Id));
+        picker.ColorChanged += (_, args) =>
+        {
+            var color = args.NewColor;
+            var value = string.Create(CultureInfo.InvariantCulture, $"{color.R / 255.0:0.######}, {color.G / 255.0:0.######}, {color.B / 255.0:0.######}");
+            if (control.Components >= 4)
+                value += string.Create(CultureInfo.InvariantCulture, $", {color.A / 255.0:0.######}");
+            QueueAddonControlUpdate(control, value);
+        };
+        panel.Children.Add(picker);
+        return panel;
+    }
+
+    private FrameworkElement BuildAddonComboEditor(AddonImGuiControlViewModel control)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+
+        var combo = new ComboBox
+        {
+            Tag = control,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        ApplyAddonAutomation(combo, control);
+        AutomationProperties.SetAutomationId(combo, "AddonCombo_" + MakeAutomationId(control.Id));
+        foreach (var item in control.Items)
+            combo.Items.Add(item);
+        combo.SelectedIndex = Math.Clamp((int)Math.Round(control.NumericValue), 0, Math.Max(0, combo.Items.Count - 1));
+        combo.SelectionChanged += async (_, _) =>
+        {
+            if (combo.SelectedIndex >= 0)
+                await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)combo.Tag, combo.SelectedIndex.ToString(CultureInfo.InvariantCulture)));
+        };
+        panel.Children.Add(combo);
+        return panel;
+    }
+
+    private FrameworkElement BuildAddonNumericEditor(AddonImGuiControlViewModel control)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(control.IsCombo
+            ? new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap }
+            : CreateMappedSliderLabel(control.Label, _addonLogIndicators));
+
+        var componentCount = Math.Max(1, control.Components);
+        var numericValues = control.NumericValues.ToList();
+        while (numericValues.Count < componentCount)
+            numericValues.Add(numericValues.Count == 0 ? 0.0 : numericValues[^1]);
+
+        var hasMinimum = TryParseFirstNumber(control.Minimum, out var minimum);
+        var hasMaximum = TryParseFirstNumber(control.Maximum, out var maximum);
+        var hasExplicitRange = hasMinimum && hasMaximum && maximum > minimum;
+        var isInteger = control.Kind.Contains("int", StringComparison.OrdinalIgnoreCase);
+        var editors = new List<(MappedSlider? Slider, TextBox TextBox)>();
+
+        string FormatValue(double value) => isInteger
+            ? Math.Round(value).ToString(CultureInfo.InvariantCulture)
+            : value.ToString("0.######", CultureInfo.InvariantCulture);
+
+        string BuildValue()
+        {
+            return string.Join(", ", editors.Select(editor =>
+                TryParseFirstNumber(editor.TextBox.Text, out var value) ? FormatValue(value) : FormatValue(0.0)));
+        }
+
+        async Task CommitValueAsync()
+        {
+            foreach (var editor in editors)
+            {
+                if (editor.Slider is null || !TryParseFirstNumber(editor.TextBox.Text, out var value))
+                    continue;
+
+                editor.Slider.SetMappedValue(value, false);
+                editor.TextBox.Text = FormatValue(editor.Slider.MappedValue);
+            }
+            await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, BuildValue()));
+        }
+
+        for (var component = 0; component < componentCount; ++component)
+        {
+            var componentIndex = component;
+            var componentValue = numericValues[component];
+            var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
+
+            var textBox = new TextBox
+            {
+                Text = FormatValue(componentValue),
+                Tag = control,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            ApplyAddonAutomation(textBox, control);
+            AutomationProperties.SetAutomationId(textBox, "AddonNumber_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
+
+            MappedSlider? slider = null;
+            if (!control.IsCombo)
+            {
+                var dynamicSpan = Math.Max(isInteger ? 1.0 : 1.0, Math.Abs(componentValue) * 2.0);
+                var componentMinimum = hasExplicitRange ? minimum : componentValue - dynamicSpan;
+                var componentMaximum = hasExplicitRange ? maximum : componentValue + dynamicSpan;
+                slider = new MappedSlider
+                {
+                    Tag = control,
+                    MinWidth = 80,
+                    HorizontalAlignment = HorizontalAlignment.Stretch
+                };
+                slider.ConfigureRange(componentMinimum, componentMaximum, componentValue, isInteger ? 1.0 : 0.001);
+                slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
+                slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
+                _addonMappedSliders.Add(slider);
+                AutomationProperties.SetAutomationId(slider, "AddonSlider_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
+                slider.MappedValueChanged += (_, args) =>
+                {
+                    if (_updatingAddonControlValues)
+                        return;
+
+                    textBox.Text = FormatValue(args.Value);
+                    QueueAddonControlUpdate(control, BuildValue());
+                };
+                row.Children.Add(slider);
+            }
+            else
+            {
+                row.Children.Add(new TextBlock
+                {
+                    Text = control.Kind,
+                    Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            textBox.KeyDown += async (_, args) =>
+            {
+                if (args.Key == Windows.System.VirtualKey.Enter)
+                    await CommitValueAsync();
+            };
+            textBox.LostFocus += async (_, _) => await CommitValueAsync();
+
+            Grid.SetColumn(textBox, 1);
+            row.Children.Add(textBox);
+            panel.Children.Add(row);
+            editors.Add((slider, textBox));
+        }
+
+        RegisterAddonControlValueUpdater(control.Id, updated =>
+        {
+            var updatedValues = updated.NumericValues;
+            for (var component = 0; component < editors.Count; ++component)
+            {
+                var editor = editors[component];
+                var updatedValue = component < updatedValues.Count
+                    ? updatedValues[component]
+                    : component == 0 ? updated.NumericValue : 0.0;
+
+                if (editor.TextBox.FocusState == FocusState.Unfocused)
+                    editor.TextBox.Text = FormatValue(updatedValue);
+
+                if (editor.Slider == null || editor.Slider.IsDragging)
+                    continue;
+
+                if (!hasExplicitRange && (updatedValue < editor.Slider.MappedMinimum || updatedValue > editor.Slider.MappedMaximum))
+                {
+                    var dynamicSpan = Math.Max(1.0, Math.Abs(updatedValue) * 2.0);
+                    editor.Slider.ConfigureRange(updatedValue - dynamicSpan, updatedValue + dynamicSpan, updatedValue, isInteger ? 1.0 : 0.001);
+                }
+                else
+                {
+                    editor.Slider.SetMappedValue(updatedValue, false);
+                }
+            }
+        });
+
+        return panel;
+    }
+
+    private void RegisterAddonControlValueUpdater(string id, Action<AddonImGuiControlViewModel> updater)
+    {
+        _addonControlValueUpdaters[id] = updater;
+    }
+
+    private void UpdateAddonControlValues()
+    {
+        _updatingAddonControlValues = true;
+        try
+        {
+            foreach (var control in ViewModel.AddonImGuiControls)
+            {
+                if (_addonControlValueUpdaters.TryGetValue(control.Id, out var updater))
+                    updater(control);
+            }
+        }
+        finally
+        {
+            _updatingAddonControlValues = false;
+        }
+    }
+
+    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value) => ViewModel.QueueAddonEdit(control, value);
+
+    private static void ApplyAddonAutomation(FrameworkElement element, AddonImGuiControlViewModel control)
+    {
+        AutomationProperties.SetAutomationId(element, "AddonControl_" + MakeAutomationId(control.Id));
+        AutomationProperties.SetName(element, control.Label);
+    }
+
+    private static bool TryParseFirstNumber(string text, out double value)
+    {
+        foreach (var token in text.Split(new[] { ',', ';', ' ', '\t', '(', ')' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                return true;
+        }
+
+        value = 0.0;
+        return false;
+    }
+
+    private static string MakeAutomationId(string value)
+    {
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var ch in value)
+            builder.Append(char.IsLetterOrDigit(ch) ? ch : '_');
+        return builder.ToString();
+    }
+
+    private FrameworkElement CreateEffectHeader(EffectControlViewModel effect)
+    {
+        var headerGrid = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition());
+
+        var gripIcon = new TextBlock
+        {
+            Text = "\uE700",
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            FontSize = 13,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var grip = new Button
+        {
+            Width = 28,
+            Height = 28,
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(4),
+            Content = gripIcon,
+            Tag = effect.Name,
+            CanDrag = true
+        };
+        grip.DragStarting += OnEffectDragStarting;
+        AutomationProperties.SetName(grip, "Move " + effect.Name);
+        AutomationProperties.SetAutomationId(grip, "MoveEffect_" + MakeAutomationId(effect.Name));
+        ToolTipService.SetToolTip(grip, "Drag to reorder, or open move commands");
+        var menu = new MenuFlyout();
+        foreach (var direction in new[] { -1, 1 })
+        {
+            var item = new MenuFlyoutItem { Text = direction < 0 ? "Move up" : "Move down" };
+            item.Click += async (_, _) =>
+            {
+                var names = ViewModel.Effects.Select(x => x.Name).ToArray();
+                var index = Array.IndexOf(names, effect.Name); var target = index + direction;
+                if (index < 0 || target < 0 || target >= names.Length) return;
+                var order = ViewModel.MoveEffect(effect.Name, names[target], direction > 0);
+                await RunUiCommandAsync(() => ViewModel.ReorderEnabledEffectsAsync(order));
+            };
+            menu.Items.Add(item);
+        }
+        grip.Flyout = menu;
+        headerGrid.Children.Add(grip);
+
+        var title = new TextBlock
+        {
+            Text = effect.Name,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        Grid.SetColumn(title, 1);
+        headerGrid.Children.Add(title);
+
+        return headerGrid;
+    }
+
+    private void OnEffectDragStarting(UIElement sender, DragStartingEventArgs args)
+    {
+        if (sender is not FrameworkElement { Tag: string effectName })
+            return;
+
+        _draggedEffectName = effectName;
+        args.Data.RequestedOperation = DataPackageOperation.Move;
+        args.Data.SetText(effectName);
+    }
+
+    private void OnEffectDragOver(object sender, DragEventArgs args)
+    {
+        if (!string.IsNullOrEmpty(_draggedEffectName))
+            args.AcceptedOperation = DataPackageOperation.Move;
+        args.Handled = true;
+    }
+
+    private async void OnEffectDrop(object sender, DragEventArgs args)
+    {
+        args.Handled = true;
+        if (sender is not FrameworkElement { Tag: string targetEffectName } target ||
+            string.IsNullOrEmpty(_draggedEffectName) ||
+            string.Equals(_draggedEffectName, targetEffectName, StringComparison.OrdinalIgnoreCase))
+        {
+            _draggedEffectName = null;
+            return;
+        }
+
+        var draggedEffectName = _draggedEffectName;
+        _draggedEffectName = null;
+        var insertAfter = args.GetPosition(target).Y > target.ActualHeight * 0.5;
+
+        var orderedEffectNames = ViewModel.MoveEffect(draggedEffectName, targetEffectName, insertAfter);
+        BuildControls();
+        await RunUiCommandAsync(() => ViewModel.ReorderEnabledEffectsAsync(orderedEffectNames));
+    }
+
+    private void UpdateControlsPanelWidth()
+    {
+        var width = Math.Max(0.0, EffectsList.ActualWidth - 24.0);
+        if (width > 0.0)
+            ControlsPanel.Width = width;
+    }
+
+    private Expander CreateSectionExpander(object header, bool isExpanded, UIElement content, Thickness? contentMargin = null)
+    {
+        UIElement expanderContent = content;
+        if (contentMargin.HasValue)
+        {
+            var margin = contentMargin.Value;
+            var contentGrid = new Grid
+            {
+                Margin = margin,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            contentGrid.Loaded += (_, _) => UpdateCompensatedContentWidth(contentGrid, margin);
+            contentGrid.SizeChanged += (_, _) => UpdateCompensatedContentWidth(contentGrid, margin);
+            contentGrid.Children.Add(content);
+            expanderContent = contentGrid;
+        }
+
+        return new Expander
+        {
+            Header = header,
+            IsExpanded = isExpanded,
+            Content = expanderContent,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+    }
+
+    private static void UpdateCompensatedContentWidth(FrameworkElement element, Thickness margin)
+    {
+        if (element.Parent is not FrameworkElement parent || parent.ActualWidth <= 0.0)
+            return;
+
+        const double rightPadding = 48.0;
+        var leftCompensation = Math.Max(0.0, -margin.Left);
+        var width = parent.ActualWidth + leftCompensation - rightPadding;
+        if (width > 0.0)
+            element.Width = width;
+    }
+
+    private FrameworkElement CreateAddonNestedSectionExpander(AddonImGuiControlViewModel control, UIElement content, string automationPrefix)
+    {
+        var expander = new Expander { Header = control.Label, IsExpanded = control.IsOpen, Content = content,
+            HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        ApplyAddonAutomation(expander, control);
+        AutomationProperties.SetAutomationId(expander, automationPrefix + MakeAutomationId(control.Id));
+        expander.Expanding += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, "true"));
+        expander.Collapsed += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, "false"));
+        return expander;
+    }
+    private static FrameworkElement CreateNestedSectionExpander(object header, bool isExpanded, UIElement content) =>
+        new Expander { Header = header, IsExpanded = isExpanded, Content = content,
+            HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+
+    private FrameworkElement BuildEffectPanel(EffectControlViewModel effect)
+    {
+        var panel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+
+        if (effect.PreprocessorDefinitions.Count != 0)
+        {
+            var definitionsPanel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            foreach (var definition in effect.PreprocessorDefinitions)
+                definitionsPanel.Children.Add(BuildPreprocessorEditor(definition));
+
+            panel.Children.Add(CreateNestedSectionExpander("Preprocessor Definitions", false, definitionsPanel));
+        }
+
+        foreach (var group in effect.Uniforms.GroupBy(static uniform => uniform.Category))
+        {
+            var groupPanel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            foreach (var uniform in group)
+                groupPanel.Children.Add(BuildUniformEditor(uniform));
+
+            panel.Children.Add(CreateNestedSectionExpander(group.Key, true, groupPanel));
+        }
+
+        return panel;
+    }
+
+    private FrameworkElement BuildPreprocessorEditor(PreprocessorDefinitionViewModel definition)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock { Text = definition.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var textBox = new TextBox { Text = definition.Value, MinWidth = 120, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var button = new Button { Content = "Apply", Tag = definition };
+        AutomationProperties.SetName(textBox, "Preprocessor definition " + definition.Name);
+        AutomationProperties.SetAutomationId(textBox, "Definition_" + MakeAutomationId(definition.EffectName + "_" + definition.Name));
+        AutomationProperties.SetName(button, "Apply definition " + definition.Name);
+        button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetPreprocessorDefinitionAsync((PreprocessorDefinitionViewModel)button.Tag, textBox.Text));
+        row.Children.Add(textBox);
+        Grid.SetColumn(button, 1);
+        row.Children.Add(button);
+        panel.Children.Add(row);
+        if (!string.IsNullOrEmpty(definition.DefaultValue))
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Default: " + definition.DefaultValue,
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+        return panel;
+    }
+
+    private FrameworkElement CreateMappedSliderLabel(string text, ICollection<FrameworkElement> indicatorCollection)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var indicator = new TextBlock
+        {
+            Text = "L",
+            FontSize = 12,
+            FontWeight = Microsoft.UI.Text.FontWeights.Bold,
+            Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+            Visibility = ViewModel.Settings.SliderSymLog ? Visibility.Visible : Visibility.Collapsed,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        ToolTipService.SetToolTip(indicator, "Symmetric logarithmic scale");
+        AutomationProperties.SetName(indicator, "Symmetric logarithmic scale enabled");
+        indicatorCollection.Add(indicator);
+
+        var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch };
+        header.ColumnDefinitions.Add(new ColumnDefinition());
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(label);
+        Grid.SetColumn(indicator, 1);
+        header.Children.Add(indicator);
+        return header;
+    }
+
+    private FrameworkElement BuildUniformEditor(UniformViewModel uniform)
+    {
+        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
+        var hasNumericSlider = !hasChoiceEditor && uniform.Type != "bool";
+        panel.Children.Add(hasNumericSlider
+            ? CreateMappedSliderLabel(uniform.Label, _fxLogIndicators)
+            : new TextBlock { Text = uniform.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        if (uniform.IsReadOnly)
+        {
+            panel.Children.Add(new TextBlock { Text = "Shader-managed value — not stored in presets", TextWrapping = TextWrapping.Wrap });
+            panel.Children.Add(new TextBlock { Text = string.Join(", ", uniform.Values.Select(x => Convert.ToString(x, CultureInfo.InvariantCulture))), TextWrapping = TextWrapping.Wrap });
+            return panel;
+        }
+        var reset = new Button { Content = "Reset", HorizontalAlignment = HorizontalAlignment.Right };
+        AutomationProperties.SetAutomationId(reset, "Reset_" + MakeAutomationId(uniform.Id));
+        AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
+        ToolTipService.SetToolTip(reset, "Restore the shader default (can be undone)");
+        reset.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.ResetUniformAsync(uniform));
+        panel.Children.Add(reset);
+
+        if (hasChoiceEditor)
+        {
+            var combo = new ComboBox { MinWidth = 180, Tag = uniform, HorizontalAlignment = HorizontalAlignment.Stretch };
+            AutomationProperties.SetName(combo, uniform.Label);
+            AutomationProperties.SetAutomationId(combo, "UniformChoice_" + MakeAutomationId(uniform.Id));
+            foreach (var item in uniform.Items)
+                combo.Items.Add(item);
+            combo.SelectedIndex = Math.Clamp(ToInt(uniform.Values.FirstOrDefault()), 0, Math.Max(0, combo.Items.Count - 1));
+            combo.SelectionChanged += async (_, _) =>
+            {
+                if (combo.SelectedIndex >= 0)
+                    await RunUiCommandAsync(() => ViewModel.SetUniformAsync((UniformViewModel)combo.Tag, combo.SelectedIndex));
+            };
+            panel.Children.Add(combo);
+            return panel;
+        }
+
+        if (uniform.Type == "bool")
+        {
+            var components = uniform.Values.Length == 0 ? new[] { false } : uniform.Values.Select(ToBool).ToArray();
+            for (var index = 0; index < components.Length; index++)
+            {
+                var component = index;
+                var checkBox = new CheckBox { Content = components.Length == 1 ? uniform.EffectName : "Component " + (index + 1), IsChecked = components[index] };
+                AutomationProperties.SetAutomationId(checkBox, "UniformBool_" + MakeAutomationId(uniform.Id) + "_" + index);
+                AutomationProperties.SetName(checkBox, uniform.Label + (components.Length == 1 ? "" : " component " + (index + 1)));
+                async void Changed(object sender, RoutedEventArgs e)
+                {
+                    components[component] = checkBox.IsChecked == true;
+                    await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, components.Length == 1 ? components[0] : components.ToArray()));
+                }
+                checkBox.Checked += Changed; checkBox.Unchecked += Changed;
+                panel.Children.Add(checkBox);
+            }
+            return panel;
+        }
+
+        var numericValues = uniform.Values.Length == 0 ? new[] { 0.0 } : uniform.Values.Select(ToDouble).ToArray();
+        var textBoxes = new List<TextBox>();
+        var sliders = new List<MappedSlider>();
+        var editorEpoch = _controlEpoch;
+        var textDirty = false;
+        var textRevision = 0;
+        var updatingText = false;
+        async Task CommitTextAsync()
+        {
+            if (!textDirty || editorEpoch != _controlEpoch) return;
+            var revision = textRevision;
+            if (!TryBuildNumericValue(textBoxes, out var value)) { await ViewModel.RejectUniformEditAsync(uniform); return; }
+            await ViewModel.SetUniformAsync(uniform, value);
+            if (revision == textRevision) { textDirty = false; ApplyTextValuesToSliders(textBoxes, sliders); }
+        }
+        _uniformTextCommits.Add((panel, CommitTextAsync));
+        for (var i = 0; i < numericValues.Length; ++i)
+        {
+            var componentIndex = i;
+            var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(82) });
+
+            var isSlider = string.Equals(uniform.UiType, "slider", StringComparison.OrdinalIgnoreCase);
+            var minimum = uniform.Minimum ?? (isSlider ? 0.0 : numericValues[i] - Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0));
+            var maximum = uniform.Maximum ?? (isSlider ? 1.0 : numericValues[i] + Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0));
+            if (Math.Abs(maximum - minimum) < 0.000001)
+                maximum = minimum + 1.0;
+
+            var step = uniform.Step ?? (uniform.Type == "float" ? 0.001 : 1.0);
+            var slider = new MappedSlider
+            {
+                Tag = uniform,
+                MinWidth = 40,
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            AutomationProperties.SetName(slider, uniform.Label + " component " + (i + 1));
+            AutomationProperties.SetAutomationId(slider, "UniformSlider_" + MakeAutomationId(uniform.Id) + "_" + i);
+            slider.ConfigureRange(minimum, maximum, numericValues[i], step);
+            slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
+            slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
+            _fxMappedSliders.Add(slider);
+            slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
+            slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            var textBox = new TextBox { Text = numericValues[i].ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
+            AutomationProperties.SetName(textBox, uniform.Label + " component " + (i + 1));
+            AutomationProperties.SetAutomationId(textBox, "UniformNumber_" + MakeAutomationId(uniform.Id) + "_" + i);
+            textBox.TextChanged += (_, _) => { if (!updatingText) { textDirty = true; textRevision++; } };
+            textBoxes.Add(textBox);
+            sliders.Add(slider);
+            slider.MappedValueChanged += (_, args) =>
+            {
+                updatingText = true;
+                textBox.Text = args.Value.ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture);
+                updatingText = false;
+                QueueUniformUpdate(uniform, BuildNumericValue(textBoxes, componentIndex, args.Value));
+            };
+            textBox.KeyDown += async (_, args) =>
+            {
+                if (args.Key == Windows.System.VirtualKey.Enter)
+                {
+                    args.Handled = true;
+                    await RunUiCommandAsync(CommitTextAsync);
+                }
+            };
+            textBox.LostFocus += async (_, _) =>
+            {
+                await RunUiCommandAsync(CommitTextAsync);
+            };
+
+            row.Children.Add(slider);
+            Grid.SetColumn(textBox, 1);
+            row.Children.Add(textBox);
+            panel.Children.Add(row);
+        }
+
+        return panel;
+    }
+
+    private static void ApplyTextValuesToSliders(IReadOnlyList<TextBox> boxes, IReadOnlyList<MappedSlider> sliders)
+    {
+        for (var i = 0; i < boxes.Count && i < sliders.Count; ++i)
+        {
+            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                continue;
+
+            sliders[i].SetMappedValue(value, false);
+        }
+    }
+
+    private void QueueUniformUpdate(UniformViewModel uniform, object value) => ViewModel.QueueUniformEdit(uniform, value);
+    private void FlushVisibleEdits()
+    {
+        FlushAddonOverlayMouseMove();
+        _uniformTextCommits.RemoveAll(x => x.Owner.XamlRoot == null);
+        foreach (var entry in _uniformTextCommits.ToArray()) _ = RunUiCommandAsync(entry.Commit);
+    }
+
+    private static object BuildNumericValue(IReadOnlyList<TextBox> boxes, int changedIndex, double changedValue)
+    {
+        var values = new double[boxes.Count];
+        for (var i = 0; i < values.Length; ++i)
+        {
+            if (i == changedIndex)
+                values[i] = changedValue;
+            else if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]))
+                values[i] = 0;
+        }
+
+        return values.Length == 1 ? values[0] : values;
+    }
+
+    private static bool TryBuildNumericValue(IReadOnlyList<TextBox> boxes, out object value)
+    {
+        var values = new double[boxes.Count];
+        for (var i = 0; i < values.Length; ++i)
+        {
+            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]) || !double.IsFinite(values[i]))
+            {
+                value = 0.0;
+                return false;
+            }
+        }
+
+        value = values.Length == 1 ? values[0] : values;
+        return true;
+    }
+
+    private static bool ToBool(object? value) => value is bool boolValue ? boolValue : ToDouble(value) != 0;
+    private static int ToInt(object? value) => (int)Math.Round(ToDouble(value));
+    private static double ToDouble(object? value)
+    {
+        return value switch
+        {
+            double doubleValue => doubleValue,
+            float floatValue => floatValue,
+            int intValue => intValue,
+            bool boolValue => boolValue ? 1.0 : 0.0,
+            string stringValue when double.TryParse(stringValue, out var parsed) => parsed,
+            _ => 0.0
+        };
+    }
+
+    private async Task<bool> RunUiCommandAsync(Func<Task> action)
+    {
+        try
+        {
+            await action();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ViewModel.ReportUiError(ex);
+            return false;
+        }
+    }
+}

@@ -613,3 +613,25 @@ debug symbols, import libraries, and any `.fx` / `.fxh` shader resources.
 This project is based on ReShade. ReShade is licensed under the terms of the
 [BSD 3-clause license](LICENSE.md). Some ReShade source files are dual-licensed
 under MIT where stated in their file headers.
+
+
+### Canvas and workspace
+
+The effects pane can be hidden from the command overflow and resized using its
+**Effects panel** menu (280–640 DIPs). Gallery opens on demand. At narrow widths,
+panes overlay the canvas instead of consuming its working area. Layout width,
+effects visibility and System/Light/Dark theme are application preferences.
+
+**Fit** follows the canvas size. **100%** means one rendered image pixel per
+physical display pixel, including at high DPI; a downsampled CPU preview explicitly
+shows its actual resolution and remains an approximation at 100%. **Original**
+compares the applied input in the live preview only; exports keep the effects.
+Wheel zoom and drag pan remain available. Use the command overflow's **Keyboard
+shortcuts** help for Ctrl+O/E/S, Ctrl+Z/Y, Ctrl+F, Ctrl+0/1 and Ctrl+B. Canvas arrow
+keys pan; text fields keep their own editing shortcuts. Effect move menus provide
+a keyboard alternative to drag reordering.
+
+Automated checks cover pixel geometry, real GPU/CPU comparison, output invariance
+and session state. Visual layout at 960×720 DIPs or larger, 100–200% desktop DPI,
+keyboard focus, screen readers, contrast themes and window interaction still need
+human acceptance; no computer-use automation is part of this refactor's tests.

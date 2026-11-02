@@ -58,6 +58,9 @@ public sealed class McpTools(McpBridge bridge)
     [McpServerTool(Name = "set_effects_enabled"), Description("Enable or disable all ReShade effects. This is an undoable preset edit that affects exported images.")]
     public Task<CallToolResult> SetEffectsEnabled(bool enabled, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("set_effects_state", new { enabled, transactionId }, cancellationToken);
 
+    [McpServerTool(Name = "set_preview_comparison"), Description("Show the original input in the live canvas, or return to processed preview. Transient display only: exports, preview captures and preset/history remain processed and unchanged. Resets after runtime rebuild.")]
+    public Task<CallToolResult> SetPreviewComparison(bool original, CancellationToken cancellationToken) => ExecuteToolAsync("set_preview_comparison", new { original }, cancellationToken);
+
     [McpServerTool(Name = "reorder_techniques"), Description("Set technique execution order using the complete ordered list of technique IDs returned by list_effects.")]
     public Task<CallToolResult> ReorderTechniques(string[] ids, CancellationToken cancellationToken, string? transactionId = null) => ExecuteToolAsync("reorder_techniques", new { ids, transactionId }, cancellationToken);
 

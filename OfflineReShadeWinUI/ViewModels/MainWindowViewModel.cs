@@ -55,7 +55,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private string _addonSearchPath = string.Empty;
     private string _addonLogPath = string.Empty;
     private bool _allAddonsLoaded = true;
-    private bool _isGalleryPanelOpen = true;
+    private bool _isGalleryPanelOpen;
     private GalleryItemViewModel? _selectedGalleryItem;
     private ulong _sharedPreviewHandle;
     private uint _sharedPreviewWidth;
@@ -419,6 +419,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             Settings.ShowFps = settings.Preferences.ShowFps;
             Settings.SliderDragSensitivity = settings.Preferences.SliderDragSensitivity;
             Settings.SliderSymLog = settings.Preferences.SliderSymLog;
+            Settings.EffectsPaneOpen = settings.Preferences.EffectsPaneOpen;
+            Settings.EffectsPaneWidth = settings.Preferences.EffectsPaneWidth;
+            Settings.Theme = settings.Preferences.Theme;
             Settings.KksPaths = settings.Preferences.KksPaths ?? new ProfilePaths();
             Settings.KkPaths = settings.Preferences.KkPaths ?? new ProfilePaths();
             if (string.Equals(settings.Editor.InputMode, "Gallery", StringComparison.OrdinalIgnoreCase))
@@ -628,6 +631,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void ResetPreviewPresentation()
     {
+        PreviewOriginal = false;
         _runtimeGeneration++;
         _automation.Activity.Disconnected();
         StopFpsPolling();
@@ -711,6 +715,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         async void Execute(object? _) {
             try {
                 var result = await _automation.ExecuteAsync(method, args, token);
+                if (method == "set_preview_comparison") PreviewOriginal = result.GetProperty("previewOriginal").GetBoolean();
                 if ((method is "cancel_operation" or "batch_cancel") && result.TryGetProperty("cancelling", out var cancelling) && cancelling.GetBoolean())
                 {
                     await ResetLocalEditsAsync();
@@ -1136,6 +1141,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task ApplyGraphicsStateAsync(JsonElement info)
     {
+        PreviewOriginal = info.TryGetProperty("previewOriginal", out var original) && original.GetBoolean();
         AdapterLuid = info.TryGetProperty("adapterLuid", out var luid) ? luid.GetUInt64() : 0;
         RenderWidth = info.GetProperty("width").GetUInt32(); RenderHeight = info.GetProperty("height").GetUInt32();
         OnPropertyChanged(nameof(ExportDimensionsText));

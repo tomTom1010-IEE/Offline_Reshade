@@ -1387,6 +1387,7 @@ namespace
         uint64_t adapter_luid = 0;
         std::string adapter_name, device_error, preview_error;
         bool cpu_preview = false;
+        bool preview_original = false; // Presentation only; never changes the runtime or captures.
         void mark_render_frame()
 		{
 			++frame_count;
@@ -2234,6 +2235,7 @@ namespace
 		{
 			return ",\"adapterLuid\":" + std::to_string(_stats->adapter_luid) + ",\"adapterName\":" + json_string(_stats->adapter_name) +
 				",\"recoveryRequired\":" + (_stats->device_error.empty() ? "false" : "true") + ",\"deviceError\":" + json_string(_stats->device_error) +
+				",\"previewOriginal\":" + (_stats->preview_original ? "true" : "false") +
 				",\"cpuPreview\":" + (_stats->cpu_preview ? "true" : "false") + ",\"previewError\":" + json_string(_stats->preview_error) + ",\"previewSynchronization\":\"keyed-mutex\"";
 		}
 
@@ -2260,6 +2262,12 @@ namespace
 					if (!json_get_bool(command.params, "cpu", enabled)) return make_error(command.id, "invalid_argument", "cpu is required.");
 					_stats->cpu_preview = enabled;
 					return make_response(command.id, "{\"cpuPreview\":" + std::string(enabled ? "true" : "false") + "}");
+				}
+				if (command.method == "set_preview_comparison") {
+					bool original = false;
+					if (!json_get_bool(command.params, "original", original)) return make_error(command.id, "invalid_argument", "original is required.");
+					_stats->preview_original = original;
+					return make_response(command.id, "{\"previewOriginal\":" + std::string(original ? "true" : "false") + "}");
 				}
 				if (command.method == "validate_export") {
                     const auto error = _validation();
@@ -3187,7 +3195,10 @@ int run_offline(int argc, wchar_t **argv)
 				if (opts.preview_shared && shared_preview.texture != nullptr) {
 					const HRESULT acquired = shared_preview.keyed_mutex->AcquireSync(0, 0);
 					if (acquired == S_OK) {
-						refreshed_shared_preview = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), shared_preview.texture.Get());
+						if (stats.preview_original) {
+							context->CopyResource(shared_preview.texture.Get(), color_texture.Get());
+							refreshed_shared_preview = true;
+						} else refreshed_shared_preview = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), shared_preview.texture.Get());
 						context->Flush();
 						if (FAILED(shared_preview.keyed_mutex->ReleaseSync(1))) {
 							refreshed_shared_preview = false;
@@ -3216,7 +3227,7 @@ int run_offline(int argc, wchar_t **argv)
 				std::vector<uint8_t> backbuffer = preview_reader.submit_and_try_read(context.Get(), swapchain.Get());
 				if (!backbuffer.empty())
 				{
-					preview_stream->publish(preview_width, preview_height, make_preview_frame_bgra(backbuffer, width, height, preview_width, preview_height));
+					preview_stream->publish(preview_width, preview_height, make_preview_frame_bgra(stats.preview_original ? color_image.pixels : backbuffer, width, height, preview_width, preview_height));
 					stats.mark_preview_frame();
 				}
 			}

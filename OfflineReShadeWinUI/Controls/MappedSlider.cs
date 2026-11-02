@@ -3,6 +3,9 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 using Windows.System;
 
 namespace OfflineReShade.WinUI.Controls;
@@ -52,9 +55,11 @@ public sealed class MappedSlider : UserControl
             Maximum = 1.0,
             Value = 0.0,
             IsHitTestVisible = false,
+            IsTabStop = false,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Center
         };
+        AutomationProperties.SetAccessibilityView(_visualSlider, AccessibilityView.Raw);
 
         var inputSurface = new Grid
         {
@@ -76,6 +81,7 @@ public sealed class MappedSlider : UserControl
     public double MappedMaximum => _mappedMaximum;
     public double MappedValue => _mappedValue;
     public bool IsDragging => _isDragging;
+    protected override AutomationPeer OnCreateAutomationPeer() => new MappedSliderAutomationPeer(this);
 
     public void ConfigureRange(double minimum, double maximum, double value, double step)
     {
@@ -107,8 +113,11 @@ public sealed class MappedSlider : UserControl
 
         var mapped = Quantize(Math.Clamp(value, _mappedMinimum, _mappedMaximum));
         var changed = Math.Abs(mapped - _mappedValue) > Math.Max(MinimumRange, Math.Abs(_mappedStep) * 0.000000001);
+        var previous = _mappedValue;
         _mappedValue = mapped;
         _visualSlider.Value = MappedToNormalized(mapped);
+
+        if (changed) FrameworkElementAutomationPeer.FromElement(this)?.RaisePropertyChangedEvent(RangeValuePatternIdentifiers.ValueProperty, previous, mapped);
 
         if (notify && changed)
             MappedValueChanged?.Invoke(this, new MappedSliderValueChangedEventArgs(mapped));
@@ -285,4 +294,23 @@ public sealed class MappedSlider : UserControl
     }
 
     private double LogThreshold => Math.Max(_mappedStep > 0.0 ? _mappedStep : 0.0, (_mappedMaximum - _mappedMinimum) * 0.001);
+
+    private sealed class MappedSliderAutomationPeer(MappedSlider slider) : FrameworkElementAutomationPeer(slider), IRangeValueProvider
+    {
+        protected override string GetClassNameCore() => nameof(MappedSlider);
+        protected override AutomationControlType GetAutomationControlTypeCore() => AutomationControlType.Slider;
+        protected override object GetPatternCore(PatternInterface pattern) => pattern == PatternInterface.RangeValue ? this : base.GetPatternCore(pattern);
+        public bool IsReadOnly => !slider.IsEnabled;
+        public double Minimum => slider.MappedMinimum;
+        public double Maximum => slider.MappedMaximum;
+        public double Value => slider.MappedValue;
+        public double SmallChange => slider._mappedStep > 0 ? slider._mappedStep : (Maximum - Minimum) / 100;
+        public double LargeChange => SmallChange * 10;
+        public void SetValue(double value)
+        {
+            if (IsReadOnly) throw new ElementNotEnabledException();
+            if (!double.IsFinite(value) || value < Minimum || value > Maximum) throw new ArgumentOutOfRangeException(nameof(value));
+            slider.SetMappedValue(value, true);
+        }
+    }
 }

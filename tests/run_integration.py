@@ -81,7 +81,8 @@ try:
     names={t['name'] for t in rpc('tools/list',{})['tools']}
     assert {'open_input','render_preview','export_image','start_batch','cancel_job','attach_session','get_diagnostics','get_operation_status','cancel_operation'}<=names,names
     diagnostics=data(tool('get_diagnostics'))
-    assert diagnostics['schemaVersion']==1 and diagnostics['expected']['protocolVersion']==6,diagnostics
+    expected_rpc=json.loads((package/'maintenance/baseline.json').read_text())['interfaces']['nativeRpc']
+    assert diagnostics['schemaVersion']==1 and diagnostics['expected']['protocolVersion']==expected_rpc,diagnostics
     def config(c,d,out): return dict(colorPath=str(c),depthPath=str(d),effectDir=str(effects),outputPath=str(out),presetPath=str(preset))
     tool('open_input',**config(c1,d1,work/'mcp-first.png'),unsavedChanges='discard')
     diagnostics=data(tool('get_diagnostics'))
