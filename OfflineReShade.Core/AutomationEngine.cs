@@ -17,26 +17,47 @@ public sealed class AutomationEngine
     private readonly Func<RenderInput, CancellationToken, Task> _open;
     private readonly Func<RenderInput> _current;
     private readonly Func<string, CancellationToken, Task>? _loadPreset;
+    private readonly Func<bool, CancellationToken, Task>? _setInputWatch;
     private readonly OperationCoordinator _operations = new();
+    private readonly InputArrivalMonitor _listener;
     private bool _restoreAfterBatch;
-    public bool IsBusy => _operations.IsBusy;
-    public bool IsExclusive => _operations.IsExclusive;
+    public PendingInput? WaitingInput => _listener.Pending;
+    public bool IsBusy => _operations.IsBusy || WaitingInput != null;
+    public bool IsExclusive => _operations.IsExclusive || WaitingInput != null;
+    public bool IsOperationExclusive => _operations.IsExclusive;
     public ApplicationActivity Activity => _operations.Activity;
     public BatchStatus? Job { get; private set; }
     public event Action? Changed;
     public AutomationEngine(Func<string, object?, CancellationToken, Task<JsonElement>> call, Func<RenderInput, CancellationToken, Task> open, Func<RenderInput> current,
-        Func<string, CancellationToken, Task>? loadPreset = null)
+        Func<string, CancellationToken, Task>? loadPreset = null, Func<bool, CancellationToken, Task>? setInputWatch = null)
     {
-        _call = async (m, a, t) => { var result = await call(m, a, t); if (m == "get_runtime_info") Activity.Observe(result, current()); return result; };
-        _open = open; _current = current; _loadPreset = loadPreset;
+        _call = async (m, a, t) => { var result = await call(m, a, t); if (m == "get_runtime_info") ObserveRuntime(result); return result; };
+        _open = open; _current = current; _loadPreset = loadPreset; _setInputWatch = setInputWatch;
+        _listener = new InputArrivalMonitor((input, token) => _operations.RunAsync(Activity.Create("open_input", Json(input), _current()),
+            ct => ExecuteMutationAsync("open_input", Json(input), ct), token), ObserveRuntime, () => _operations.IsBusy);
+        _listener.Changed += () => { if (WaitingInput is { } waiting) Activity.WaitForInput(waiting.Input.ColorPath, waiting.Error); else Activity.ClearWaiting(); Changed?.Invoke(); };
         _operations.Changed += () => Changed?.Invoke();
         Activity.Changed += () => Changed?.Invoke();
+    }
+    public void ObserveRuntime(JsonElement info)
+    {
+        var input = _current();
+        Activity.Observe(info, input);
+        if (WaitingInput != null) return;
+        if (input.WatchInput && (!File.Exists(input.ColorPath) || (input.DepthPath.Length > 0 && !File.Exists(input.DepthPath))))
+            Activity.WaitForInput(input.ColorPath);
+        else Activity.ClearWaiting();
     }
 
     public async Task<JsonElement> ExecuteAsync(string method, JsonElement args, CancellationToken token = default)
     {
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
-        if (method == "get_operation_status") return Json(Activity.Snapshot);
+        if (method == "get_operation_status") {
+            var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();
+            node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
+            node["appliedInput"] = JsonSerializer.SerializeToNode(Activity.Snapshot.Runtime.Connected ? _current() : null, JsonOptions);
+            return Json(node);
+        }
         if (method == "batch_status") return Json(Job ?? new BatchStatus("", "idle", 0, 0, null, null));
         if (method is "batch_cancel" or "cancel_operation") {
             var cancelling = method == "cancel_operation" ? IsBusy : Job?.State == "running";
@@ -48,11 +69,20 @@ public sealed class AutomationEngine
                 var info = await _call(method, args, token);
                 var node = JsonNode.Parse(info.GetRawText())!.AsObject(); node["busy"] = IsBusy;
                 node["activity"] = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions);
+                node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
+                node["appliedInput"] = JsonSerializer.SerializeToNode(_current(), JsonOptions);
                 return JsonSerializer.SerializeToElement(node);
-            } catch (IOException) { if (!IsBusy) Activity.Disconnected(); return Json(new { busy = IsBusy, connected = false, reconnecting = IsBusy, loading = IsBusy, width = 0, height = 0, activity = Activity.Snapshot }); }
+            } catch (IOException) { if (!_operations.IsBusy) Activity.Disconnected(); return Json(new { busy = IsBusy, connected = false, reconnecting = _operations.IsBusy,
+                loading = _operations.IsBusy, width = 0, height = 0, activity = Activity.Snapshot, waitingInput = WaitingInput }); }
         }
         if (method is "list_state" or "list_addons" or "list_addon_imgui_capture") return await _call(method, args, token);
+        if (method is "open_input" or "listen_input" or "stop_listening") { token.ThrowIfCancellationRequested(); await _listener.StopAsync(); }
         var operation = Activity.Create(method, args, _current());
+        if (WaitingInput != null)
+        {
+            var error = new InvalidOperationException("Waiting for the requested game input. Stop listening or wait for a valid pair before editing or exporting.");
+            Activity.Fail(operation, error, rejected: true); throw error;
+        }
         if (method == "batch_start")
         {
             // Admission returns a job promptly; its operation remains active through restore.
@@ -91,6 +121,21 @@ public sealed class AutomationEngine
 
     private async Task<JsonElement> ExecuteMutationAsync(string method, JsonElement args, CancellationToken token)
     {
+        if (method == "listen_input")
+        {
+            var input = NormalizeInput(args.Deserialize<RenderInput>(JsonOptions)!, requireFiles: false) with { WatchInput = true };
+            if (!Directory.Exists(input.EffectDir)) throw new DirectoryNotFoundException("Select an existing effects directory before listening.");
+            if (input.PresetPath.Length > 0 && !File.Exists(input.PresetPath)) throw new FileNotFoundException("Preset not found.", input.PresetPath);
+            _listener.Start(input);
+            return Json(new { listening = true, waiting = true, input });
+        }
+        if (method == "stop_listening")
+        {
+            if (_setInputWatch != null) await _setInputWatch(false, token);
+            else if (Activity.Snapshot.Runtime.Connected) await _call("set_input_watch_enabled", new { enabled = false }, token);
+            Activity.ClearWaiting();
+            return Json(new { listening = false });
+        }
         if (method == "open_input") {
             var input = ValidateInput(args.Deserialize<RenderInput>(JsonOptions)!);
             if (string.IsNullOrEmpty(input.PresetPath) && !string.IsNullOrEmpty(_current().PresetPath)) input = input with { PresetPath = _current().PresetPath };
@@ -216,11 +261,13 @@ public sealed class AutomationEngine
             Changed?.Invoke();
         }
     }
-    public Task StopAsync() => _operations.StopAsync();
-    public Task StopSessionAsync(Func<Task> stop)
+    public async Task StopAsync() { _listener.Cancel(); await _operations.StopAsync(); await _listener.StopAsync(); }
+    public async Task StopSessionAsync(Func<Task> stop)
     {
         _restoreAfterBatch = false;
-        return _operations.StopAsync(async () => {
+        _listener.Cancel();
+        await _operations.StopAsync(async () => {
+            await _listener.StopAsync();
             var request = Activity.Create("stop_session", Json(new { }), _current());
             Activity.Begin(request);
             try { await stop(); Activity.Disconnected(); Activity.Finish(request, "succeeded", "ok", "Renderer stopped."); }
@@ -234,14 +281,21 @@ public sealed class AutomationEngine
             throw new InvalidOperationException("The input changed after this operation failed. Start a new operation for the current image.");
         return ExecuteAsync(request.Method, request.Arguments, token);
     }
-    public void Cancel(bool restore = true) { if (!restore) _restoreAfterBatch = false; _operations.Cancel(); }
-    public static RenderInput ValidateInput(RenderInput input)
+    public void Cancel(bool restore = true)
+    {
+        if (!restore) _restoreAfterBatch = false;
+        var pending = WaitingInput;
+        if (pending != null && !_operations.IsBusy) Activity.Finish(Activity.Create("listen_input", Json(pending.Input), _current()), "cancelled", "cancelled", "Stopped waiting for game output.");
+        _listener.Cancel(); _operations.Cancel();
+    }
+    public static RenderInput ValidateInput(RenderInput input) => NormalizeInput(input, requireFiles: true);
+    private static RenderInput NormalizeInput(RenderInput input, bool requireFiles)
     {
         ArgumentNullException.ThrowIfNull(input);
         var color = Path.GetFullPath(input.ColorPath);
-        if (!File.Exists(color)) throw new FileNotFoundException("Color input not found.", color);
+        if (requireFiles && !File.Exists(color)) throw new FileNotFoundException("Color input not found.", color);
         var depth = string.IsNullOrWhiteSpace(input.DepthPath) ? "" : Path.GetFullPath(input.DepthPath);
-        if (depth.Length > 0 && !File.Exists(depth)) throw new FileNotFoundException("Depth input not found.", depth);
+        if (requireFiles && depth.Length > 0 && !File.Exists(depth)) throw new FileNotFoundException("Depth input not found.", depth);
         if (input.Width is < 0 or > 16384 || input.Height is < 0 or > 16384 || ((input.Width == 0) != (input.Height == 0))) throw new ArgumentException("Width and height must both be zero (source size) or both 1–16384.");
         if ((long)input.Width * input.Height > PreviewGeometry.MaxRenderPixels) throw new ArgumentException("Output exceeds the 64 megapixel resource limit. Reduce output dimensions.");
         if (input.DepthFormat is not ("raw" or "rgba") || input.DepthProfile is not ("kk" or "kks") || input.DepthDownsample is not ("max2x2" or "box")) throw new ArgumentException("Invalid depth format, profile or downsampling mode.");

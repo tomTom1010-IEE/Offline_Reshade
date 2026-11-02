@@ -13,8 +13,8 @@ public sealed class AppPaths
         if (File.Exists(packagedPrototypePath))
         {
             PrototypePath = packagedPrototypePath;
-            DefaultEffectDir = "Effects";
-            TryCreateDirectory(Path.Combine(AppDirectory, DefaultEffectDir));
+            DefaultEffectDir = Path.Combine(AppDirectory, "Effects");
+            TryCreateDirectory(DefaultEffectDir);
         }
         else
         {

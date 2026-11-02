@@ -24,15 +24,18 @@ public sealed class ApplicationActivity
     private readonly object _gate = new();
     private long _sequence;
     private RuntimeObservation _runtime = new();
+    private string? _waitingPath, _waitingError;
     private OperationOutcome? _active, _last, _notice;
     public event Action? Changed;
-    public ActivitySnapshot Snapshot { get { lock (_gate) return new(_runtime, _active, _last, _notice); } }
+    public ActivitySnapshot Snapshot { get { lock (_gate) return new(_waitingPath == null ? _runtime : _runtime with {
+        WaitingForInput = true, HasFrame = false, InputPath = _waitingPath, Error = _waitingError }, _active, _last, _notice); } }
     public OperationRequest? RetryRequest { get; private set; }
     public static bool CanRetry(string method) => method is "open_input" or "set_preset" or "reload_effects" or "export_image" or "save_preset" or "export_preset";
-    public static bool IsExclusive(string method) => CanRetry(method) || method is "render_preview" or "batch_start" or "stop_session" or "set_preprocessor_definition";
+    public static bool IsExclusive(string method) => CanRetry(method) || method is "listen_input" or "stop_listening" or "render_preview" or "batch_start" or "stop_session" or "set_preprocessor_definition";
     public static string Label(string method) => method switch
     {
         "open_input" => "Opening input", "set_preset" => "Loading preset", "reload_effects" => "Reloading effects",
+        "listen_input" => "Starting input listener", "stop_listening" => "Stopping input listener",
         "export_image" => "Exporting image", "render_preview" => "Rendering preview", "batch_start" => "Exporting batch",
         "save_preset" or "export_preset" => "Saving preset", "stop_session" or "close_session" => "Stopping renderer",
         "save_settings" => "Saving settings", "load_settings" => "Loading settings", "preview_transport" => "Displaying preview",
@@ -88,11 +91,12 @@ public sealed class ApplicationActivity
         lock (_gate) _runtime = new(InputPath: _runtime.InputPath);
         Changed?.Invoke();
     }
-    public void WaitForInput(string path)
+    public void WaitForInput(string path, string? error = null)
     {
-        lock (_gate) _runtime = new(WaitingForInput: true, InputPath: path);
+        lock (_gate) { if (_waitingPath == path && _waitingError == error) return; _waitingPath = path; _waitingError = error; }
         Changed?.Invoke();
     }
+    public void ClearWaiting() { lock (_gate) { if (_waitingPath == null) return; _waitingPath = null; _waitingError = null; } Changed?.Invoke(); }
     public void Observe(JsonElement info, RenderInput input)
     {
         if (info.ValueKind != JsonValueKind.Object) return;

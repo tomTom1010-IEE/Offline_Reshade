@@ -37,6 +37,15 @@ public sealed class SettingsViewModel : ObservableObject
     public string RenderWidth { get => Editor.RenderWidth; set => Edit(Editor with { RenderWidth = value }); }
     public string RenderHeight { get => Editor.RenderHeight; set => Edit(Editor with { RenderHeight = value }); }
     public string InputMode { get => Editor.InputMode; set => Edit(Editor with { InputMode = value }); }
+    public void ApplyInput(RenderInput input)
+    {
+        Session.Edit(Editor with { ColorPath = input.ColorPath, DepthPath = input.DepthPath, DepthFormat = input.DepthFormat,
+            DepthProfile = input.DepthProfile, DepthDownsample = input.DepthDownsample, EffectDir = input.EffectDir, PresetPath = input.PresetPath,
+            OutputPath = input.OutputPath, RenderWidth = input.Width == 0 ? "" : input.Width.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            RenderHeight = input.Height == 0 ? "" : input.Height.ToString(System.Globalization.CultureInfo.InvariantCulture), InputMode = input.WatchInput ? "RealTime" : "Gallery" });
+        foreach (var name in new[] { nameof(ColorPath), nameof(DepthPath), nameof(DepthFormat), nameof(DepthProfile), nameof(DepthDownsample),
+            nameof(EffectDir), nameof(PresetPath), nameof(OutputPath), nameof(RenderWidth), nameof(RenderHeight), nameof(InputMode) }) OnPropertyChanged(name);
+    }
     public string PreviewTransport { get => Preferences.PreviewTransport; set => Prefer(Preferences with { PreviewTransport = value }); }
     public string GalleryInputFolder { get => Preferences.GalleryInputFolder; set => Prefer(Preferences with { GalleryInputFolder = value }); }
     public string GalleryOutputFolder { get => Preferences.GalleryOutputFolder; set => Prefer(Preferences with { GalleryOutputFolder = value }); }

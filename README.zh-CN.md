@@ -34,10 +34,11 @@ Offline ReShade 是一个 Windows 工具，用于把 ReShade FX 效果应用到�
 1. 安装与你的游戏匹配的 Offline ReShade 游戏端插件。
 2. 把 Offline ReShade 客户端发布包解压到游戏目录之外的任意位置。
 3. 运行 `OfflineReShadeWinUI.exe`。
-4. 打开 `Settings`。
-5. 选择 `Game`：`KKS` 或 `KK`。
-6. 把 `.fx` / `.fxh` 放入 `Effects`，把效果需要的图片资源放入 `Textures`，把 `.addon64` 放入 `Addons`。也可以在 Settings 中选择外部 shader 文件夹。
-7. 使用 `Real Time` 或 `Gallery` 模式。
+4. 把 `.fx` / `.fxh` 放入 `Effects`，把效果需要的图片资源放入 `Textures`，把 `.addon64` 放入 `Addons`。也可以在 Settings 中选择外部 shader 文件夹。
+5. 点击主界面的 `Open image` 打开 color PNG。唯一匹配的 depth 会自动关联，也支持无深度图片。
+6. 在 `Input, depth and preset` 中核对 `KKS` / `KK`、深度、预设和输出尺寸；手动修改后点击 `Apply files to preview`。
+7. 持续接收游戏输出时，点击 `Listen for game output`，选择游戏导出目录并核对路径，再点击 `Start listening`。文件尚未生成时也可先监听。
+8. 调整效果后点击 `ReShade Shot` 保存当前全分辨率结果。
 
 干净的发布包应该只包含程序二进制和 runtime DLL，不应包含：
 
@@ -129,23 +130,22 @@ CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
 
 ## 使用客户端
 
-### Settings
+### 素材与设置
 
-开始预览前请先打开 `Settings`。
+从主界面的 `Open image` 或 `Listen for game output` 开始。来源摘要显示已应用的图片、关联深度和预设，无需先进入 Settings。
 
-重要字段：
+工作区 `Input, depth and preset` 包含：
 
 - `Game`：选择 `KKS` 或 `KK`。
 - `Color PNG`：实时 color 输入。
 - `Depth File`：实时 depth 输入。
-- `Effect Folder`：ReShade `.fx` / `.fxh` 所在文件夹；默认值是程序目录下的 `Effects`。
 - `Preset INI`：可选的 ReShade preset。
 - `Output PNG`：实时输出路径。
-- `Gallery Input Folder`：包含静态截图或视频帧 pair 的文件夹。
-- `Gallery Output Folder`：gallery 最终渲染输出目录。
 - `Render Width` / `Render Height`：留空则使用 color 图像尺寸。
 
-程序会为 KK 和 KKS 分别保存路径设置。切换 `Game` 时会恢复该游戏上次使用的路径。
+`Settings` 保留 `Effect Folder`、Gallery 输入/输出目录、预览传输和高级偏好。修改字段后需执行应用或监听操作；只有成功后才会更新已应用素材。
+
+切换深度配置不会暗中更换 color 路径。KK 要求 raw depth；从 packed PNG 切换到 KK 时会清除不兼容的待应用 depth 关联并提示重新选择。应用前，原预览保持不变。
 
 ### FX、Texture 与 Add-on 相对路径
 
@@ -193,7 +193,7 @@ FX 参数和 WinUI Add-on 参数中的数字滑条共用两种全局精细控制
 ### Add-on 界面使用
 
 1. 把 `.addon64` 放入 `Addons`，并按照 add-on 自带说明把配套 `.fx` 和 texture 分别放入 `Effects` 与 `Textures`。
-2. 点击 `Start Preview`，然后打开左侧 `ReShade Controls` 中的 `Add-ons` 选项卡。
+2. 打开图片后，打开左侧 `ReShade Controls` 中的 `Add-ons` 选项卡。
 3. 查看 `AddonPath`，确认程序实际扫描的是你预期的目录。
 4. 查看 `Load diagnostics`。这里会列出每个发现的 add-on，以及 loaded、disabled、failed 或 skipped 状态。DLL 或依赖加载失败时，再展开 `Add-on initialization log`。
 5. `Native add-on overlays` 下方的选项卡对应 add-on 注册的原生窗口。选择一个选项卡并保持 `Show` 开启，即可在 WinUI 面板中显示和操作原版 ImGui 界面。
@@ -208,21 +208,26 @@ Add-on 详情还会显示它注册的事件和离线兼容性。依赖 runtime�
 
 当游戏插件正在重复更新 `coloroutput.png` 和 `depthoutput.rfloat` 时，使用 Real Time 模式。
 
-1. 在顶部栏选择 `Real Time`。
-2. 点击 `Start Preview`。
-3. 在 `ReShade Controls` 中调整 techniques 和 uniforms。
-4. 点击 `ReShade Shot` 或 `Save PNG` 保存当前全分辨率结果。
+1. 点击 `Listen for game output`，选择游戏导出目录。
+2. 核对 color/depth 路径、深度编码及游戏配置，点击 `Start listening`。
+3. 文件尚未生成时会显示等待；在游戏中导出图片后，稳定且可读的配对才会被打开。
+4. 在 `ReShade Controls` 中调整 techniques 和 uniforms。
+5. 点击 `ReShade Shot` 或 `Save PNG` 保存当前全分辨率结果。
+
+等待新素材期间不会把上一张图导出成新素材。缺失文件显示等待；文件被占用或损坏会显示原因，文件变化后自动重试。`Stop listening` 保留上一份有效图片和调参；手动打开另一张图会取消待处理监听。来源摘要区分当前已应用素材和正在等待的目标。
 
 ### Gallery 模式
 
 Gallery 模式用于处理已经导出的截图或帧序列。
 
-1. 在顶部栏选择 `Gallery`。
-2. 设置 `Gallery Input Folder` 和 `Gallery Output Folder`。
+1. 打开静态图片，或停止监听，进入文件/Gallery 工作流程。
+2. 在 Settings 设置 `Gallery Input Folder` 和 `Gallery Output Folder`。
 3. 点击 Gallery 面板中的 `Refresh`。
 4. 点击一个缩略图，把对应的 color/depth pair 载入现有 runtime。
 5. 调整 ReShade 控制项。
 6. 对当前项目使用 `ReShade Shot` / `Save PNG`，或使用 `Batch Apply` 将当前设置应用到所有有效项目。
+
+无深度 PNG 也可作为 Gallery 素材；同一图片同时匹配 raw 与 packed depth 时，需要在工作区明确关联，程序不会擅自选择。
 
 `Frame Delay` 控制批处理切换输入后等待多少个渲染帧。对于有 temporal history、path tracing samples 或 accumulation buffers 的效果，可以适当增大这个值。
 

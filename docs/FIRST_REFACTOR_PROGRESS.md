@@ -9,7 +9,7 @@
 | 1 状态归属与配置迁移 | 基础实现及测试完成 | Core 分离 EditorDocument、ApplicationPreferences 和 EditingSession；WinUI 绑定适配；配置 v2 迁移、备份、原子保存；设置页待应用提示。后续步骤将统一所有运行路径与操作结果 |
 | 2 会话生命周期 | 实现及自动化验证完成 | Core RenderSessionController 统一启动、切图、重载、恢复、取消和释放；WinUI/独立 MCP 复用，附着 MCP 回归通过；真实进程测试验证参数保留和宿主释放 |
 | 3 操作与状态反馈 | 实现及自动化验证完成 | Core 操作队列、结构化结果、取消和错误恢复；WinUI 可见反馈及空状态；MCP broker 2。等待输入状态模型已具备，实际监听入口在第四步接入 |
-| 4 素材入口 | 待实施 | 需要主工作区输入、来源切换和失败保留上下文 |
+| 4 素材入口 | 实现及自动化验证完成 | 主界面打开图片/监听游戏输出，工作区管理素材、深度和预设；缺失/损坏文件等待与恢复、失败保留上下文；独立和附着 MCP 通过同一真实渲染回归 |
 | 5 统一导出 | 待实施 | 需要统一导出面板、待应用处理、参数提交屏障、目标及冲突策略 |
 | 6 编辑历史 | 待实施 | 已预留 IEditHistory；撤销事务、预设修改标记与关闭处理待实现 |
 | 7 画布与布局 | 待实施 | 需要组件划分、自适应、可见缩放与只影响预览的对比 |
@@ -50,6 +50,23 @@
 - 通过命令行启动独立测试包 `OfflineReShade.RefactorOperations035148`，附着会话 `84ec73af0a9048b6bd0f890b64f8e8e0`；`run_integration.py`、`run_output_correctness.py`、`run_d3d_recovery.py` 均通过。结果目录位于上述最终输出目录的 `attached-integration`、`attached-correctness`、`attached-recovery`。
 - 额外只读协议查询确认：缺失贴图引起的批处理失败仍保留在 `notice`，正常帧/状态轮询不覆盖该错误。按路径核对后结束本轮测试 UI 进程 15488 与子进程 38656，测试包已注销。
 - 全程没有使用 computer use。窗口视觉、实际按钮/键盘操作和关闭窗口交互留待用户验收；第三步尚未把素材入口搬出 Settings，也未实现缺失文件的主动监听入口，这部分按计划属于第四步。发布包未对外发布。
+
+## 第四步验证
+
+- 主界面加入 `Open image` 和 `Listen for game output`；当前已应用图片、深度和预设持续可见。工作配置移到 `Input, depth and preset`，Settings 保留资源目录、图库默认目录、预览与高级偏好。顶部使用 CommandBar，次要命令进入溢出菜单。两个导出按钮仍保留，按第五步统一。
+- Core `InputPairing` 统一单图和图库的游戏输出、截图与视频帧配对；支持无深度 PNG，多种匹配时要求明确选择。选择或输入校验失败不会把旧图改名为新素材；成功打开图库外图片会清除旧缩略图选择。深度配置切换不再暗中替换素材路径。
+- `InputArrivalMonitor` 等待完整、稳定且可读的初始输入。缺失文件保持等待，访问失败显示具体文件和原因，损坏配对只在文件签名变化后重试。监听等待期间拒绝编辑/导出旧画面；停止监听保留最后有效图像、参数和未应用字段；手动打开输入取消旧监听，迟到文件不会覆盖新选择。
+- WinUI 与 MCP 共用 `listen_input` / `stop_listening`，`get_operation_status` 区分 `waitingInput` 和 `appliedInput`。停止原生监听无需重新打开源文件。Automation broker 升级为 3，生成常量、接口锁和 MCP/维护文档同步；native RPC 5、offline API 1、preview ABI 3 不变。
+- 修复发布包默认 Effects 路径受启动工作目录影响的问题；UI 应用时将输入、效果、预设和输出的相对路径按程序目录解析。成功应用后同步草稿及当前深度配置，保留旧配置读取能力。中英文使用说明同步新入口。
+- Core `InputWorkflowTests` 覆盖配对歧义、KK/raw 限制、无深度素材、相对路径、缺失配对、文件占用、损坏输入、变化后重试、监听覆盖、取消和旧结果导出拒绝；现有 Core 全套通过。
+- 新增 `tests/run_input_workflow.py` 并接入构建流水线，以真实 MCP/native 验证首次缺失输入、损坏配对回退、原参数像素保持、修复后的尺寸切换、停止和手动覆盖监听。
+- 包含原生重编译的 `tools/build_offline_release.ps1 -RunIntegrationTests -OutputDirectory build/refactor-step4` 通过。完成图库选中状态修正后，最终执行 `-SkipBuild -RunIntegrationTests -OutputDirectory build/refactor-step4-verified`，通过；只复用本轮已重编译且未修改的 C++ 组件。
+- 最终报告：`build/refactor-step4-verified/verification-20261103-042015.json`。包：`build/refactor-step4-verified/OfflineReShade-0.8.3-win-x64-20261103-042015`；ZIP SHA256：`77c36def19d9c35f47129878d6d2558b33ab7a55e90af4758fa25a843cfa2006`。包含完整性、接口、CI、实际 D3D、输出正确性、批缓存和宿主释放验证。
+- 仅经命令行启动独立测试包 `OfflineReShade.RefactorInput042015`，附着会话 `9d2ea137cf9249409009221792bc6b52`；`run_input_workflow.py`、`run_integration.py`、`run_output_correctness.py`、`run_d3d_recovery.py` 全部通过。结果在最终输出目录的 `attached-input`、`attached-integration`、`attached-correctness` 和 `attached-recovery`。
+- 代码审查修复启动目录依赖、深度配置同步、旧图库选择及已应用后残留待应用提示；现有动态面板和控件可访问性整理继续在第七步完成。构建使用仓库固定工具链，没有升级依赖。
+- 按完整可执行路径核对后结束本轮 UI 进程 12240 与宿主 24252，确认测试进程为零、测试包已注销。全程没有使用 computer use，也没有操作用户现有程序。实际按钮、键盘、视觉布局及窗口关闭仍属于用户验收；发布包没有对外发布。
+
+下一步为第五步：统一导出面板和目标冲突策略、待应用配置处理，以及 UI 参数提交屏障；不能以 Core 队列已排空代替尚未入队的滑块更新已提交。
 
 ## 完成判定
 

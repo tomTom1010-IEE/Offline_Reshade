@@ -35,7 +35,9 @@ internal static class OperationTests
         Check(engine.Activity.Snapshot.ShowEmpty && engine.Activity.Snapshot.StatusText == "No image opened", "Disconnected session presented as ready.");
         engine.Activity.WaitForInput(color);
         Check(engine.Activity.Snapshot.EmptyTitle == "Waiting for game output", "Waiting and invalid input were conflated.");
-        await Run("get_runtime_info", new { });
+        engine.Activity.Observe(await Call("get_runtime_info", null, CancellationToken.None), input);
+        Check(engine.Activity.Snapshot.ShowEmpty, "Polling a previous input erased the explicit waiting state.");
+        engine.Activity.ClearWaiting();
         Check(!engine.Activity.Snapshot.ShowEmpty, "A valid black frame must not be treated as empty.");
 
         block = true;

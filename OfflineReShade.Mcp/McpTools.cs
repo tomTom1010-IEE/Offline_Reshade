@@ -23,6 +23,14 @@ public sealed class McpTools(McpBridge bridge)
     [McpServerTool(Name = "get_status", ReadOnly = true), Description("Read resolution, loading, frame count, input generation, rendering adapter, preview transport and device recovery diagnostics.")]
     public Task<JsonElement> GetStatus(CancellationToken cancellationToken) => bridge.CallAsync("get_runtime_info", token: cancellationToken);
 
+    [McpServerTool(Name = "listen_input"), Description("Listen for a color/depth pair that may not exist yet. Validates settings, waits for stable files, and opens them through the shared session. While waiting, exporting the previous image is blocked; malformed files are reported and retried only after they change.")]
+    public Task<CallToolResult> ListenInput(string colorPath, string outputPath, string effectDir, CancellationToken cancellationToken,
+        string depthPath = "", string depthFormat = "raw", string depthProfile = "kks", string depthDownsample = "max2x2", string presetPath = "", int width = 0, int height = 0)
+        => ExecuteToolAsync("listen_input", new RenderInput(colorPath, depthPath, depthFormat, depthProfile, depthDownsample, outputPath, effectDir, presetPath, width, height, true), cancellationToken);
+
+    [McpServerTool(Name = "stop_listening"), Description("Stop waiting for game files and disable automatic input updates. Retains the last applied image and parameters.")]
+    public Task<CallToolResult> StopListening(CancellationToken cancellationToken) => ExecuteToolAsync("stop_listening", null, cancellationToken);
+
     [McpServerTool(Name = "get_diagnostics", ReadOnly = true), Description("Read component versions, pinned upstream identity, release provenance, core binary integrity and runtime/device health. Works before opening an input. Does not change settings or reset the device.")]
     public Task<JsonElement> GetDiagnostics(CancellationToken cancellationToken) => bridge.CallAsync("get_diagnostics", token: cancellationToken);
 

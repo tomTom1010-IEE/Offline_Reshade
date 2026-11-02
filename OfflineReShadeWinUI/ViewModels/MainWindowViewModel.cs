@@ -17,7 +17,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly AutomationEngine _automation;
     private readonly AutomationBroker _broker;
     private readonly string _workDir = Path.Combine(AutomationBroker.SessionDirectory, "work", Guid.NewGuid().ToString("N"));
-    private RenderInput? _inputOverride;
+    private bool _synchronizingInput;
+    private bool _isInputPanelOpen;
+    private string _inputSelectionMessage = "";
     private RenderInput? _runtimeInput => Settings.Session.Applied?.Input;
     private bool _cpuPreviewFallback;
     private string _lastPreviewError = "";
@@ -67,7 +69,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isEffectsLoading;
     private DateTimeOffset? _effectsLoadingStartedAt;
     private bool _hasPersistedDepthProfile;
-    private bool _isApplyingProfilePaths;
     private string _currentDepthProfile = "kks";
 
     public MainWindowViewModel(AppPaths paths, SynchronizationContext? uiContext = null)
@@ -92,12 +93,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _syncContext = uiContext ?? SynchronizationContext.Current;
 
         _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current,
-            (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true));
+            (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true), ApplyInputWatchAsync);
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
-        StartPreviewCommand = CreateCommand(StartPreviewAsync, () => !IsPreviewRunning && CanEditSession);
-        StopPreviewCommand = CreateCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0);
+        StartPreviewCommand = CreateCommand(StartPreviewAsync, () => CanChooseSource);
+        StopPreviewCommand = CreateCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0 || _automation.WaitingInput != null);
         CancelBatchCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.Job?.State == "running");
         SavePngCommand = CreateCommand(SavePngAsync, () => CanEditSession);
         ReShadeShotCommand = CreateCommand(ReShadeShotAsync, () => _session.IsConnected && CanEditSession);
@@ -109,10 +110,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         BatchApplySavePngCommand = CreateCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
         BatchApplyReShadeShotCommand = CreateCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
-        PickColorCommand = CreateCommand(async () => await PickPathAsync(path => Settings.ColorPath = path, picker => picker.PickPngAsync()));
-        PickDepthCommand = CreateCommand(async () => await PickPathAsync(path => Settings.DepthPath = path, picker => picker.PickDepthAsync()));
+        OpenImageCommand = CreateCommand(OpenImageAsync, () => CanChooseSource);
+        ConfigureListenerCommand = new RelayCommand(() => { IsSettingsOpen = false; IsInputPanelOpen = true; InputSelectionMessage = "Choose the game export folder, then start listening. Files may arrive later."; });
+        StartListeningCommand = CreateCommand(StartListeningAsync, () => CanChooseSource);
+        StopListeningCommand = CreateCommand(async () => await ExecuteOperationAsync("stop_listening"), () => CanChooseSource && IsListening);
+        PickWatchFolderCommand = CreateCommand(PickWatchFolderAsync, () => CanChooseSource);
+        OpenInputPanelCommand = new RelayCommand(() => { IsSettingsOpen = false; IsInputPanelOpen = !IsInputPanelOpen; });
+        ClearDepthCommand = new RelayCommand(() => { Settings.DepthPath = ""; InputSelectionMessage = "Color-only input selected. Apply to preview when ready."; }, () => CanChooseSource);
+        PickColorCommand = CreateCommand(PickInputColorAsync, () => CanChooseSource);
+        PickDepthCommand = CreateCommand(PickInputDepthAsync, () => CanChooseSource);
         PickEffectDirCommand = CreateCommand(async () => await PickPathAsync(path => Settings.EffectDir = path, picker => picker.PickFolderAsync()));
-        PickPresetCommand = CreateCommand(async () => await PickPathAsync(path => Settings.PresetPath = path, picker => picker.PickIniAsync()));
+        PickPresetCommand = CreateCommand(LoadPresetAsync, () => CanEditSession);
         PickOutputCommand = CreateCommand(async () => await PickPathAsync(path => Settings.OutputPath = path, picker => picker.PickOutputPngAsync()));
         PickGalleryInputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
         PickGalleryOutputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
@@ -123,6 +131,89 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (_settingsStore.LoadError != null) ReportUiError(new IOException(_settingsStore.LoadError), "load_settings");
         if (IsGalleryMode)
             RefreshGalleryItems();
+    }
+
+    public AsyncRelayCommand OpenImageCommand { get; }
+    public AsyncRelayCommand StartListeningCommand { get; }
+    public AsyncRelayCommand StopListeningCommand { get; }
+    public AsyncRelayCommand PickWatchFolderCommand { get; }
+    public RelayCommand ConfigureListenerCommand { get; }
+    public RelayCommand OpenInputPanelCommand { get; }
+    public RelayCommand ClearDepthCommand { get; }
+    public bool CanChooseSource => !_automation.IsOperationExclusive;
+    public bool IsInputPanelOpen { get => _isInputPanelOpen; set => SetProperty(ref _isInputPanelOpen, value); }
+    public string InputSelectionMessage { get => _inputSelectionMessage; private set => SetProperty(ref _inputSelectionMessage, value); }
+    public bool IsListening => _automation.WaitingInput != null || (_session.IsConnected && _session.Current.WatchInput);
+    public string CurrentInputText => _runtimeInput?.ColorPath ?? "No image has been applied";
+    public string CurrentDepthText => _runtimeInput is not { } input ? "No depth associated" : input.DepthPath.Length == 0 ? "Color only — no depth associated" : $"{input.DepthPath} ({input.DepthFormat}, {input.DepthProfile.ToUpperInvariant()})";
+    public string CurrentPresetText => _runtimeInput is { PresetPath.Length: > 0 } input ? input.PresetPath : "Working preset — no source preset selected";
+    public string InputSourceText => Activity.Runtime.WaitingForInput ? $"Waiting for game output: {Activity.Runtime.InputPath}"
+        : IsListening ? "Game output — automatic updates are enabled" : "Files — changes are applied manually";
+
+    private async Task OpenImageAsync()
+    {
+        if (_picker == null || await _picker.PickPngAsync() is not { } path) return;
+        var pairing = InputPairing.Resolve(path, Settings.DepthProfile);
+        var proposed = CurrentRenderInput() with { ColorPath = pairing.ColorPath, DepthPath = pairing.AutomaticDepth?.Path ?? "",
+            DepthFormat = pairing.AutomaticDepth?.Format ?? "raw", WatchInput = false };
+        if (pairing.IsAmbiguous)
+        {
+            SetInputDraft(proposed);
+            InputSelectionMessage = "Multiple matching depth files were found. Choose one, or clear depth for color-only processing, then apply. The current preview is unchanged.";
+            IsSettingsOpen = false; IsInputPanelOpen = true;
+            return;
+        }
+        await ExecuteOperationAsync("open_input", proposed);
+        InputSelectionMessage = proposed.DepthPath.Length == 0 ? "Opened without depth. You can associate a depth file below." : "Matching depth file associated.";
+    }
+    private async Task PickInputColorAsync()
+    {
+        if (_picker == null || await _picker.PickPngAsync() is not { } path) return;
+        var pairing = InputPairing.Resolve(path, Settings.DepthProfile);
+        Settings.InputMode = "Gallery"; Settings.ColorPath = path; Settings.DepthPath = pairing.AutomaticDepth?.Path ?? "";
+        Settings.DepthFormat = pairing.AutomaticDepth?.Format ?? "raw";
+        InputSelectionMessage = pairing.IsAmbiguous ? "Multiple depth matches. Choose a depth file explicitly before applying." : "Input selected. Apply to preview when ready.";
+    }
+    private async Task PickInputDepthAsync()
+    {
+        if (_picker == null || await _picker.PickDepthAsync() is not { } path) return;
+        if (Settings.DepthProfile == "kk" && !Path.GetExtension(path).Equals(".rfloat", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("KK requires a raw .rfloat depth file. Select the KKS profile to use packed PNG depth.");
+        Settings.DepthPath = path;
+        Settings.DepthFormat = Path.GetExtension(path).Equals(".rfloat", StringComparison.OrdinalIgnoreCase) ? "raw" : "rgba";
+        InputSelectionMessage = "Depth association changed. Apply to preview when ready.";
+    }
+    private async Task PickWatchFolderAsync()
+    {
+        if (_picker == null || await _picker.PickFolderAsync() is not { } folder) return;
+        Settings.ColorPath = Path.Combine(folder, "coloroutput.png");
+        Settings.DepthPath = Path.Combine(folder, Settings.DepthFormat == "rgba" ? "depthoutput.png" : "depthoutput.rfloat");
+        InputSelectionMessage = "These game output paths may not exist yet. Check the encoding and start listening.";
+    }
+    private Task StartListeningAsync() => ExecuteOperationAsync("listen_input", CurrentRenderInput() with { WatchInput = true });
+    private async Task LoadPresetAsync()
+    {
+        if (_picker == null || await _picker.PickIniAsync() is not { } path) return;
+        if (_session.IsConnected) await ExecuteOperationAsync("set_preset", new { path });
+        else Settings.PresetPath = path;
+    }
+    private void SetInputDraft(RenderInput input)
+    {
+        _synchronizingInput = true;
+        try { Settings.ApplyInput(input); }
+        finally { _synchronizingInput = false; }
+        _currentDepthProfile = NormalizeDepthProfile(input.DepthProfile);
+        _hasPersistedDepthProfile = true;
+        StoreCurrentProfilePaths(_currentDepthProfile);
+        OnPropertyChanged(nameof(InputMode)); OnPropertyChanged(nameof(IsGalleryMode)); OnPropertyChanged(nameof(InputModeButtonText));
+        OnEditingSessionChanged(); ScheduleSettingsSave();
+    }
+    private async Task ApplyInputWatchAsync(bool enabled, CancellationToken token)
+    {
+        await _session.SetInputWatchAsync(enabled, token);
+        Settings.InputMode = enabled ? "RealTime" : "Gallery";
+        OnPropertyChanged(nameof(InputMode)); OnPropertyChanged(nameof(IsGalleryMode));
+        OnEditingSessionChanged();
     }
 
     public SettingsViewModel Settings { get; }
@@ -484,34 +575,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
     {
-        if (!CanEditSession || item == null || !item.IsValid) return;
-        SelectedGalleryItem = item;
-        _inputOverride = null;
-        PreviewInfoText = item.BaseName;
-        if (IsGalleryMode && _session.IsConnected)
-            await ExecuteOperationAsync("open_input", InputForGallery(item));
+        if (item == null) return;
+        if (item.AmbiguousDepth)
+        {
+            SetInputDraft(InputForGallery(item));
+            InputSelectionMessage = "Multiple matching depth files. Choose one below, then apply; the current preview is unchanged.";
+            IsInputPanelOpen = true; return;
+        }
+        await ExecuteOperationAsync("open_input", InputForGallery(item));
     }
 
     public async Task ToggleInputModeAsync()
     {
-        if (!CanEditSession) return;
-        var previous = InputMode;
-        try {
-            InputMode = IsGalleryMode ? "RealTime" : "Gallery";
-            _inputOverride = null;
-            if (IsGalleryMode) { RefreshGalleryItems(); EnsureGallerySelection(); }
-            if (_session.IsConnected) {
-                await ExecuteOperationAsync("open_input", CurrentRenderInput());
-            }
-        } catch { InputMode = previous; throw; }
+        if (IsListening) await ExecuteOperationAsync("stop_listening");
+        else { IsSettingsOpen = false; IsInputPanelOpen = true; }
     }
 
     private Task StartPreviewAsync() => StartPreviewCoreAsync(false);
-    private async Task StartPreviewCoreAsync(bool preserveBatch)
-    {
-        if (IsGalleryMode && _inputOverride == null) EnsureGallerySelection();
-        await ExecuteOperationAsync("open_input", CurrentRenderInput());
-    }
+    private async Task StartPreviewCoreAsync(bool preserveBatch) => await ExecuteOperationAsync("open_input", CurrentRenderInput() with { WatchInput = false });
     private Task StopPreviewAsync() => StopPreviewAsync(updateStatus: true);
     private Task StopPreviewAsync(bool updateStatus) => _automation.StopSessionAsync(_session.StopAsync);
 
@@ -563,14 +644,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await ExecuteOperationAsync("batch_start", new BatchRequest(items, frames, saveMethod == "save_screenshot"));
     }
 
-    private RenderInput CurrentRenderInput()
-    {
-        if (_inputOverride != null) return _inputOverride;
-        Settings.Editor.ToRenderInput();
-        return new RenderInput(ActiveColorPath, ActiveDepthPath, ActiveDepthFormat,
-        ActiveDepthProfile, Settings.DepthDownsample, ActiveOutputPath, Settings.EffectDir, Settings.PresetPath,
-        EditorDocument.ParseDimension(Settings.RenderWidth, "Width"), EditorDocument.ParseDimension(Settings.RenderHeight, "Height"), WatchInput: !IsGalleryMode);
-    }
+    private RenderInput CurrentRenderInput() => Settings.Editor.ToRenderInput(_paths.AppDirectory);
     private RenderInput InputForGallery(GalleryItemViewModel item) => CurrentRenderInput() with {
         ColorPath = item.ColorPath, DepthPath = item.DepthPath, DepthFormat = item.DepthFormat,
         DepthProfile = EffectiveDepthProfile(item.DepthFormat), OutputPath = item.OutputPath, WatchInput = false };
@@ -585,15 +659,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (replacePreset) await _session.LoadPresetAsync(input.PresetPath, token);
             else await _session.OpenAsync(input, token);
-            _inputOverride = _session.Current;
+            SetInputDraft(_session.Current);
+            IsInputPanelOpen = false;
+            InputSelectionMessage = "";
             PreviewInfoText = Path.GetFileName(_session.Current.ColorPath);
             var item = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, _session.Current.ColorPath, StringComparison.OrdinalIgnoreCase));
-            if (item != null) SelectedGalleryItem = item;
+            SelectedGalleryItem = item;
         }
         finally
         {
             _pendingOpens--;
             StopPreviewCommand.RaiseCanExecuteChanged();
+            PreviewInfoText = _session.IsConnected ? Path.GetFileName(_session.Current.ColorPath) : "No image opened";
             if (!_isDisposed && _session.IsConnected)
             {
                 await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
@@ -626,9 +703,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (_isDisposed) return;
             IsBatchApplying = _automation.Job?.State == "running";
-            foreach (var property in new[] { nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
+            foreach (var property in new[] { nameof(CanChooseSource), nameof(IsListening), nameof(InputSourceText), nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
                 nameof(StatusText), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
                 nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
+            OpenImageCommand.RaiseCanExecuteChanged(); StartListeningCommand.RaiseCanExecuteChanged(); StopListeningCommand.RaiseCanExecuteChanged();
+            PickWatchFolderCommand.RaiseCanExecuteChanged(); PickColorCommand.RaiseCanExecuteChanged(); PickDepthCommand.RaiseCanExecuteChanged(); PickPresetCommand.RaiseCanExecuteChanged();
+            ClearDepthCommand.RaiseCanExecuteChanged(); StopPreviewCommand.RaiseCanExecuteChanged();
             CancelBatchCommand.RaiseCanExecuteChanged(); CancelOperationCommand.RaiseCanExecuteChanged();
             RetryOperationCommand.RaiseCanExecuteChanged(); LocateFeedbackCommand.RaiseCanExecuteChanged();
             StartPreviewCommand.RaiseCanExecuteChanged(); SavePngCommand.RaiseCanExecuteChanged();
@@ -662,7 +742,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             var runtimeInfo = await _session.CallAsync("get_runtime_info");
             if (_isDisposed || generation != _runtimeGeneration) return;
-            _automation.Activity.Observe(runtimeInfo, _session.Current);
+            _automation.ObserveRuntime(runtimeInfo);
             await ApplyGraphicsStateAsync(runtimeInfo);
             if (_isDisposed || generation != _runtimeGeneration) return;
             if (IsRuntimeLoading(runtimeInfo))
@@ -841,7 +921,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 {
                     var info = await _session.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
                     if (_isDisposed || cancellationToken.IsCancellationRequested) return;
-                    _automation.Activity.Observe(info, _session.Current);
+                    _automation.ObserveRuntime(info);
                     var needsRecovery = info.TryGetProperty("recoveryRequired", out var recovery) && recovery.GetBoolean();
                     if (CanEditSession && (needsRecovery || info.TryGetProperty("restartRequired", out var restart) && restart.GetBoolean())) {
                         if (needsRecovery) AppendLog("D3D device lost; rebuilding the rendering session.");
@@ -915,13 +995,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public string ConfigurationStatusText => Settings.Session.ValidationError ?? (HasPendingConfiguration ? "Changes pending - apply before export" : "Configuration applied");
     private void OnEditingSessionChanged()
     {
+        OnPropertyChanged(nameof(CurrentInputText)); OnPropertyChanged(nameof(CurrentDepthText)); OnPropertyChanged(nameof(CurrentPresetText));
+        OnPropertyChanged(nameof(InputSourceText)); OnPropertyChanged(nameof(IsListening));
         OnPropertyChanged(nameof(HasPendingConfiguration));
         OnPropertyChanged(nameof(ConfigurationStatusText));
     }
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (CanEditSession && e.PropertyName is "ColorPath" or "DepthPath" or "DepthFormat" or "EffectDir" or "PresetPath" or "RenderWidth" or "RenderHeight") _inputOverride = null;
+        if (_synchronizingInput) return;
         OnEditingSessionChanged();
         ScheduleSettingsSave();
         if (e.PropertyName == nameof(SettingsViewModel.PreviewTransport)) _ = UpdatePreviewTransportAsync();
@@ -934,15 +1016,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 StoreCurrentProfilePaths(_currentDepthProfile);
                 _currentDepthProfile = nextProfile;
-                ApplyProfilePaths(nextProfile);
             }
 
             if (string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(Settings.DepthFormat, "raw", StringComparison.OrdinalIgnoreCase))
             {
                 Settings.DepthFormat = "raw";
-                Settings.DepthPath = Path.Combine(Path.GetDirectoryName(Settings.DepthPath) ?? string.Empty, "depthoutput.rfloat");
-                AppendLog("KK depth profile uses raw .rfloat depth.");
+                if (Path.GetExtension(Settings.DepthPath).Equals(".png", StringComparison.OrdinalIgnoreCase)) Settings.DepthPath = "";
+                InputSelectionMessage = "KK requires raw .rfloat depth. Associate the correct depth file before applying.";
             }
         }
 
@@ -969,7 +1050,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             RefreshGalleryItems();
         }
 
-        if (!_isRestoringSettings && !_isApplyingProfilePaths && IsProfilePathProperty(e.PropertyName))
+        if (!_isRestoringSettings && IsProfilePathProperty(e.PropertyName))
             StoreCurrentProfilePaths(_currentDepthProfile);
     }
 
@@ -1057,13 +1138,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
         } catch (Exception ex) { if (!_isDisposed) ReportUiError(ex, "preview_transport"); }
     }
-    private string ActiveColorPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.ColorPath : Settings.ColorPath;
-    private string ActiveDepthPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthPath : Settings.DepthPath;
-    private string ActiveDepthFormat => string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase)
-        ? "raw"
-        : IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthFormat : Settings.DepthFormat;
-    private string ActiveDepthProfile => EffectiveDepthProfile(ActiveDepthFormat);
-    private string ActiveOutputPath => _inputOverride?.OutputPath ?? (IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.OutputPath : Settings.OutputPath);
+    private string ActiveOutputPath => Settings.OutputPath;
 
     private string EffectiveDepthProfile(string depthFormat)
     {
@@ -1094,10 +1169,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private void InitializeProfilePathState()
     {
         _currentDepthProfile = NormalizeDepthProfile(Settings.DepthProfile);
-        if (HasAnyProfilePath(GetProfilePaths(_currentDepthProfile)))
-            ApplyProfilePaths(_currentDepthProfile);
-        else
-            StoreCurrentProfilePaths(_currentDepthProfile);
+        StoreCurrentProfilePaths(_currentDepthProfile);
     }
 
     private void StoreCurrentProfilePaths(string profile)
@@ -1118,80 +1190,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Settings.KksPaths = paths;
     }
 
-    private ProfilePaths GetProfilePaths(string profile)
-    {
-        return string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase) ? Settings.KkPaths : Settings.KksPaths;
-    }
-
-    private void ApplyProfilePaths(string profile)
-    {
-        var normalized = NormalizeDepthProfile(profile);
-        var saved = GetProfilePaths(normalized);
-        var defaults = CreateDefaultProfilePaths(normalized);
-
-        _isApplyingProfilePaths = true;
-        try
-        {
-            Settings.ColorPath = FirstUsablePath(saved.ColorPath, defaults.ColorPath);
-            Settings.DepthPath = FirstUsablePath(saved.DepthPath, defaults.DepthPath);
-            Settings.OutputPath = FirstUsablePath(saved.OutputPath, defaults.OutputPath);
-            Settings.GalleryInputFolder = saved.GalleryInputFolder ?? string.Empty;
-            Settings.GalleryOutputFolder = saved.GalleryOutputFolder ?? string.Empty;
-
-            if (string.Equals(normalized, "kk", StringComparison.OrdinalIgnoreCase))
-                Settings.DepthFormat = "raw";
-            else
-                Settings.DepthFormat = NormalizeDepthFormat(saved.DepthFormat ?? defaults.DepthFormat);
-        }
-        finally
-        {
-            _isApplyingProfilePaths = false;
-        }
-
-        StoreCurrentProfilePaths(normalized);
-    }
-
-    private ProfilePaths CreateDefaultProfilePaths(string profile)
-    {
-        if (string.Equals(NormalizeDepthProfile(profile), "kk", StringComparison.OrdinalIgnoreCase))
-        {
-            const string kkExportDir = @"D:\Program Files\Koikatu\UserData\cap\OfflineReShade";
-            return new ProfilePaths
-            {
-                ColorPath = Path.Combine(kkExportDir, "coloroutput.png"),
-                DepthPath = Path.Combine(kkExportDir, "depthoutput.rfloat"),
-                DepthFormat = "raw",
-                OutputPath = Path.Combine(kkExportDir, "reshadeoutput.png"),
-                GalleryInputFolder = string.Empty,
-                GalleryOutputFolder = string.Empty
-            };
-        }
-
-        return new ProfilePaths
-        {
-            ColorPath = _paths.DefaultColorPath,
-            DepthPath = _paths.DefaultDepthPath,
-            DepthFormat = "raw",
-            OutputPath = _paths.DefaultOutputPath,
-            GalleryInputFolder = string.Empty,
-            GalleryOutputFolder = string.Empty
-        };
-    }
-
-    private static string FirstUsablePath(string? savedPath, string? defaultPath)
-    {
-        return string.IsNullOrWhiteSpace(savedPath) ? defaultPath ?? string.Empty : savedPath;
-    }
-
-    private static bool HasAnyProfilePath(ProfilePaths paths)
-    {
-        return !string.IsNullOrWhiteSpace(paths.ColorPath) ||
-            !string.IsNullOrWhiteSpace(paths.DepthPath) ||
-            !string.IsNullOrWhiteSpace(paths.OutputPath) ||
-            paths.GalleryInputFolder != null ||
-            paths.GalleryOutputFolder != null;
-    }
-
     private static bool IsProfilePathProperty(string? propertyName)
     {
         return propertyName == nameof(SettingsViewModel.ColorPath) ||
@@ -1205,11 +1203,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private static string NormalizeDepthProfile(string? profile)
     {
         return string.Equals(profile, "kk", StringComparison.OrdinalIgnoreCase) ? "kk" : "kks";
-    }
-
-    private static string NormalizeDepthFormat(string? format)
-    {
-        return string.Equals(format, "rgba", StringComparison.OrdinalIgnoreCase) ? "rgba" : "raw";
     }
 
     private void InferDepthProfileIfNeeded(bool saveIfInferred)
@@ -1249,19 +1242,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         return null;
     }
 
-    private void ApplyInputSwitchResult(JsonElement result)
-    {
-        if (result.ValueKind != JsonValueKind.Object)
-            return;
-
-        if (result.TryGetProperty("fallbackToKks", out var fallback) && fallback.ValueKind == JsonValueKind.True)
-        {
-            Settings.DepthProfile = "kks";
-            if (result.TryGetProperty("warning", out var warning) && warning.ValueKind == JsonValueKind.String)
-                AppendLog(warning.GetString());
-        }
-    }
-
     private void OnPrototypeOutputReceived(string? message)
     {
         AppendLog(message);
@@ -1269,98 +1249,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Settings.DepthProfile = "kks";
     }
 
-    private void EnsureGallerySelectionIfNeeded()
-    {
-        if (IsGalleryMode)
-            EnsureGallerySelection();
-    }
-
-    private void EnsureGallerySelection()
-    {
-        if (GalleryItems.Count == 0)
-            RefreshGalleryItems();
-
-        if (SelectedGalleryItem?.IsValid == true)
-            return;
-
-        SelectedGalleryItem = GalleryItems.FirstOrDefault(item => item.IsValid);
-        if (SelectedGalleryItem == null)
-            throw new InvalidOperationException("Gallery mode needs a valid *-Color.png + *-Depth.rfloat/png pair, or <frame>.png + <frame>.depth.rfloat pair.");
-    }
-
     private void RefreshGalleryItems()
     {
-        var previousBase = SelectedGalleryItem?.BaseName;
+        var selectedPath = _runtimeInput?.ColorPath;
         GalleryItems.Clear();
-
-        var inputFolder = Settings.GalleryInputFolder;
-        if (string.IsNullOrWhiteSpace(inputFolder) || !Directory.Exists(inputFolder))
+        var folder = Settings.GalleryInputFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) { SelectedGalleryItem = null; return; }
+        var output = string.IsNullOrWhiteSpace(Settings.GalleryOutputFolder) ? folder : Settings.GalleryOutputFolder;
+        foreach (var color in Directory.EnumerateFiles(folder).Where(InputPairing.IsColorFile).Order(StringComparer.OrdinalIgnoreCase))
         {
-            SelectedGalleryItem = null;
-            return;
+            var pairing = InputPairing.Resolve(color, Settings.DepthProfile);
+            GalleryItems.Add(new(pairing.Name, color, pairing.AutomaticDepth?.Path ?? "", pairing.AutomaticDepth?.Format ?? "raw",
+                Path.Combine(output, pairing.OutputName), !pairing.IsAmbiguous, pairing.IsAmbiguous));
         }
-
-        var outputFolder = string.IsNullOrWhiteSpace(Settings.GalleryOutputFolder)
-            ? inputFolder
-            : Settings.GalleryOutputFolder;
-        var items = new List<GalleryItemViewModel>();
-        var seenColorPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var colorPath in Directory.EnumerateFiles(inputFolder, "*.png").Where(IsGalleryColorPath).OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
-        {
-            var colorName = Path.GetFileNameWithoutExtension(colorPath);
-            var baseName = colorName[..(colorName.Length - "-Color".Length)];
-            var rawDepth = FindCaseInsensitiveFile(inputFolder, baseName + "-Depth.rfloat");
-            var rgbaDepth = IsKkDepthProfile ? null : FindCaseInsensitiveFile(inputFolder, baseName + "-Depth.png");
-            var depthPath = rawDepth ?? rgbaDepth ?? string.Empty;
-            var depthFormat = rawDepth != null ? "raw" : "rgba";
-            var outputPath = Path.Combine(outputFolder, baseName + "-Reshade.png");
-            items.Add(new GalleryItemViewModel(baseName, colorPath, depthPath, depthFormat, outputPath, !string.IsNullOrEmpty(depthPath)));
-            seenColorPaths.Add(colorPath);
-        }
-
-        foreach (var colorPath in Directory.EnumerateFiles(inputFolder, "*.png").Where(IsVideoFrameColorPath).OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
-        {
-            if (!seenColorPaths.Add(colorPath))
-                continue;
-
-            var baseName = Path.GetFileNameWithoutExtension(colorPath);
-            var rawDepth = FindCaseInsensitiveFile(inputFolder, baseName + ".depth.rfloat");
-            var rgbaDepth = IsKkDepthProfile ? null : FindCaseInsensitiveFile(inputFolder, baseName + ".depth.png");
-            var depthPath = rawDepth ?? rgbaDepth ?? string.Empty;
-            var depthFormat = rawDepth != null ? "raw" : "rgba";
-            var outputPath = Path.Combine(outputFolder, baseName + ".reshade.png");
-            items.Add(new GalleryItemViewModel(baseName, colorPath, depthPath, depthFormat, outputPath, !string.IsNullOrEmpty(depthPath)));
-        }
-
-        foreach (var item in items.OrderBy(static item => item.BaseName, StringComparer.OrdinalIgnoreCase))
-            GalleryItems.Add(item);
-
-        SelectedGalleryItem = GalleryItems.FirstOrDefault(item => item.BaseName == previousBase && item.IsValid)
-            ?? GalleryItems.FirstOrDefault(item => item.IsValid);
-    }
-
-    private static bool IsGalleryColorPath(string path)
-    {
-        return Path.GetFileNameWithoutExtension(path).EndsWith("-Color", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsVideoFrameColorPath(string path)
-    {
-        var name = Path.GetFileNameWithoutExtension(path);
-        return !name.EndsWith("-Color", StringComparison.OrdinalIgnoreCase) &&
-            !name.EndsWith("-Depth", StringComparison.OrdinalIgnoreCase) &&
-            !name.EndsWith("-Reshade", StringComparison.OrdinalIgnoreCase) &&
-            !name.EndsWith(".depth", StringComparison.OrdinalIgnoreCase) &&
-            !name.EndsWith(".reshade", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private bool IsKkDepthProfile => string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase);
-
-    private static string? FindCaseInsensitiveFile(string folder, string fileName)
-    {
-        return Directory.EnumerateFiles(folder)
-            .FirstOrDefault(path => string.Equals(Path.GetFileName(path), fileName, StringComparison.OrdinalIgnoreCase));
+        SelectedGalleryItem = GalleryItems.FirstOrDefault(x => x.ColorPath.Equals(selectedPath, StringComparison.OrdinalIgnoreCase));
     }
 
     private static void ApplyIfNotNull(string? value, Action<string> apply)
@@ -1379,16 +1281,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             setPath(path);
     }
 
-    private void RefreshOutputInfo()
-    {
-        if (!File.Exists(ActiveOutputPath))
-        {
-            PreviewInfoText = "Full-res ReShade preview";
-            return;
-        }
-
-        PreviewInfoText = Path.GetFileName(ActiveOutputPath);
-    }
+    private void RefreshOutputInfo() => PreviewInfoText = _runtimeInput == null ? "No image opened" : Path.GetFileName(_runtimeInput.ColorPath);
 
     private void AppendLog(string? message)
     {

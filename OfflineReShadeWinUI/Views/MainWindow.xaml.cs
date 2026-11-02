@@ -40,7 +40,6 @@ public sealed partial class MainWindow : Window
     private int _gpuFailures, _addonGpuFailures;
     private DateTimeOffset _gpuRetryAt, _addonRetryAt;
     private bool _addonGpuFailed;
-    private bool _updatingInputModeSwitch;
     private bool _buildingAddonOverlayTabs;
     private bool _updatingAddonControlValues;
     private string _activeNativeAddonOverlayId = string.Empty;
@@ -102,7 +101,6 @@ public sealed partial class MainWindow : Window
                 args.PropertyName == nameof(MainWindowViewModel.IsGalleryPanelOpen))
             {
                 UpdateGalleryView();
-                UpdateInputModeSwitch();
             }
             if (args.PropertyName == nameof(MainWindowViewModel.SelectedGalleryItem))
                 SyncGallerySelection();
@@ -212,7 +210,6 @@ public sealed partial class MainWindow : Window
         UpdateDepthDownsampleAvailability();
         UpdateContentView();
         UpdateGalleryView();
-        UpdateInputModeSwitch();
         UpdatePreviewTransportView();
         UpdateAddonOverlayHostVisibility();
     }
@@ -489,25 +486,6 @@ public sealed partial class MainWindow : Window
         SyncGallerySelection();
     }
 
-    private void UpdateInputModeSwitch()
-    {
-        _updatingInputModeSwitch = true;
-        InputModeSwitch.IsOn = ViewModel.IsGalleryMode;
-        _updatingInputModeSwitch = false;
-    }
-
-    private async void OnInputModeSwitchToggled(object sender, RoutedEventArgs args)
-    {
-        if (_updatingInputModeSwitch)
-            return;
-
-        if (InputModeSwitch.IsOn == ViewModel.IsGalleryMode)
-            return;
-
-        await ViewModel.ToggleInputModeAsync();
-        UpdateInputModeSwitch();
-    }
-
     private void SyncGallerySelection()
     {
         if (GalleryList.SelectedItem != ViewModel.SelectedGalleryItem)
@@ -519,13 +497,9 @@ public sealed partial class MainWindow : Window
         if (GalleryList.SelectedItem is not GalleryItemViewModel item)
             return;
 
-        if (!item.IsValid)
-        {
-            SyncGallerySelection();
-            return;
-        }
-
+        if (ReferenceEquals(item, ViewModel.SelectedGalleryItem)) return;
         await RunUiCommandAsync(() => ViewModel.SelectGalleryItemAsync(item));
+        SyncGallerySelection();
     }
 
     private void OnPreviewTransportSelectionChanged(object sender, SelectionChangedEventArgs args)

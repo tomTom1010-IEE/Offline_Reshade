@@ -25,7 +25,7 @@ uses stdout exclusively for MCP messages and stderr for diagnostic logs.
 
 ## Work with the current WinUI preview
 
-1. Start `OfflineReShadeWinUI.exe` and configure/start Preview.
+1. Start `OfflineReShadeWinUI.exe`. Open an image, or attach first to open/listen through MCP.
 2. Call `list_sessions` to discover local UI instances.
 3. Call `attach_session` with the chosen session ID. You can also pass
    `--session <id>` when launching the MCP server.
@@ -43,7 +43,7 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
-### Shared operation results (automation broker 2)
+### Shared operation results (automation broker 3)
 
 WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
 an exclusive operation (open, preset load/save, reload, export or batch) drains previously
@@ -68,6 +68,27 @@ It cannot undo an output file already atomically written by the native host.
 silent native write failures do not report success or overwrite the previous preset.
 Explicitly loading the same preset path reloads disk contents into the private working
 copy. Ordinary input switches continue preserving unsaved parameters.
+
+### Listening for game output
+
+`listen_input` takes the same paths, depth settings and dimensions as `open_input`;
+it always enables watching. Color/depth files may be absent when the listener is
+accepted. The effects directory and any specified preset must already exist.
+Its response means the listener was registered, not that a new image was applied.
+
+`get_operation_status.waitingInput` reports the requested input and its `waiting`,
+`unreadable`, `opening` or `invalid` state, with a readable error when available.
+`appliedInput` separately identifies the last connected renderer input; `showEmpty`
+stays true while waiting so the previous image is not presented as the new one.
+The listener opens only a stable readable pair, keeps the previous context after
+failure, and retries damaged input only when its file signature changes. Editing
+and export requests are rejected while the initial pair is pending.
+
+After successful opening, native watching handles subsequent updates and export
+validation. `stop_listening` cancels pending arrival and disables native watching
+without discarding the last applied image or its adjustments. `open_input`
+supersedes pending listening. `cancel_operation` also cancels initial waiting;
+use `stop_listening` to stop watching an already applied input.
 
 ## Independent rendering
 
@@ -127,6 +148,8 @@ edge. The preview composition transform accounts for DPI independently of output
 | --- | --- |
 | `list_sessions`, `attach_session` | Discover/attach to a running WinUI session |
 | `open_input` | Open or switch a color/depth pair |
+| `listen_input`, `stop_listening` | Wait for game output; stop watching while retaining the current image |
+| `get_operation_status`, `cancel_operation` | Inspect structured activity and pending/applied input; cancel work |
 | `get_status` | Loading, dimensions, frame count and input generation |
 | `list_effects` | Paginated uniform metadata/current values and techniques |
 | `set_parameters` | Set uniforms using `effect.fx::uniform` IDs |
@@ -192,7 +215,7 @@ system GPU; it does not replace hardware driver-reset testing.
 
 ## Maintenance contract (0.8.3)
 
-Native RPC is now **5**, automation broker **2**, custom offline DLL API **1**,
+Native RPC is now **5**, automation broker **3**, custom offline DLL API **1**,
 and preview bridge ABI **3**. These are internal component contracts, separate
 from MCP's negotiated stdio protocol. Connecting or attaching validates the
 contract and pinned upstream before any mutation; update the whole package together.

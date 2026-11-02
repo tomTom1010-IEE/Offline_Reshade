@@ -17,7 +17,7 @@ custom offline entry points in addition to the public ReShade API.
 | ReShade public add-on API | 20 | Header/layout fingerprint and upstream identity |
 | Custom offline DLL API | 1 | Host checks DLL export before creating a runtime |
 | Native JSON RPC | 5 | Core and WinUI handshake before mutations |
-| WinUI automation broker | 2 | MCP attachment handshake, including upstream/native dependencies |
+| WinUI automation broker | 3 | MCP attachment handshake, including upstream/native dependencies |
 | Preview bridge ABI | 3 | WinUI checks export before creating a panel |
 
 An incompatible renderer blocks rendering/export with an explicit error. An

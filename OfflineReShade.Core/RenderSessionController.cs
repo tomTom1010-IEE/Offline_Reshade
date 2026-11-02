@@ -75,6 +75,19 @@ public class RenderSessionController : IAsyncDisposable
     public Task OpenAsync(RenderInput requested, CancellationToken token = default) => OpenCoreAsync(requested, false, token);
     public Task LoadPresetAsync(string path, CancellationToken token = default) => OpenCoreAsync(Current with { PresetPath = path }, true, token);
 
+    public async Task SetInputWatchAsync(bool enabled, CancellationToken token = default)
+    {
+        await _changes.WaitAsync(token);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (IsConnected) await _host.CallAsync("set_input_watch_enabled", new { enabled }, token);
+            Current = Current with { WatchInput = enabled };
+            if (IsConnected && State.Applied != null) State.AppliedSuccessfully(State.BeginApply(Current));
+        }
+        finally { _changes.Release(); }
+    }
+
     private async Task OpenCoreAsync(RenderInput requested, bool replacePreset, CancellationToken token)
     {
         var input = AutomationEngine.ValidateInput(requested);

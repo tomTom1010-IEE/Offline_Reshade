@@ -19,13 +19,14 @@ public sealed record EditorDocument
     public string RenderHeight { get; init; } = "";
     public string InputMode { get; init; } = "RealTime";
 
-    public RenderInput ToRenderInput()
+    public RenderInput ToRenderInput(string? baseDirectory = null)
     {
         var width = ParseDimension(RenderWidth, "Width");
         var height = ParseDimension(RenderHeight, "Height");
         if ((width == 0) != (height == 0)) throw new ArgumentException("Set both output dimensions, or leave both blank for source size.");
         if ((long)width * height > PreviewGeometry.MaxRenderPixels) throw new ArgumentException("Output exceeds the 64 megapixel resource limit.");
-        return new(ColorPath, DepthPath, DepthFormat, DepthProfile, DepthDownsample, OutputPath, EffectDir, PresetPath,
+        string Resolve(string path) => baseDirectory == null || string.IsNullOrWhiteSpace(path) ? path : Path.GetFullPath(path, baseDirectory);
+        return new(Resolve(ColorPath), Resolve(DepthPath), DepthFormat, DepthProfile, DepthDownsample, Resolve(OutputPath), Resolve(EffectDir), Resolve(PresetPath),
             width, height, WatchInput: InputMode == "RealTime");
     }
 

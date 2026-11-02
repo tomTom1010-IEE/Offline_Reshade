@@ -57,29 +57,19 @@ before the game-side color/depth export has been verified.
    - `.addon64` files: `Addons`
    You may instead select an external shader folder later in `Settings`.
 6. Run `OfflineReShadeWinUI.exe`.
-7. Open `Settings`.
-8. Select `Game`: `KKS` or `KK`.
-9. Configure the Real Time paths:
-   - `Color PNG`: the exported `coloroutput.png`.
-   - `Depth File`: the exported `depthoutput.rfloat`.
-   - `Output PNG`: where the final Real Time render should be saved.
-10. Configure the Gallery paths if you want batch/still-frame editing:
-    - `Gallery Input Folder`: folder containing exported color/depth pairs.
-    - `Gallery Output Folder`: folder where final renders should be written.
-11. Configure ReShade resources:
-    - `Effect Folder`: use the package `Effects` folder if you copied shaders
-      there, or choose your own shader folder.
-    - Textures are found automatically in the package `Textures` folder, the
-      selected Effect Folder's `Textures` subfolder, or a sibling `Textures`
-      folder next to the selected Effect Folder.
-    - Add-ons are loaded from the selected Effect Folder's `Addons` subfolder
-      when it exists; otherwise they are loaded from the package `Addons`
-      folder.
-    - `Preset INI`: leave blank for the safest first run, or choose your own
-      preset after the basic workflow is confirmed.
-12. Click `Start Preview`.
-13. Enable effects and adjust parameters in `ReShade Controls`.
-14. Click `ReShade Shot` to save the current full-resolution result.
+7. Click `Open image` and choose a color PNG. An unambiguous matching depth file
+   is associated automatically; a color-only image is also supported.
+8. Expand `Input, depth and preset` to check the `KKS`/`KK` profile, manually
+   associate depth, select a preset, or change output dimensions. Apply file
+   changes with `Apply files to preview`.
+9. For ongoing game exports, click `Listen for game output`, choose the game's
+   export folder, check the expected paths/encoding and click `Start listening`.
+   You may start before the files exist; the client waits for a readable pair.
+10. Use `Settings` for an external `Effect Folder`, Gallery folders and advanced
+    preferences. The package `Effects`, `Textures` and `Addons` directories work
+    without this step when your resources are installed there.
+11. Enable effects and adjust parameters in `ReShade Controls`.
+12. Click `ReShade Shot` to save the current full-resolution result.
 
 The clean release package should include the application binaries and runtime
 DLLs, but should not include:
@@ -205,27 +195,27 @@ Open `coloroutput.png` in an image viewer to confirm it is the image you want to
 process. Do not worry if `depthoutput.rfloat` cannot be opened by an image
 viewer; it is raw depth data for the client.
 
-If these files are missing, fix the game plugin installation first. Starting the
-client before color/depth export works will only lead to empty previews or
-missing effects.
+If these files are missing, the client can wait with `Start listening`. If the
+game never produces them, check the game plugin installation and export paths.
 
 ### First Client Setup
 
-Open `Settings` before starting preview.
+Use `Open image` or `Listen for game output` on the main toolbar. The source
+summary always identifies the applied image, associated depth and preset.
 
-Set these fields carefully:
+The main `Input, depth and preset` panel contains:
 
 - `Game`: choose `KKS` for Koikatsu Sunshine or `KK` for Koikatu.
 - `Color PNG`: select `UserData\cap\OfflineReShade\coloroutput.png`.
 - `Depth File`: select `UserData\cap\OfflineReShade\depthoutput.rfloat`.
 - `Output PNG`: choose where the final Real Time render should be saved.
-- `Effect Folder`: choose the folder containing your ReShade `.fx` and `.fxh`
-  files.
 - `Preset INI`: optional. Leave blank for the first successful test.
-- `Gallery Input Folder`: folder containing archived stills or video frames.
-- `Gallery Output Folder`: folder for finished Gallery/Batch renders.
 - `Render Width` / `Render Height`: leave blank unless you intentionally want a
   different final render size.
+
+Use `Settings` for the effect folder, Gallery input/output defaults, preview
+transport and other advanced preferences. Editing a field does not apply it to
+the current image until the corresponding apply/listen operation succeeds.
 
 The release package uses paths relative to `OfflineReShadeWinUI.exe`. With the
 default settings, use this layout:
@@ -266,8 +256,9 @@ on the Add-ons page when both locations exist. Add-on DLL changes are read when
 the preview runtime starts, so stop and restart Preview after adding, removing,
 or replacing an add-on.
 
-The app stores separate path sets for KK and KKS. Switching `Game` restores the
-last paths used for that game.
+Switching the depth profile keeps the current color path. KK requires raw depth;
+switching from packed PNG depth clears that incompatible draft association and
+asks you to select raw depth. The applied preview remains unchanged until apply.
 
 ### Effects And Presets
 
@@ -310,12 +301,12 @@ and restored the next time the client starts.
 
 ### Using Add-ons
 
-Add-on support is available after `Start Preview` creates the native runtime.
+Add-on support is available after opening an image creates the native runtime.
 
 1. Put the add-on's `.addon64` file in the package `Addons` folder. Install any
    shader and texture files supplied with it in `Effects` and `Textures` as
    described above.
-2. Start Preview, then open the `Add-ons` tab in `ReShade Controls`.
+2. Open an image, then open the `Add-ons` tab in `ReShade Controls`.
 3. Check the displayed `AddonPath` to confirm which directory was scanned.
 4. Review `Load diagnostics`. It lists every discovered add-on as loaded,
    disabled, failed, or skipped. Expand `Add-on initialization log` when a DLL
@@ -344,8 +335,8 @@ of enabled FX sections to put launchpad/pre-pass techniques before the effects
 that consume their data, following the add-on author's instructions. Click
 `Save Preset` when the final order and parameters are correct.
 
-If an add-on is copied while Preview is already running, click `Stop`, then
-`Start Preview`. `Reload` recompiles effects but does not reload add-on DLLs.
+If an add-on is copied while Preview is already running, use `Stop renderer`,
+then apply the input again. `Reload` recompiles effects but does not reload add-on DLLs.
 
 ### Real Time Mode
 
@@ -359,16 +350,21 @@ UserData\cap\OfflineReShade\depthoutput.rfloat
 
 Recommended workflow:
 
-1. In game, export one test frame.
-2. In the client, select `Real Time` on the top bar.
-3. Confirm `Settings` points to the exported `coloroutput.png` and
-   `depthoutput.rfloat`.
-4. Click `Start Preview`.
+1. Click `Listen for game output` on the main toolbar.
+2. Choose the game's export folder in the input panel.
+3. Confirm the expected `coloroutput.png`, depth path, encoding and game profile.
+4. Click `Start listening`. If the files do not yet exist, export a frame in game.
 5. Enable techniques and adjust uniforms in `ReShade Controls`.
 6. Export another frame in game when you want to edit a new shot.
 7. The preview updates without restarting the ReShade runtime.
 8. Click `ReShade Shot` to save the current full-resolution render to
    `Output PNG`.
+
+Waiting for a new pair blocks editing/exporting the previous image as that pair.
+Missing files remain in a waiting state; unreadable or damaged files show their
+reason. A changed pair is retried automatically. `Stop listening` retains the
+last applied image and adjustments; opening a different image cancels the pending
+listener. The source summary distinguishes pending input from the applied image.
 
 `ReShade Shot` is the normal final-output button. It saves the current
 full-resolution runtime result and does not include the WinUI controls.
@@ -403,7 +399,7 @@ Recommended workflow:
 1. Open `Settings`.
 2. Set `Gallery Input Folder` to the folder containing the color/depth pairs.
 3. Set `Gallery Output Folder` to a separate folder for final renders.
-4. Select `Gallery` on the top bar.
+4. Open a still image (or stop listening) to use the file/Gallery workflow.
 5. Click `Refresh` in the Gallery panel.
 6. Click a thumbnail to load that item into the existing runtime.
 7. Adjust effects and parameters.
@@ -413,9 +409,12 @@ Gallery output names are generated automatically:
 
 ```text
 CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
-0-Reshade.png
-1-Reshade.png
+0.reshade.png
+1.reshade.png
 ```
+
+Color-only PNGs are valid Gallery inputs. If both raw and packed depth match a
+color file, choose the association in the input panel; it is not silently guessed.
 
 ### Batch Apply
 
