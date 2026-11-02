@@ -18,6 +18,8 @@ public sealed class AutomationEngine
     private readonly Func<RenderInput> _current;
     private readonly Func<string, CancellationToken, Task>? _loadPreset;
     private readonly Func<bool, CancellationToken, Task>? _setInputWatch;
+    private readonly Func<Task>? _submitPendingEdits;
+    private readonly Func<RenderInput?>? _pendingInput;
     private readonly OperationCoordinator _operations = new();
     private readonly InputArrivalMonitor _listener;
     private bool _restoreAfterBatch;
@@ -29,10 +31,12 @@ public sealed class AutomationEngine
     public BatchStatus? Job { get; private set; }
     public event Action? Changed;
     public AutomationEngine(Func<string, object?, CancellationToken, Task<JsonElement>> call, Func<RenderInput, CancellationToken, Task> open, Func<RenderInput> current,
-        Func<string, CancellationToken, Task>? loadPreset = null, Func<bool, CancellationToken, Task>? setInputWatch = null)
+        Func<string, CancellationToken, Task>? loadPreset = null, Func<bool, CancellationToken, Task>? setInputWatch = null,
+        Func<Task>? submitPendingEdits = null, Func<RenderInput?>? pendingInput = null)
     {
         _call = async (m, a, t) => { var result = await call(m, a, t); if (m == "get_runtime_info") ObserveRuntime(result); return result; };
         _open = open; _current = current; _loadPreset = loadPreset; _setInputWatch = setInputWatch;
+        _submitPendingEdits = submitPendingEdits; _pendingInput = pendingInput;
         _listener = new InputArrivalMonitor((input, token) => _operations.RunAsync(Activity.Create("open_input", Json(input), _current()),
             ct => ExecuteMutationAsync("open_input", Json(input), ct), token), ObserveRuntime, () => _operations.IsBusy);
         _listener.Changed += () => { if (WaitingInput is { } waiting) Activity.WaitForInput(waiting.Input.ColorPath, waiting.Error); else Activity.ClearWaiting(); Changed?.Invoke(); };
@@ -49,13 +53,21 @@ public sealed class AutomationEngine
         else Activity.ClearWaiting();
     }
 
-    public async Task<JsonElement> ExecuteAsync(string method, JsonElement args, CancellationToken token = default)
+    public Task<JsonElement> ExecuteAsync(string method, JsonElement args, CancellationToken token = default) => ExecuteCoreAsync(method, args, true, token);
+    // Only the pending-edit owner uses this entry to avoid recursively flushing itself.
+    public Task<JsonElement> ExecuteSubmittedEditAsync(string method, JsonElement args, CancellationToken token = default)
+    {
+        if (method is not ("set_uniform" or "set_addon_imgui_value" or "send_addon_overlay_input")) throw new ArgumentException("Not a submitted edit.");
+        return ExecuteCoreAsync(method, args, false, token);
+    }
+    private async Task<JsonElement> ExecuteCoreAsync(string method, JsonElement args, bool submitPending, CancellationToken token)
     {
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
         if (method == "get_operation_status") {
             var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();
             node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
             node["appliedInput"] = JsonSerializer.SerializeToNode(Activity.Snapshot.Runtime.Connected ? _current() : null, JsonOptions);
+            node["pendingConfiguration"] = PendingConfiguration();
             return Json(node);
         }
         if (method == "batch_status") return Json(Job ?? new BatchStatus("", "idle", 0, 0, null, null));
@@ -71,9 +83,11 @@ public sealed class AutomationEngine
                 node["activity"] = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions);
                 node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
                 node["appliedInput"] = JsonSerializer.SerializeToNode(_current(), JsonOptions);
+                node["pendingConfiguration"] = PendingConfiguration();
                 return JsonSerializer.SerializeToElement(node);
             } catch (IOException) { if (!_operations.IsBusy) Activity.Disconnected(); return Json(new { busy = IsBusy, connected = false, reconnecting = _operations.IsBusy,
-                loading = _operations.IsBusy, width = 0, height = 0, activity = Activity.Snapshot, waitingInput = WaitingInput }); }
+                loading = _operations.IsBusy, width = 0, height = 0, activity = Activity.Snapshot, waitingInput = WaitingInput,
+                appliedInput = (RenderInput?)null, pendingConfiguration = PendingConfiguration() }); }
         }
         if (method is "list_state" or "list_addons" or "list_addon_imgui_capture") return await _call(method, args, token);
         if (method is "open_input" or "listen_input" or "stop_listening") { token.ThrowIfCancellationRequested(); await _listener.StopAsync(); }
@@ -83,22 +97,36 @@ public sealed class AutomationEngine
             var error = new InvalidOperationException("Waiting for the requested game input. Stop listening or wait for a valid pair before editing or exporting.");
             Activity.Fail(operation, error, rejected: true); throw error;
         }
+        // The UI submits its debounced edits synchronously before the next mutation's admission.
+        // The returned task also propagates failed submissions instead of exporting old values.
+        Task edits = Task.CompletedTask;
+        if (submitPending && !_operations.IsExclusive && _submitPendingEdits != null)
+        {
+            try { edits = _submitPendingEdits(); } catch (Exception error) { edits = Task.FromException(error); }
+        }
         if (method == "batch_start")
         {
             // Admission returns a job promptly; its operation remains active through restore.
             var accepted = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _ = StartBatchAsync(operation, accepted, token);
+            _ = StartBatchAsync(operation, accepted, edits, token);
             return await accepted.Task;
         }
-        return await _operations.RunAsync(operation, ct => ExecuteMutationAsync(method, args, ct), token);
+        return await _operations.RunAsync(operation, async ct => { await edits.WaitAsync(ct); return await ExecuteMutationAsync(method, args, ct); }, token);
     }
 
-    private async Task StartBatchAsync(OperationRequest operation, TaskCompletionSource<JsonElement> accepted, CancellationToken token)
+    private JsonNode? PendingConfiguration()
+    {
+        try { return JsonSerializer.SerializeToNode(new { input = _pendingInput?.Invoke(), error = (string?)null }, JsonOptions); }
+        catch (ArgumentException error) { return JsonSerializer.SerializeToNode(new { input = (RenderInput?)null, error = error.Message }, JsonOptions); }
+    }
+
+    private async Task StartBatchAsync(OperationRequest operation, TaskCompletionSource<JsonElement> accepted, Task edits, CancellationToken token)
     {
         try
         {
             await _operations.RunAsync(operation, async ct =>
             {
+                await edits.WaitAsync(ct);
                 var args = operation.Arguments;
                 var request = args.Deserialize<BatchRequest>(JsonOptions) ?? throw new ArgumentException("Missing batch request.");
                 if (request.Items == null || request.Items.Length == 0) throw new ArgumentException("Batch needs at least one item.");
@@ -149,7 +177,25 @@ public sealed class AutomationEngine
             return await _call("get_runtime_info", null, token);
         }
         if (method is "save_preset" or "export_preset") return await SavePresetAsync(method, args, token);
-        if (method is "export_image" or "render_preview")
+        if (method == "export_image")
+        {
+            var request = args.Deserialize<ImageExportRequest>(JsonOptions) ?? throw new ArgumentException("Missing export request.");
+            ImageExport.Validate(request);
+            if (request.ExpectedInput != null && request.ExpectedInput != _current())
+                throw new InvalidOperationException("The applied input changed. Review the current image before exporting.");
+            if (request.ApplyInput == null && _pendingInput?.Invoke() != null)
+                throw new InvalidOperationException("Configuration changes are pending. Apply them before exporting, or provide applyInput explicitly.");
+            var intended = request.ApplyInput == null ? _current() : ValidateInput(request.ApplyInput);
+            var destination = RuntimeOperations.OutputPath(request.Path, intended.ColorPath, intended.DepthPath);
+            if (_current().ColorPath.Length > 0) RuntimeOperations.OutputPath(destination, _current().ColorPath, _current().DepthPath);
+            if (request.ConflictPolicy == "fail" && File.Exists(destination))
+                throw new IOException("The output file already exists. Choose another path or conflict policy.");
+            if (request.ApplyInput != null) await ExecuteMutationAsync("open_input", Json(intended), token);
+            await PrepareExportAsync(request.WarmupFrames, token);
+            return await ImageExport.WriteAsync(destination, request.ConflictPolicy,
+                (temporary, ct) => _call(request.ReShadeShot ? "save_screenshot" : "save_output", new { path = temporary }, ct), token);
+        }
+        if (method == "render_preview")
         {
             var input = _current();
             var destination = args.TryGetProperty("path", out var path) ? path.GetString()! : input.OutputPath;
@@ -157,10 +203,8 @@ public sealed class AutomationEngine
             var frames = args.TryGetProperty("warmupFrames", out var f) ? f.GetInt32() : 5;
             if (frames is < 0 or > 360000) throw new ArgumentException("Invalid warmup frame count.");
             await PrepareExportAsync(frames, token);
-            var screenshot = method == "export_image" && (!args.TryGetProperty("reShadeShot", out var shot) || shot.GetBoolean());
             var maxWidth = args.TryGetProperty("maxWidth", out var w) ? w.GetInt32() : 1280;
-            var saved = await _call(method == "render_preview" ? "save_preview" : screenshot ? "save_screenshot" : "save_output", new { path = destination, maxWidth }, token);
-            if (method != "render_preview") return saved;
+            var saved = await _call("save_preview", new { path = destination, maxWidth }, token);
             // Return pixels through the broker: packaged WinUI may virtualize AppData,
             // so a path written by its child need not be readable by the MCP process.
             try { return Json(new { mimeType = "image/png", data = Convert.ToBase64String(await File.ReadAllBytesAsync(destination, token)),

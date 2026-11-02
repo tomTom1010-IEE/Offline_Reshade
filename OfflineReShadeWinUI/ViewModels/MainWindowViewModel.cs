@@ -9,13 +9,15 @@ using OfflineReShade.WinUI.Services;
 
 namespace OfflineReShade.WinUI.ViewModels;
 
-public sealed class MainWindowViewModel : ObservableObject, IDisposable
+public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
     private readonly AppPaths _paths;
     private readonly NativeSession _session;
     private readonly UserSettingsStore _settingsStore;
     private readonly AutomationEngine _automation;
     private readonly AutomationBroker _broker;
+    private readonly DeferredEditQueue _pendingEdits;
+    public event Action? SubmitVisualEdits;
     private readonly string _workDir = Path.Combine(AutomationBroker.SessionDirectory, "work", Guid.NewGuid().ToString("N"));
     private bool _synchronizingInput;
     private bool _isInputPanelOpen;
@@ -92,16 +94,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _previewFrames.ErrorReceived += AppendLog;
         _syncContext = uiContext ?? SynchronizationContext.Current;
 
+        _pendingEdits = new(error => ReportUiError(error));
         _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current,
-            (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true), ApplyInputWatchAsync);
+            (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true), ApplyInputWatchAsync,
+            () => { SubmitVisualEdits?.Invoke(); return _pendingEdits.FlushAsync(); }, () => HasPendingConfiguration ? CurrentRenderInput() : null);
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
         StartPreviewCommand = CreateCommand(StartPreviewAsync, () => CanChooseSource);
         StopPreviewCommand = CreateCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0 || _automation.WaitingInput != null);
         CancelBatchCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.Job?.State == "running");
-        SavePngCommand = CreateCommand(SavePngAsync, () => CanEditSession);
-        ReShadeShotCommand = CreateCommand(ReShadeShotAsync, () => _session.IsConnected && CanEditSession);
+        OpenExportCommand = new RelayCommand(() => ExportRequested?.Invoke(), () => CanExport);
+        PickExportFolderCommand = CreateCommand(PickExportFolderAsync, () => CanExport);
+        OpenExportedImageCommand = CreateCommand(() => OpenExportedAsync(false), () => HasExportedImage);
+        LocateExportedImageCommand = CreateCommand(() => OpenExportedAsync(true), () => HasExportedImage);
         ReloadCommand = CreateCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
         SavePresetCommand = CreateCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
         ToggleInputModeCommand = CreateCommand(ToggleInputModeAsync, () => CanEditSession);
@@ -121,7 +127,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         PickDepthCommand = CreateCommand(PickInputDepthAsync, () => CanChooseSource);
         PickEffectDirCommand = CreateCommand(async () => await PickPathAsync(path => Settings.EffectDir = path, picker => picker.PickFolderAsync()));
         PickPresetCommand = CreateCommand(LoadPresetAsync, () => CanEditSession);
-        PickOutputCommand = CreateCommand(async () => await PickPathAsync(path => Settings.OutputPath = path, picker => picker.PickOutputPngAsync()));
         PickGalleryInputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
         PickGalleryOutputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
 
@@ -228,8 +233,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public AsyncRelayCommand StartPreviewCommand { get; }
     public AsyncRelayCommand StopPreviewCommand { get; }
-    public AsyncRelayCommand SavePngCommand { get; }
-    public AsyncRelayCommand ReShadeShotCommand { get; }
     public AsyncRelayCommand ReloadCommand { get; }
     public AsyncRelayCommand SavePresetCommand { get; }
     public AsyncRelayCommand ToggleInputModeCommand { get; }
@@ -242,7 +245,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand PickDepthCommand { get; }
     public AsyncRelayCommand PickEffectDirCommand { get; }
     public AsyncRelayCommand PickPresetCommand { get; }
-    public AsyncRelayCommand PickOutputCommand { get; }
     public AsyncRelayCommand PickGalleryInputFolderCommand { get; }
     public AsyncRelayCommand PickGalleryOutputFolderCommand { get; }
 
@@ -347,7 +349,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(CanEditSession));
                 RaiseControlCommandStates();
                 StartPreviewCommand.RaiseCanExecuteChanged();
-                SavePngCommand.RaiseCanExecuteChanged();
+                NotifyExportState();
                 ToggleInputModeCommand.RaiseCanExecuteChanged();
                 RefreshGalleryCommand.RaiseCanExecuteChanged();
             }
@@ -507,10 +509,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await ReorderTechniquesAsync(orderedTechniques);
     }
 
-    public async Task SetUniformAsync(UniformViewModel uniform, object value)
-    {
-        await ExecuteOperationAsync("set_uniform", new { id = uniform.Id, value });
-    }
+    private Task<JsonElement> SubmitEditAsync(string method, object args) => _automation.ExecuteSubmittedEditAsync(method, AutomationEngine.Json(args));
+    public Task SetUniformAsync(UniformViewModel uniform, object value) =>
+        _pendingEdits.SubmitNowAsync("uniform:" + uniform.Id, () => SubmitEditAsync("set_uniform", new { id = uniform.Id, value }));
+
+    public void QueueUniformEdit(UniformViewModel uniform, object value) =>
+        _pendingEdits.Enqueue("uniform:" + uniform.Id, () => SubmitEditAsync("set_uniform", new { id = uniform.Id, value }));
+    public void QueueAddonEdit(AddonImGuiControlViewModel control, string value) =>
+        _pendingEdits.Enqueue("addon:" + control.Id, () => SubmitEditAsync("set_addon_imgui_value", new { id = control.Id, value }));
 
     public async Task SetPreprocessorDefinitionAsync(PreprocessorDefinitionViewModel definition, string value)
     {
@@ -521,10 +527,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await RefreshControlStateAsync();
     }
 
-    public async Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value)
-    {
-        await ExecuteOperationAsync("set_addon_imgui_value", new { id = control.Id, value });
-    }
+    public Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value) =>
+        _pendingEdits.SubmitNowAsync("addon:" + control.Id, () => SubmitEditAsync("set_addon_imgui_value", new { id = control.Id, value }));
 
     public async Task OpenNativeAddonPanelAsync()
     {
@@ -552,7 +556,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            await ExecuteOperationAsync("send_addon_overlay_input", new
+            await SubmitEditAsync("send_addon_overlay_input", new
             {
                 message = unchecked((int)input.Message),
                 wparam = unchecked((int)input.WParam),
@@ -594,7 +598,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private Task StartPreviewAsync() => StartPreviewCoreAsync(false);
     private async Task StartPreviewCoreAsync(bool preserveBatch) => await ExecuteOperationAsync("open_input", CurrentRenderInput() with { WatchInput = false });
     private Task StopPreviewAsync() => StopPreviewAsync(updateStatus: true);
-    private Task StopPreviewAsync(bool updateStatus) => _automation.StopSessionAsync(_session.StopAsync);
+    private Task StopPreviewAsync(bool updateStatus)
+    {
+        _pendingEdits.Clear();
+        return _automation.StopSessionAsync(_session.StopAsync);
+    }
 
     private void ResetPreviewPresentation()
     {
@@ -626,15 +634,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         AddonControlsChanged?.Invoke();
     }
 
-    private Task SavePngAsync() => SaveImageAsync(false);
-    private Task ReShadeShotAsync() => SaveImageAsync(true);
-    private async Task SaveImageAsync(bool reShadeShot)
-    {
-        if (!_session.IsConnected) await StartPreviewCoreAsync(false);
-        await ExecuteOperationAsync("export_image", new { path = ActiveOutputPath, reShadeShot, warmupFrames = 5 });
-        RefreshOutputInfo();
-    }
-
     private async Task BatchApplyGalleryAsync(string saveMethod, string label)
     {
         if (!IsGalleryMode || !_session.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
@@ -660,6 +659,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (replacePreset) await _session.LoadPresetAsync(input.PresetPath, token);
             else await _session.OpenAsync(input, token);
             SetInputDraft(_session.Current);
+            _pendingEdits.Clear();
             IsInputPanelOpen = false;
             InputSelectionMessage = "";
             PreviewInfoText = Path.GetFileName(_session.Current.ColorPath);
@@ -711,7 +711,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ClearDepthCommand.RaiseCanExecuteChanged(); StopPreviewCommand.RaiseCanExecuteChanged();
             CancelBatchCommand.RaiseCanExecuteChanged(); CancelOperationCommand.RaiseCanExecuteChanged();
             RetryOperationCommand.RaiseCanExecuteChanged(); LocateFeedbackCommand.RaiseCanExecuteChanged();
-            StartPreviewCommand.RaiseCanExecuteChanged(); SavePngCommand.RaiseCanExecuteChanged();
+            StartPreviewCommand.RaiseCanExecuteChanged(); NotifyExportState();
             ToggleInputModeCommand.RaiseCanExecuteChanged(); RefreshGalleryCommand.RaiseCanExecuteChanged(); RaiseControlCommandStates();
         }
         if (_syncContext != null && SynchronizationContext.Current != _syncContext) _syncContext.Post(_ => Update(), null); else Update();
@@ -995,6 +995,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public string ConfigurationStatusText => Settings.Session.ValidationError ?? (HasPendingConfiguration ? "Changes pending - apply before export" : "Configuration applied");
     private void OnEditingSessionChanged()
     {
+        NotifyExportState();
         OnPropertyChanged(nameof(CurrentInputText)); OnPropertyChanged(nameof(CurrentDepthText)); OnPropertyChanged(nameof(CurrentPresetText));
         OnPropertyChanged(nameof(InputSourceText)); OnPropertyChanged(nameof(IsListening));
         OnPropertyChanged(nameof(HasPendingConfiguration));
@@ -1108,6 +1109,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         AdapterLuid = info.TryGetProperty("adapterLuid", out var luid) ? luid.GetUInt64() : 0;
         RenderWidth = info.GetProperty("width").GetUInt32(); RenderHeight = info.GetProperty("height").GetUInt32();
+        OnPropertyChanged(nameof(ExportDimensionsText));
         var error = info.TryGetProperty("previewError", out var e) ? e.GetString() ?? "" : "";
         if (error.Length > 0 && error != _lastPreviewError) { _lastPreviewError = error; AppendLog(error); }
         if (IsGpuPreviewActive && info.TryGetProperty("sharedPreviewHandle", out var handle) && handle.GetUInt64() == 0)
@@ -1138,7 +1140,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
         } catch (Exception ex) { if (!_isDisposed) ReportUiError(ex, "preview_transport"); }
     }
-    private string ActiveOutputPath => Settings.OutputPath;
 
     private string EffectiveDepthProfile(string depthFormat)
     {
@@ -1312,6 +1313,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task PrepareCloseAsync()
     {
+        _pendingEdits.Clear();
         _automation.Cancel(restore: false);
         await _automation.StopSessionAsync(async () => {
             if (_settingsStore.LoadError == null) await SaveSettingsNowAsync();
@@ -1323,7 +1325,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void RaiseControlCommandStates()
     {
-        ReShadeShotCommand.RaiseCanExecuteChanged();
+        NotifyExportState();
         ReloadCommand.RaiseCanExecuteChanged();
         SavePresetCommand.RaiseCanExecuteChanged();
         RaiseBatchApplyCanExecuteChanged();
@@ -1345,6 +1347,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _isDisposed = true;
+        _pendingEdits.Dispose();
         _automation.Cancel(restore: false);
         _broker.Dispose();
         var settingsSaveCancellation = _settingsSaveCancellation;

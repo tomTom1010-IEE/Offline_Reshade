@@ -82,9 +82,10 @@ public sealed class McpTools(McpBridge bridge)
         catch (Exception error) { return Failure(error, "render_preview"); }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
-    [McpServerTool(Name = "export_image"), Description("Export the current image at full runtime resolution with GUI excluded. Waits for compilation and the requested real rendered frame count. Prevents overwriting input files.")]
-    public Task<CallToolResult> ExportImage(string path, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true)
-        => ExecuteToolAsync("export_image", new { path, warmupFrames, reShadeShot }, cancellationToken);
+    [McpServerTool(Name = "export_image"), Description("Export the applied image after pending parameter submissions, compilation and warmup. ReShade screenshot is the default; direct PNG is explicit. conflictPolicy: replace, rename or fail. Pending UI configuration requires explicit applyInput (applied and exported under one lock). Optional expectedInput rejects a changed source. Returns the actual output path.")]
+    public Task<CallToolResult> ExportImage(string path, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true,
+        string conflictPolicy = "replace", RenderInput? applyInput = null, RenderInput? expectedInput = null)
+        => ExecuteToolAsync("export_image", new ImageExportRequest(path, warmupFrames, reShadeShot, conflictPolicy, applyInput, expectedInput), cancellationToken);
 
     [McpServerTool(Name = "start_batch"), Description("Start a cancellable batch using an immutable list of inputs and output paths. Resumes matching completed files using a checkpoint and output hashes. Returns a job ID immediately.")]
     public Task<CallToolResult> StartBatch(RenderInput[] items, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true, bool resume = true, int retries = 1)

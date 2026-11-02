@@ -6,7 +6,7 @@
 
 正式便携包同时包含 .NET 和 Windows App SDK 运行依赖。设置保存到 `%LOCALAPPDATA%\OfflineReShade\settings.json`；新设置不存在时会读取程序旁旧的 `OfflineReShadeWinUI.settings.json`。
 
-两个保存按钮都会等待 FX 编译完成和实际渲染预热帧，并将 ReShade GUI 排除在输出之外。`ReShade Shot` 使用 ReShade 截图 API，会触发截图 Add-on 事件；`Save PNG` 直接将干净渲染结果编码为 PNG。没有预览时，保存操作会先启动 runtime。
+主界面统一使用 `Export image` 导出。默认 ReShade 截图会触发截图 Add-on 事件；高级选项中的 Direct PNG 不触发这些事件。两种方式都会等待参数提交、FX 编译及实际预热帧，并排除界面；失败时不会静默切换方式。
 
 批处理的 `Warmup frames` 按实际完成渲染的帧数等待。执行时显示进度并锁定冲突操作，可随时取消；重试同一任务时会根据 `.OfflineReShade.batch.json`、输入文件指纹和输出 SHA-256 恢复已完成项目。单项失败会重试一次。渲染宽高同时留空时保留每张源图尺寸，支持不同分辨率混合；同时填写宽高则统一缩放颜色和深度到指定尺寸。
 
@@ -38,7 +38,7 @@ Offline ReShade 是一个 Windows 工具，用于把 ReShade FX 效果应用到�
 5. 点击主界面的 `Open image` 打开 color PNG。唯一匹配的 depth 会自动关联，也支持无深度图片。
 6. 在 `Input, depth and preset` 中核对 `KKS` / `KK`、深度、预设和输出尺寸；手动修改后点击 `Apply files to preview`。
 7. 持续接收游戏输出时，点击 `Listen for game output`，选择游戏导出目录并核对路径，再点击 `Start listening`。文件尚未生成时也可先监听。
-8. 调整效果后点击 `ReShade Shot` 保存当前全分辨率结果。
+8. 调整效果后点击 `Export image`，核对目标路径、最终尺寸和文件冲突策略后导出。
 
 干净的发布包应该只包含程序二进制和 runtime DLL，不应包含：
 
@@ -140,7 +140,6 @@ CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
 - `Color PNG`：实时 color 输入。
 - `Depth File`：实时 depth 输入。
 - `Preset INI`：可选的 ReShade preset。
-- `Output PNG`：实时输出路径。
 - `Render Width` / `Render Height`：留空则使用 color 图像尺寸。
 
 `Settings` 保留 `Effect Folder`、Gallery 输入/输出目录、预览传输和高级偏好。修改字段后需执行应用或监听操作；只有成功后才会更新已应用素材。
@@ -212,7 +211,7 @@ Add-on 详情还会显示它注册的事件和离线兼容性。依赖 runtime�
 2. 核对 color/depth 路径、深度编码及游戏配置，点击 `Start listening`。
 3. 文件尚未生成时会显示等待；在游戏中导出图片后，稳定且可读的配对才会被打开。
 4. 在 `ReShade Controls` 中调整 techniques 和 uniforms。
-5. 点击 `ReShade Shot` 或 `Save PNG` 保存当前全分辨率结果。
+5. 点击 `Export image` 保存当前全分辨率结果。
 
 等待新素材期间不会把上一张图导出成新素材。缺失文件显示等待；文件被占用或损坏会显示原因，文件变化后自动重试。`Stop listening` 保留上一份有效图片和调参；手动打开另一张图会取消待处理监听。来源摘要区分当前已应用素材和正在等待的目标。
 
@@ -225,9 +224,17 @@ Gallery 模式用于处理已经导出的截图或帧序列。
 3. 点击 Gallery 面板中的 `Refresh`。
 4. 点击一个缩略图，把对应的 color/depth pair 载入现有 runtime。
 5. 调整 ReShade 控制项。
-6. 对当前项目使用 `ReShade Shot` / `Save PNG`，或使用 `Batch Apply` 将当前设置应用到所有有效项目。
+6. 对当前项目使用 `Export image`，或使用 `Batch Apply` 将当前设置应用到所有有效项目。
 
 无深度 PNG 也可作为 Gallery 素材；同一图片同时匹配 raw 与 packed depth 时，需要在工作区明确关联，程序不会擅自选择。
+
+### 导出图片
+
+`Export image` 面板显示当前素材、最终像素尺寸、目标文件及文件冲突策略。界面默认在文件名后添加编号；也可明确选择成功后覆盖，或遇到冲突就报错。完成后显示实际保存路径，并提供打开图片与定位文件夹。
+
+存在待应用配置时，操作按钮明确显示 `Apply changes and export`。应用和导出属于同一次排他操作；应用失败不会导出旧图冒充新图。最后一次滑块和 Add-on 参数更新会先提交，附着 MCP 发起导出时也一样。
+
+高级选项提供 Direct PNG 和预热帧数。默认 ReShade 截图适用于需要截图事件的 Add-on；Direct PNG 仅保存干净的渲染结果。编译、贴图、深度及输入变化检查仍然有效；失败或取消不会破坏已有成品，合法全黑作品仍可导出并附带提示。
 
 `Frame Delay` 控制批处理切换输入后等待多少个渲染帧。对于有 temporal history、path tracing samples 或 accumulation buffers 的效果，可以适当增大这个值。
 

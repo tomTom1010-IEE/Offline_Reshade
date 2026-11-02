@@ -20,8 +20,6 @@ public sealed partial class MainWindow : Window
     private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Expander, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
     private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
-    private readonly Dictionary<string, CancellationTokenSource> _uniformUpdateSources = new();
-    private readonly Dictionary<string, CancellationTokenSource> _addonControlUpdateSources = new();
     private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
     private readonly List<MappedSlider> _fxMappedSliders = new();
     private readonly List<MappedSlider> _addonMappedSliders = new();
@@ -36,6 +34,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _sliderModeOverlayTimer = new();
     private bool _isPreviewDragging;
     private bool _isClosing;
+    private bool _exportDialogOpen;
     private bool _closePrepared, _closeRequested;
     private int _gpuFailures, _addonGpuFailures;
     private DateTimeOffset _gpuRetryAt, _addonRetryAt;
@@ -140,6 +139,8 @@ public sealed partial class MainWindow : Window
                 UpdateSliderInteractionMode();
         };
         PreviewSurface.PointerWheelChanged += OnPreviewPointerWheelChanged;
+        ViewModel.ExportRequested += OnExportRequested;
+        ViewModel.SubmitVisualEdits += FlushAddonOverlayMouseMove;
         PreviewSurface.PointerPressed += OnPreviewPointerPressed;
         PreviewSurface.PointerMoved += OnPreviewPointerMoved;
         PreviewSurface.PointerReleased += OnPreviewPointerReleased;
@@ -196,6 +197,8 @@ public sealed partial class MainWindow : Window
             ViewModel.AddonControlsChanged -= BuildAddonControls;
             ViewModel.AddonControlValuesChanged -= UpdateAddonControlValues;
             ViewModel.ControlsChanged -= BuildControls;
+            ViewModel.ExportRequested -= OnExportRequested;
+            ViewModel.SubmitVisualEdits -= FlushAddonOverlayMouseMove;
             ViewModel.Dispose();
         };
 
@@ -322,6 +325,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        FlushAddonOverlayMouseMove();
         _ = ViewModel.SendAddonOverlayInputAsync(input);
     }
 
@@ -1822,38 +1826,12 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value)
-    {
-        if (_addonControlUpdateSources.TryGetValue(control.Id, out var oldSource))
-            oldSource.Cancel();
-
-        var source = new CancellationTokenSource();
-        _addonControlUpdateSources[control.Id] = source;
-        _ = SendAddonControlUpdateAsync(control, value, source);
-    }
+    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value) => ViewModel.QueueAddonEdit(control, value);
 
     private static void ApplyAddonAutomation(FrameworkElement element, AddonImGuiControlViewModel control)
     {
         AutomationProperties.SetAutomationId(element, "AddonControl_" + MakeAutomationId(control.Id));
         AutomationProperties.SetName(element, control.Label);
-    }
-
-    private async Task SendAddonControlUpdateAsync(AddonImGuiControlViewModel control, string value, CancellationTokenSource source)
-    {
-        try
-        {
-            await Task.Delay(16, source.Token);
-            await ViewModel.SetAddonImGuiValueAsync(control, value);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        finally
-        {
-            if (_addonControlUpdateSources.TryGetValue(control.Id, out var current) && ReferenceEquals(current, source))
-                _addonControlUpdateSources.Remove(control.Id);
-            source.Dispose();
-        }
     }
 
     private static bool TryParseFirstNumber(string text, out double value)
@@ -2321,33 +2299,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void QueueUniformUpdate(UniformViewModel uniform, object value)
-    {
-        if (_uniformUpdateSources.TryGetValue(uniform.Id, out var oldSource))
-            oldSource.Cancel();
-
-        var source = new CancellationTokenSource();
-        _uniformUpdateSources[uniform.Id] = source;
-        _ = SendUniformUpdateAsync(uniform, value, source);
-    }
-
-    private async Task SendUniformUpdateAsync(UniformViewModel uniform, object value, CancellationTokenSource source)
-    {
-        try
-        {
-            await Task.Delay(16, source.Token);
-            await ViewModel.SetUniformAsync(uniform, value);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        finally
-        {
-            if (_uniformUpdateSources.TryGetValue(uniform.Id, out var current) && ReferenceEquals(current, source))
-                _uniformUpdateSources.Remove(uniform.Id);
-            source.Dispose();
-        }
-    }
+    private void QueueUniformUpdate(UniformViewModel uniform, object value) => ViewModel.QueueUniformEdit(uniform, value);
 
     private static object BuildNumericValue(IReadOnlyList<TextBox> boxes, int changedIndex, double changedValue)
     {
@@ -2406,6 +2358,42 @@ public sealed partial class MainWindow : Window
             ViewModel.ReportUiError(ex);
             return false;
         }
+    }
+    private async void OnExportRequested()
+    {
+        if (_exportDialogOpen) return;
+        _exportDialogOpen = true;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = RootGrid.XamlRoot,
+                RequestedTheme = RootGrid.ActualTheme,
+                Title = "Export image",
+                Content = new ExportPanel(ViewModel),
+                PrimaryButtonText = ViewModel.ExportActionText,
+                CloseButtonText = "Close",
+                DefaultButton = ContentDialogButton.Primary,
+                IsPrimaryButtonEnabled = ViewModel.CanExport
+            };
+            System.ComponentModel.PropertyChangedEventHandler changed = (_, args) =>
+            {
+                if (args.PropertyName == nameof(MainWindowViewModel.ExportActionText)) dialog.PrimaryButtonText = ViewModel.ExportActionText;
+                if (args.PropertyName == nameof(MainWindowViewModel.CanExport)) dialog.IsPrimaryButtonEnabled = ViewModel.CanExport;
+            };
+            ViewModel.PropertyChanged += changed;
+            dialog.PrimaryButtonClick += async (_, args) =>
+            {
+                var deferral = args.GetDeferral();
+                args.Cancel = true; // Keep results, warnings and file-opening actions visible.
+                try { await RunUiCommandAsync(ViewModel.ExportImageAsync); }
+                finally { deferral.Complete(); }
+            };
+            try { await dialog.ShowAsync(); }
+            finally { ViewModel.PropertyChanged -= changed; }
+        }
+        catch (Exception error) { ViewModel.ReportUiError(error); }
+        finally { _exportDialogOpen = false; }
     }
     public static Visibility BoolVisibility(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
     public static InfoBarSeverity NoticeSeverity(string status) => status is "failed" or "rejected" ? InfoBarSeverity.Error : status == "warning" ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;

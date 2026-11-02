@@ -44,7 +44,11 @@ public sealed class ApplicationActivity
     public OperationRequest Create(string method, JsonElement args, RenderInput input)
     {
         string? Text(string name) => args.ValueKind == JsonValueKind.Object && args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-        return new(Interlocked.Increment(ref _sequence), method, args.Clone(), Text("colorPath") ?? input.ColorPath, Text("path") ?? Text("outputPath"));
+        var source = Text("colorPath") ?? input.ColorPath;
+        if (method == "export_image" && args.ValueKind == JsonValueKind.Object && args.TryGetProperty("applyInput", out var applied) &&
+            applied.ValueKind == JsonValueKind.Object && applied.TryGetProperty("colorPath", out var color) && color.ValueKind == JsonValueKind.String)
+            source = color.GetString() ?? source;
+        return new(Interlocked.Increment(ref _sequence), method, args.Clone(), source, Text("path") ?? Text("outputPath"));
     }
     public void Begin(OperationRequest request)
     {

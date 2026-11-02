@@ -43,7 +43,7 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
-### Shared operation results (automation broker 3)
+### Shared operation results (automation broker 4)
 
 WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
 an exclusive operation (open, preset load/save, reload, export or batch) drains previously
@@ -68,6 +68,40 @@ It cannot undo an output file already atomically written by the native host.
 silent native write failures do not report success or overwrite the previous preset.
 Explicitly loading the same preset path reloads disk contents into the private working
 copy. Ordinary input switches continue preserving unsaved parameters.
+
+### Export configuration and destination
+
+`export_image` defaults to ReShade screenshot capture (`reShadeShot: true`). Set
+`reShadeShot: false` explicitly for direct PNG without screenshot add-on events.
+No automatic fallback occurs between the two capture methods.
+
+`conflictPolicy` accepts `replace` (the MCP default for existing clients), `rename`
+(add a numbered filename), or `fail`. WinUI defaults to `rename`. Rendering and
+validation finish before the output is atomically published. The result's `path`
+is the actual final filename, including any suffix; failed or cancelled work
+does not replace an existing output. A file created concurrently is respected
+by both `rename` and `fail`.
+
+Before mutations, attached sessions submit outstanding debounced UI parameter
+updates. Export waits for those submissions and fails if they fail. A newer text
+or MCP change cannot be overtaken by an older delayed slider update.
+
+`get_status` and `get_operation_status` expose `pendingConfiguration` with `input`
+and `error`, separately from `appliedInput`. An export with pending UI configuration
+fails unless the caller explicitly supplies `applyInput` (a complete RenderInput).
+It applies that configuration and exports under one operation lock, retaining the
+previous context if opening fails. Invalid draft dimensions are reported, not
+silently converted to source size. Optional `expectedInput`, copied from the
+status's `appliedInput`, rejects an export if the applied input has since changed.
+
+```json
+{
+  "path": "C:\\Captures\\Rendered\\shot.png",
+  "conflictPolicy": "rename",
+  "warmupFrames": 5,
+  "reShadeShot": true
+}
+```
 
 ### Listening for game output
 

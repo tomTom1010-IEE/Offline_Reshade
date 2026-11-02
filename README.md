@@ -69,7 +69,7 @@ before the game-side color/depth export has been verified.
     preferences. The package `Effects`, `Textures` and `Addons` directories work
     without this step when your resources are installed there.
 11. Enable effects and adjust parameters in `ReShade Controls`.
-12. Click `ReShade Shot` to save the current full-resolution result.
+12. Click `Export image`, review the destination and conflict policy, then export.
 
 The clean release package should include the application binaries and runtime
 DLLs, but should not include:
@@ -208,7 +208,6 @@ The main `Input, depth and preset` panel contains:
 - `Game`: choose `KKS` for Koikatsu Sunshine or `KK` for Koikatu.
 - `Color PNG`: select `UserData\cap\OfflineReShade\coloroutput.png`.
 - `Depth File`: select `UserData\cap\OfflineReShade\depthoutput.rfloat`.
-- `Output PNG`: choose where the final Real Time render should be saved.
 - `Preset INI`: optional. Leave blank for the first successful test.
 - `Render Width` / `Render Height`: leave blank unless you intentionally want a
   different final render size.
@@ -357,8 +356,7 @@ Recommended workflow:
 5. Enable techniques and adjust uniforms in `ReShade Controls`.
 6. Export another frame in game when you want to edit a new shot.
 7. The preview updates without restarting the ReShade runtime.
-8. Click `ReShade Shot` to save the current full-resolution render to
-   `Output PNG`.
+8. Click `Export image` and review the destination and final pixel dimensions.
 
 Waiting for a new pair blocks editing/exporting the previous image as that pair.
 Missing files remain in a waiting state; unreadable or damaged files show their
@@ -366,13 +364,25 @@ reason. A changed pair is retried automatically. `Stop listening` retains the
 last applied image and adjustments; opening a different image cancels the pending
 listener. The source summary distinguishes pending input from the applied image.
 
-`ReShade Shot` is the normal final-output button. It saves the current
-full-resolution runtime result and does not include the WinUI controls.
+### Export Image
 
-Both `ReShade Shot` and `Save PNG` wait for FX compilation and rendered warmup
-frames and exclude all ReShade GUI. `ReShade Shot` uses the ReShade screenshot
-API and triggers screenshot add-on events; `Save PNG` directly encodes the clean
-rendered image. Without an active preview, saving starts the runtime first.
+The single `Export image` entry opens a panel with the source, final dimensions,
+destination and file conflict policy. The UI defaults to a numbered filename when
+the destination exists; you can explicitly replace it after a successful export
+or stop on conflict. The completed result shows its actual path and provides
+`Open exported image` and `Show in folder`.
+
+Pending configuration changes change the action to `Apply changes and export`.
+Applying and exporting hold the same session operation; failure to apply cannot
+export the previous image as the requested result. Deferred slider/add-on edits
+are submitted first, including when an attached MCP client starts the export.
+
+ReShade screenshot is the default method and triggers screenshot add-on events.
+Advanced options expose direct PNG (without those events) and warmup frames.
+Both methods exclude the interface and retain compilation, texture, depth and
+input-generation validation. A failure never switches methods automatically;
+failed or cancelled output does not replace an existing result. Black output
+remains allowed with a warning.
 
 ### Gallery Mode
 
@@ -403,7 +413,7 @@ Recommended workflow:
 5. Click `Refresh` in the Gallery panel.
 6. Click a thumbnail to load that item into the existing runtime.
 7. Adjust effects and parameters.
-8. Click `ReShade Shot` to save only the selected item.
+8. Click `Export image` to save only the selected item.
 
 Gallery output names are generated automatically:
 

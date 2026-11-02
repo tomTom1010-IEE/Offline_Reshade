@@ -12,7 +12,7 @@
   },
   "interfaces": {
     "nativeRpc": 5,
-    "automationBroker": 3,
+    "automationBroker": 4,
     "offlineApi": 1,
     "previewBridge": 3
   },

@@ -25,7 +25,11 @@ internal static class OperationTests
                 value = AutomationEngine.Json(args).GetProperty("value").GetInt32(); calls.Add("edit" + value);
             }
             if (method == "reload_effects" && failReload) throw new IOException("Broken reload");
-            if (method is "save_output" or "save_screenshot") { calls.Add("export" + value); return AutomationEngine.Json(new { path = input.OutputPath, warning = "Output is entirely black; verify that this is intentional." }); }
+            if (method is "save_output" or "save_screenshot") {
+                calls.Add("export" + value);
+                await File.WriteAllTextAsync(AutomationEngine.Json(args).GetProperty("path").GetString()!, "render", token);
+                return AutomationEngine.Json(new { path = input.OutputPath, warning = "Output is entirely black; verify that this is intentional." });
+            }
             if (method == "export_preset" && exportPreset)
                 await File.WriteAllTextAsync(AutomationEngine.Json(args).GetProperty("path").GetString()!, "new preset", token);
             return AutomationEngine.Json(new { });

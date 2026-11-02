@@ -32,8 +32,7 @@
       <CommandBar Grid.ColumnSpan="3" DefaultLabelPosition="Right" IsOpen="False" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
         <AppBarButton Label="Open image" Icon="OpenFile" Command="{x:Bind ViewModel.OpenImageCommand}" AutomationProperties.AutomationId="OpenImage" />
         <AppBarButton Label="Listen for game output" Icon="Play" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="ConfigureInputListener" />
-        <AppBarButton Label="ReShade Shot" Icon="Camera" Command="{x:Bind ViewModel.ReShadeShotCommand}" />
-        <AppBarButton Label="Save PNG" Icon="Save" Command="{x:Bind ViewModel.SavePngCommand}" />
+        <AppBarButton Label="Export image" Icon="Save" Command="{x:Bind ViewModel.OpenExportCommand}" AutomationProperties.AutomationId="ExportImage" />
         <CommandBar.SecondaryCommands>
           <AppBarButton Label="Input and preset" Command="{x:Bind ViewModel.OpenInputPanelCommand}" />
           <AppBarButton Label="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}" />
@@ -151,16 +150,6 @@
               </Grid.ColumnDefinitions>
               <TextBox Text="{x:Bind ViewModel.Settings.PresetPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
               <Button Grid.Column="1" Content="Load preset" Command="{x:Bind ViewModel.PickPresetCommand}" AutomationProperties.AutomationId="LoadPreset" />
-            </Grid>
-
-            <TextBlock Text="Output PNG" />
-            <Grid ColumnSpacing="8">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <TextBox Text="{x:Bind ViewModel.Settings.OutputPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickOutputCommand}" />
             </Grid>
 
             <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
