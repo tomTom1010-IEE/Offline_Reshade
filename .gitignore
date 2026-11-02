@@ -7,6 +7,8 @@
 [Rr]elease/
 *.obj
 *.cso
+__pycache__/
+*.py[cod]
 
 # Visual Studio cache files
 .vs/

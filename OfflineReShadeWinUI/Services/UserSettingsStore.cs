@@ -19,11 +19,16 @@ public sealed class UserSettingsStore
 
     public PersistedUiSettings? Load()
     {
-        if (!File.Exists(SettingsPath))
+        var path = File.Exists(SettingsPath) ? SettingsPath : Path.Combine(AppContext.BaseDirectory, "OfflineReShadeWinUI.settings.json");
+        if (!File.Exists(path))
             return null;
-
-        using var stream = File.OpenRead(SettingsPath);
-        return JsonSerializer.Deserialize<PersistedUiSettings>(stream, JsonOptions);
+        try {
+            using var stream = File.OpenRead(path);
+            return JsonSerializer.Deserialize<PersistedUiSettings>(stream, JsonOptions);
+        } catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) {
+            System.Diagnostics.Debug.WriteLine("Settings could not be read: " + ex.Message);
+            return null;
+        }
     }
 
     public async Task SaveAsync(PersistedUiSettings settings, CancellationToken cancellationToken)
@@ -56,6 +61,7 @@ public sealed class UserSettingsStore
 
 public sealed class PersistedUiSettings
 {
+    public string? SessionPresetPath { get; set; }
     public string? ColorPath { get; set; }
     public string? DepthPath { get; set; }
     public string? DepthFormat { get; set; }

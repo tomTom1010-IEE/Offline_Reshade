@@ -7,6 +7,30 @@ Param(
 	$platform = ""
 )
 
+# The fork has an explicit upstream identity. Rebuilding must not change it.
+$baselinePath = Join-Path $PSScriptRoot '..\maintenance\baseline.json'
+if (Test-Path -LiteralPath $baselinePath) {
+    $baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
+    $parts = $baseline.upstream.version.Split('.')
+    $global:ReShadeVersion = @([int]$parts[0], [int]$parts[1], [int]$parts[2], 0)
+    $content = @"
+#pragma once
+
+#define VERSION_FULL $($baseline.upstream.version).0
+#define VERSION_MAJOR $($parts[0])
+#define VERSION_MINOR $($parts[1])
+#define VERSION_REVISION $($parts[2])
+#define VERSION_BUILD 0
+
+#define VERSION_STRING_FILE "$($baseline.upstream.version).0"
+#define VERSION_STRING_PRODUCT "$($baseline.upstream.version) UNOFFICIAL Offline ReShade $($baseline.productVersion)"
+"@
+    if (!(Test-Path -LiteralPath $path) -or (Get-Content -LiteralPath $path -Raw).TrimEnd() -ne $content.TrimEnd()) {
+        [IO.File]::WriteAllText([IO.Path]::GetFullPath($path), $content + "`r`n", [Text.Encoding]::ASCII)
+    }
+    return
+}
+
 $exists = Test-Path $path
 $version = 0,0,0,0
 

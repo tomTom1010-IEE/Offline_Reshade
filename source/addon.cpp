@@ -6,6 +6,7 @@
 #if defined(RESHADE_API_LIBRARY_EXPORT) && RESHADE_ADDON
 
 #include "reshade.hpp"
+#include "offline_contract.hpp"
 #include "addon_manager.hpp"
 #include "runtime.hpp"
 #include "dll_log.hpp"
@@ -365,6 +366,26 @@ void ReShadeNotifyOfflineInputChanged(reshade::api::effect_runtime *runtime, con
 bool ReShadeIsEffectRuntimeLoading(reshade::api::effect_runtime *runtime)
 {
 	return runtime != nullptr && static_cast<reshade::runtime *>(runtime)->is_loading();
+}
+
+static bool copy_offline_string(const std::string &text, char *value, size_t *size)
+{
+	if (size == nullptr) return false;
+	const size_t required = text.size() + 1;
+	if (value == nullptr || *size < required) { *size = required; return value == nullptr; }
+	std::memcpy(value, text.c_str(), required); *size = required; return true;
+}
+static_assert(RESHADE_API_VERSION == offline_contract::ReShadeApi, "Update the offline baseline after a public API change.");
+uint32_t ReShadeGetOfflineApiVersion() { return offline_contract::OfflineApi; }
+const char *ReShadeGetOfflineUpstreamCommit() { return offline_contract::UpstreamCommit; }
+
+bool ReShadeGetOfflineExportError(reshade::api::effect_runtime *runtime, char *value, size_t *size)
+{
+	return runtime != nullptr && copy_offline_string(static_cast<reshade::runtime *>(runtime)->offline_export_error(), value, size);
+}
+bool ReShadeGetOfflineDependencies(reshade::api::effect_runtime *runtime, char *value, size_t *size)
+{
+	return runtime != nullptr && copy_offline_string(static_cast<reshade::runtime *>(runtime)->offline_dependencies(), value, size);
 }
 
 #include "d3d9/d3d9_impl_device.hpp"

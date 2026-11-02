@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using OfflineReShade.Core;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
@@ -14,6 +15,26 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly PrototypeProcessService _prototype;
     private readonly UserSettingsStore _settingsStore;
     private readonly ReShadeRpcClient _rpc = new();
+    private readonly AutomationEngine _automation;
+    private readonly AutomationBroker _broker;
+    private readonly string _workDir = Path.Combine(AutomationBroker.SessionDirectory, "work", Guid.NewGuid().ToString("N"));
+    private RenderInput? _inputOverride;
+    private RenderInput? _runtimeInput;
+    private readonly DeviceRecoveryBudget _deviceRecovery = new();
+    private bool _cpuPreviewFallback;
+    private string _lastPreviewError = "";
+    public bool IsGpuPreviewActive => !UseCpuPreview && !_cpuPreviewFallback;
+    public ulong AdapterLuid { get; private set; }
+    public uint RenderWidth { get; private set; }
+    public uint RenderHeight { get; private set; }
+    public bool CanEditSession => !IsBatchApplying;
+    public string AutomationSessionText => "MCP session: " + _broker.Descriptor.Id;
+    public string AutomationSessionId => _broker.Descriptor.Id;
+    public double BatchProgress => _automation.Job?.Completed ?? 0;
+    public double BatchMaximum => Math.Max(1, _automation.Job?.Total ?? 1);
+    public string BatchStatusText => _automation.Job is { } j ? $"{j.State}: {j.Completed}/{j.Total}" + (j.Error == null ? "" : " — " + j.Error) : "Ready";
+    public RelayCommand CancelBatchCommand { get; }
+
     private readonly PreviewFrameClient _previewFrames = new();
     private readonly SynchronizationContext? _syncContext;
     private CancellationTokenSource? _fpsCancellation;
@@ -45,6 +66,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isDisposed;
     private bool _controlStatePopulated;
     private bool _isRefreshingControlState;
+    private int _runtimeGeneration;
     private bool _isEffectsLoading;
     private DateTimeOffset? _effectsLoadingStartedAt;
     private bool _hasPersistedDepthProfile;
@@ -53,7 +75,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private PersistedProfilePaths _kksPaths = new();
     private PersistedProfilePaths _kkPaths = new();
 
-    public MainWindowViewModel(AppPaths paths)
+    public MainWindowViewModel(AppPaths paths, SynchronizationContext? uiContext = null)
     {
         _paths = paths;
         _settingsStore = new UserSettingsStore(paths);
@@ -69,17 +91,22 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _prototype.PreviewExited += OnPreviewExited;
         _previewFrames.FrameReceived += frame => PreviewFrameReceived?.Invoke(frame);
         _previewFrames.ErrorReceived += AppendLog;
-        _syncContext = SynchronizationContext.Current;
+        _syncContext = uiContext ?? SynchronizationContext.Current;
 
-        StartPreviewCommand = new AsyncRelayCommand(StartPreviewAsync, () => !IsPreviewRunning);
+        _automation = new AutomationEngine((m, a, t) => _rpc.CallAsync(m, a, t), OpenAutomationInputAsync, CurrentRenderInput);
+        _automation.Changed += OnAutomationChanged;
+        _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
+
+        StartPreviewCommand = new AsyncRelayCommand(StartPreviewAsync, () => !IsPreviewRunning && CanEditSession);
         StopPreviewCommand = new RelayCommand(StopPreview, () => IsPreviewRunning);
-        SavePngCommand = new AsyncRelayCommand(SavePngAsync);
-        ReShadeShotCommand = new AsyncRelayCommand(ReShadeShotAsync, () => _rpc.IsConnected);
-        ReloadCommand = new AsyncRelayCommand(ReloadAsync, () => _rpc.IsConnected);
-        SavePresetCommand = new AsyncRelayCommand(SavePresetAsync, () => _rpc.IsConnected);
-        ToggleInputModeCommand = new AsyncRelayCommand(ToggleInputModeAsync);
+        CancelBatchCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.Job?.State == "running");
+        SavePngCommand = new AsyncRelayCommand(SavePngAsync, () => CanEditSession);
+        ReShadeShotCommand = new AsyncRelayCommand(ReShadeShotAsync, () => _rpc.IsConnected && CanEditSession);
+        ReloadCommand = new AsyncRelayCommand(ReloadAsync, () => _rpc.IsConnected && CanEditSession);
+        SavePresetCommand = new AsyncRelayCommand(SavePresetAsync, () => _rpc.IsConnected && CanEditSession);
+        ToggleInputModeCommand = new AsyncRelayCommand(ToggleInputModeAsync, () => CanEditSession);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
-        RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems);
+        RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
         BatchApplySavePngCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
         BatchApplyReShadeShotCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
@@ -186,8 +213,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _isBatchApplying;
         private set
         {
-            if (SetProperty(ref _isBatchApplying, value))
-                RaiseBatchApplyCanExecuteChanged();
+            if (SetProperty(ref _isBatchApplying, value)) {
+                OnPropertyChanged(nameof(CanEditSession));
+                RaiseControlCommandStates();
+                StartPreviewCommand.RaiseCanExecuteChanged();
+                SavePngCommand.RaiseCanExecuteChanged();
+                ToggleInputModeCommand.RaiseCanExecuteChanged();
+                RefreshGalleryCommand.RaiseCanExecuteChanged();
+            }
         }
     }
     public bool IsGalleryPanelOpen { get => _isGalleryPanelOpen; set => SetProperty(ref _isGalleryPanelOpen, value); }
@@ -209,6 +242,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var settings = _settingsStore.Load();
         if (settings == null)
             return;
+
+        Directory.CreateDirectory(_workDir);
+        if (!string.IsNullOrEmpty(settings.SessionPresetPath) && File.Exists(settings.SessionPresetPath))
+            File.Copy(settings.SessionPresetPath, Path.Combine(_workDir, "OfflinePreset.ini"), true);
 
         _isRestoringSettings = true;
         try
@@ -256,12 +293,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetEffectsEnabledAsync(bool enabled)
     {
+        if (!CanEditSession) return;
         await _rpc.CallAsync("set_effects_state", new { enabled });
         EffectsEnabled = enabled;
     }
 
     public async Task SetTechniqueStateAsync(TechniqueViewModel technique, bool enabled)
     {
+        if (!CanEditSession) return;
         technique.IsEnabled = enabled;
         await _rpc.CallAsync("set_technique_state", new { id = technique.Id, enabled });
         await RefreshControlStateAsync();
@@ -269,6 +308,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task ReorderTechniquesAsync(IReadOnlyList<TechniqueViewModel> techniques)
     {
+        if (!CanEditSession) return;
         if (!_rpc.IsConnected || techniques.Count == 0)
             return;
 
@@ -314,6 +354,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task ReorderEnabledEffectsAsync(IReadOnlyList<string> orderedEffectNames)
     {
+        if (!CanEditSession) return;
         if (!_rpc.IsConnected || orderedEffectNames.Count == 0)
             return;
 
@@ -344,11 +385,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetUniformAsync(UniformViewModel uniform, object value)
     {
+        if (!CanEditSession) return;
         await _rpc.CallAsync("set_uniform", new { id = uniform.Id, value });
     }
 
     public async Task SetPreprocessorDefinitionAsync(PreprocessorDefinitionViewModel definition, string value)
     {
+        if (!CanEditSession) return;
         definition.Value = value;
         MarkEffectsLoading();
         await _rpc.CallAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
@@ -358,16 +401,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value)
     {
+        if (!CanEditSession) return;
         await _rpc.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
     }
 
     public async Task OpenNativeAddonPanelAsync()
     {
+        if (!CanEditSession) return;
         await _rpc.CallAsync("open_native_addon_panel");
     }
 
     public async Task SelectNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
     {
+        if (!CanEditSession) return;
         await _rpc.CallAsync("set_native_addon_overlay", new
         {
             enabled = overlay != null,
@@ -379,6 +425,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SendAddonOverlayInputAsync(PreviewHostInputMessage input)
     {
+        if (!CanEditSession) return;
         if (!_rpc.IsConnected)
             return;
 
@@ -407,105 +454,56 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
     {
-        if (item == null || !item.IsValid)
-            return;
-
+        if (!CanEditSession || item == null || !item.IsValid) return;
         SelectedGalleryItem = item;
+        _inputOverride = null;
         PreviewInfoText = item.BaseName;
-        if (!IsGalleryMode || !_rpc.IsConnected)
-            return;
-
-        var result = await _rpc.CallAsync("set_input_paths", new
-        {
-            colorPath = item.ColorPath,
-            depthPath = item.DepthPath,
-            depthFormat = item.DepthFormat,
-            depthProfile = EffectiveDepthProfile(item.DepthFormat),
-            depthDownsample = Settings.DepthDownsample,
-            outputPath = item.OutputPath
-        });
-        ApplyInputSwitchResult(result);
-        AppendLog("Gallery item loaded: " + item.BaseName);
+        if (IsGalleryMode && _rpc.IsConnected)
+            await OpenAutomationInputAsync(InputForGallery(item), CancellationToken.None);
     }
 
     public async Task ToggleInputModeAsync()
     {
-        var switchToGallery = !IsGalleryMode;
-
-        if (!IsPreviewRunning)
-        {
-            InputMode = switchToGallery ? "Gallery" : "RealTime";
-            if (IsGalleryMode)
-                RefreshGalleryItems();
-            return;
-        }
-
-        if (!_rpc.IsConnected)
-        {
-            AppendLog("Cannot hot-switch input mode before the control pipe is connected.");
-            return;
-        }
-
-        try
-        {
-            if (switchToGallery)
-            {
-                RefreshGalleryItems();
-                var item = SelectedGalleryItem?.IsValid == true ? SelectedGalleryItem : GalleryItems.FirstOrDefault(galleryItem => galleryItem.IsValid);
-                if (item == null)
-                {
-                    AppendLog("Gallery mode needs a valid *-Color.png + *-Depth.rfloat/png pair, or <frame>.png + <frame>.depth.rfloat pair.");
-                    return;
-                }
-
-                InputMode = "Gallery";
-                SelectedGalleryItem = item;
-                await _rpc.CallAsync("set_input_watch_enabled", new { enabled = false });
-                await SelectGalleryItemAsync(item);
+        if (!CanEditSession) return;
+        var previous = InputMode;
+        try {
+            InputMode = IsGalleryMode ? "RealTime" : "Gallery";
+            _inputOverride = null;
+            if (IsGalleryMode) { RefreshGalleryItems(); EnsureGallerySelection(); }
+            if (_rpc.IsConnected) {
+                await OpenAutomationInputAsync(CurrentRenderInput(), CancellationToken.None);
+                await _rpc.CallAsync("set_input_watch_enabled", new { enabled = !IsGalleryMode });
             }
-            else
-            {
-                var result = await _rpc.CallAsync("set_input_paths", new
-                {
-                    colorPath = Settings.ColorPath,
-                    depthPath = Settings.DepthPath,
-                    depthFormat = Settings.DepthFormat,
-                    depthProfile = EffectiveDepthProfile(Settings.DepthFormat),
-                    depthDownsample = Settings.DepthDownsample,
-                    outputPath = Settings.OutputPath
-                });
-                ApplyInputSwitchResult(result);
-                await _rpc.CallAsync("set_input_watch_enabled", new { enabled = true });
-                InputMode = "RealTime";
-                PreviewInfoText = "Full-res ReShade runtime - preview is scaled";
-                AppendLog("Real Time input loaded.");
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendLog(ex.Message);
-        }
+        } catch (Exception ex) { InputMode = previous; AppendLog(ex.Message); }
     }
 
-    private async Task StartPreviewAsync()
+    private Task StartPreviewAsync() => StartPreviewCoreAsync(false);
+
+    private async Task StartPreviewCoreAsync(bool preserveBatch)
     {
         try
         {
-            StopPreview();
-            if (IsGalleryMode)
+            StopPreview(updateStatus: false, cancelBatch: !preserveBatch);
+            if (IsGalleryMode && _inputOverride == null)
                 EnsureGallerySelection();
+            AutomationEngine.ValidateInput(CurrentRenderInput());
             LogText = string.Empty;
             ControlStatusText = "Connecting";
             var pipeName = "OfflineReShade-" + Guid.NewGuid().ToString("N");
             var previewPipeName = pipeName + "-preview";
-            if (UseCpuPreview)
-                _previewFrames.Start(previewPipeName);
+            _cpuPreviewFallback = false;
+            OnPropertyChanged(nameof(IsGpuPreviewActive));
+            _lastPreviewError = "";
+            _previewFrames.Start(previewPipeName);
             _prototype.StartPreview(BuildPreviewArguments(pipeName, previewPipeName));
             IsPreviewRunning = true;
             StatusText = "Preview running";
             PreviewInfoText = IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.BaseName : "Full-res ReShade runtime - preview is scaled";
 
             await _rpc.ConnectAsync(pipeName, CancellationToken.None);
+            await Compatibility.VerifyAsync(_rpc, "native");
+            await _rpc.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
+            _runtimeInput = CurrentRenderInput();
             ControlStatusText = "Connected";
             RaiseControlCommandStates();
             await RefreshControlStateAsync();
@@ -514,16 +512,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             AppendLog(ex.Message);
-            StopPreview(updateStatus: false);
+            StopPreview(updateStatus: false, cancelBatch: !preserveBatch);
             ControlStatusText = "Control failed";
             StatusText = "Failed";
+            if (preserveBatch) throw;
         }
     }
 
     private void StopPreview() => StopPreview(updateStatus: true);
 
-    private void StopPreview(bool updateStatus)
+    private void StopPreview(bool updateStatus, bool cancelBatch = true)
     {
+        _runtimeGeneration++;
+        if (cancelBatch) _automation.Cancel(restore: false);
         StopFpsPolling();
         _rpc.Close();
         _previewFrames.Stop();
@@ -551,118 +552,82 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         AddonControlsChanged?.Invoke();
     }
 
-    private async Task SavePngAsync()
+    private Task SavePngAsync() => SaveImageAsync(false);
+    private Task ReShadeShotAsync() => SaveImageAsync(true);
+    private async Task SaveImageAsync(bool reShadeShot)
     {
-        try
-        {
-            StatusText = "Saving";
-            var outputDir = Path.GetDirectoryName(ActiveOutputPath);
-            if (!string.IsNullOrWhiteSpace(outputDir))
-                Directory.CreateDirectory(outputDir);
-
-            if (_rpc.IsConnected)
-            {
-                if (IsGalleryMode && SelectedGalleryItem != null)
-                    await SelectGalleryItemAsync(SelectedGalleryItem);
-                await _rpc.CallAsync("save_output");
-                AppendLog("Saved live preview output: " + ActiveOutputPath);
-            }
-            else
-            {
-                LogText = string.Empty;
-                AppendLog(await _prototype.RunExportAsync(BuildExportArguments()));
-            }
-
-            RefreshOutputInfo();
-            StatusText = "Saved";
-        }
-        catch (Exception ex)
-        {
-            AppendLog(ex.Message);
-            StatusText = "Failed";
-        }
-    }
-
-    private async Task ReShadeShotAsync()
-    {
-        try
-        {
-            StatusText = "Saving";
-            if (IsGalleryMode && SelectedGalleryItem != null && _rpc.IsConnected)
-                await SelectGalleryItemAsync(SelectedGalleryItem);
-            await _rpc.CallAsync("save_screenshot");
-            AppendLog("ReShade screenshot saved: " + ActiveOutputPath);
-            RefreshOutputInfo();
-            StatusText = "Saved";
-        }
-        catch (Exception ex)
-        {
-            AppendLog(ex.Message);
-            StatusText = "Failed";
-        }
+        try {
+            if (!_rpc.IsConnected) await StartPreviewCoreAsync(false);
+            StatusText = "Rendering";
+            var saved = await _automation.ExecuteAsync("export_image", AutomationEngine.Json(new { path = ActiveOutputPath, reShadeShot, warmupFrames = 5 }));
+            if (saved.TryGetProperty("warning", out var warning) && !string.IsNullOrEmpty(warning.GetString())) AppendLog(warning.GetString()!);
+            RefreshOutputInfo(); StatusText = "Saved";
+        } catch (Exception ex) { AppendLog(ex.Message); StatusText = "Failed"; }
     }
 
     private async Task BatchApplyGalleryAsync(string saveMethod, string label)
     {
-        if (!IsGalleryMode)
-        {
-            AppendLog("Batch apply is only available in Gallery mode.");
-            return;
+        try {
+            if (!IsGalleryMode || !_rpc.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
+            RefreshGalleryItems();
+            var items = GalleryItems.Where(x => x.IsValid).Select(InputForGallery).ToArray();
+            var frames = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
+            await _automation.ExecuteAsync("batch_start", AutomationEngine.Json(new BatchRequest(items, frames, saveMethod == "save_screenshot")));
+            AppendLog($"Batch {label} started; existing validated outputs will be resumed.");
+        } catch (Exception ex) { AppendLog(ex.Message); StatusText = "Batch failed"; }
+    }
+
+    private RenderInput CurrentRenderInput() => _inputOverride ?? new RenderInput(ActiveColorPath, ActiveDepthPath, ActiveDepthFormat,
+        ActiveDepthProfile, Settings.DepthDownsample, ActiveOutputPath, Settings.EffectDir, Settings.PresetPath,
+        ParseNonNegativeInt(Settings.RenderWidth, 0), ParseNonNegativeInt(Settings.RenderHeight, 0), WatchInput: !IsGalleryMode);
+    private RenderInput InputForGallery(GalleryItemViewModel item) => CurrentRenderInput() with {
+        ColorPath = item.ColorPath, DepthPath = item.DepthPath, DepthFormat = item.DepthFormat,
+        DepthProfile = EffectiveDepthProfile(item.DepthFormat), OutputPath = item.OutputPath, WatchInput = false };
+
+    private async Task OpenAutomationInputAsync(RenderInput input, CancellationToken token)
+    {
+        if (_isDisposed) throw new ObjectDisposedException(nameof(MainWindowViewModel));
+        input = AutomationEngine.ValidateInput(input);
+        var previous = _rpc.IsConnected ? await _rpc.CallAsync("get_runtime_info", cancellationToken: token) : default;
+        var effectsEnabled = previous.ValueKind == JsonValueKind.Object ? previous.GetProperty("effectsEnabled").GetBoolean() : EffectsEnabled;
+        var recovery = previous.ValueKind == JsonValueKind.Object && previous.TryGetProperty("recoveryRequired", out var required) && required.GetBoolean();
+        if (recovery && !_deviceRecovery.TryAcquire(DateTimeOffset.UtcNow)) throw new DeviceLostException("D3D recovery failed repeatedly. Wait 30 seconds and restart preview.");
+        var restart = recovery || _runtimeInput == null || input.EffectDir != _runtimeInput.EffectDir || input.PresetPath != _runtimeInput.PresetPath || input.Width != _runtimeInput.Width || input.Height != _runtimeInput.Height;
+        _inputOverride = input;
+        if (!_rpc.IsConnected || restart) await StartPreviewCoreAsync(true);
+        else {
+            var result = await _rpc.CallAsync("set_input_paths", input, token);
+            if (result.TryGetProperty("restartRequired", out var r) && r.GetBoolean()) await StartPreviewCoreAsync(true);
+            else ApplyInputSwitchResult(result);
         }
+        _runtimeInput = input;
+        await _rpc.CallAsync("set_effects_state", new { enabled = effectsEnabled }, token);
+        await _rpc.CallAsync("set_input_watch_enabled", new { enabled = input.WatchInput }, token);
+        PreviewInfoText = Path.GetFileName(input.ColorPath);
+        var galleryItem = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, input.ColorPath, StringComparison.OrdinalIgnoreCase));
+        if (galleryItem != null) SelectedGalleryItem = galleryItem;
+    }
 
-        if (!_rpc.IsConnected)
-        {
-            AppendLog("Start preview before batch apply.");
-            return;
+    private Task<JsonElement> DispatchAutomationAsync(string method, JsonElement args, CancellationToken token)
+    {
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        async void Execute(object? _) {
+            try {
+                var result = await _automation.ExecuteAsync(method, args, token);
+                if (method is "set_parameters" or "set_uniform" or "reset_uniform" or "set_technique_state" or "reorder_techniques" or "set_preset" or "set_effects_state") await RefreshControlStateAsync();
+                completion.TrySetResult(result);
+            } catch (Exception ex) { completion.TrySetException(ex); }
         }
+        if (_syncContext != null) _syncContext.Post(Execute, null); else Execute(null);
+        return completion.Task;
+    }
 
-        RefreshGalleryItems();
-        var items = GalleryItems.Where(static item => item.IsValid).ToArray();
-        if (items.Length == 0)
-        {
-            AppendLog("No valid gallery items to process.");
-            return;
-        }
-
-        IsBatchApplying = true;
-        try
-        {
-            var originalItem = SelectedGalleryItem;
-            var frameDelay = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
-            var delay = await BuildFrameDelayAsync(frameDelay);
-
-            AppendLog($"Batch {label} started: {items.Length} item(s), frame delay {frameDelay}.");
-            for (var i = 0; i < items.Length; ++i)
-            {
-                var item = items[i];
-                StatusText = $"Batch {i + 1}/{items.Length}";
-                var outputDir = Path.GetDirectoryName(item.OutputPath);
-                if (!string.IsNullOrWhiteSpace(outputDir))
-                    Directory.CreateDirectory(outputDir);
-
-                await SelectGalleryItemAsync(item);
-                if (delay > TimeSpan.Zero)
-                    await Task.Delay(delay);
-
-                await _rpc.CallAsync(saveMethod);
-                AppendLog($"Batch {label} saved: {item.OutputPath}");
-            }
-
-            if (originalItem?.IsValid == true)
-                await SelectGalleryItemAsync(originalItem);
-
-            StatusText = "Batch complete";
-            AppendLog($"Batch {label} complete.");
-        }
-        catch (Exception ex)
-        {
-            StatusText = "Batch failed";
-            AppendLog(ex.Message);
-        }
-        finally
-        {
-            IsBatchApplying = false;
-        }
+    private void OnAutomationChanged()
+    {
+        IsBatchApplying = _automation.IsBusy;
+        OnPropertyChanged(nameof(BatchProgress)); OnPropertyChanged(nameof(BatchMaximum)); OnPropertyChanged(nameof(BatchStatusText));
+        CancelBatchCommand.RaiseCanExecuteChanged();
+        if (_automation.Job is { } job) { StatusText = $"Batch {job.State}: {job.Completed}/{job.Total}"; if (job.Error != null) AppendLog(job.Error); }
     }
 
     private async Task ReloadAsync()
@@ -685,9 +650,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
 
         _isRefreshingControlState = true;
+        var generation = _runtimeGeneration;
         try
         {
             var runtimeInfo = await _rpc.CallAsync("get_runtime_info");
+            if (_isDisposed || generation != _runtimeGeneration) return;
+            await ApplyGraphicsStateAsync(runtimeInfo);
+            if (_isDisposed || generation != _runtimeGeneration) return;
             if (IsRuntimeLoading(runtimeInfo))
             {
                 MarkEffectsLoading();
@@ -695,6 +664,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
 
             var state = await _rpc.CallAsync("list_state");
+            if (_isDisposed || generation != _runtimeGeneration) return;
             if (IsRuntimeLoading(state))
             {
                 MarkEffectsLoading();
@@ -862,6 +832,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 if (_rpc.IsConnected)
                 {
                     var info = await _rpc.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
+                    if (_isDisposed || cancellationToken.IsCancellationRequested) return;
+                    var needsRecovery = info.TryGetProperty("recoveryRequired", out var recovery) && recovery.GetBoolean();
+                    if (CanEditSession && (needsRecovery || info.TryGetProperty("restartRequired", out var restart) && restart.GetBoolean())) {
+                        if (needsRecovery) AppendLog("D3D device lost; rebuilding the rendering session.");
+                        await _automation.ExecuteAsync("open_input", AutomationEngine.Json(CurrentRenderInput()), CancellationToken.None);
+                        return; // The replacement runtime owns a new polling loop.
+                    }
+                    if (needsRecovery) { await Task.Delay(100, cancellationToken); continue; } // The active export/batch owns recovery.
+                    await ApplyGraphicsStateAsync(info);
+                    if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                     var renderFps = info.TryGetProperty("renderFps", out var render) ? render.GetDouble() : 0.0;
                     var previewFps = info.TryGetProperty("previewFps", out var preview) ? preview.GetDouble() : 0.0;
                     SharedPreviewHandle = info.TryGetProperty("sharedPreviewHandle", out var handle) ? handle.GetUInt64() : 0;
@@ -883,6 +863,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         await RefreshControlStateAsync();
                     }
                     var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
+                    if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                     ApplyAddonUiState(addonUi);
                 }
                 else
@@ -894,8 +875,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 break;
             }
+            catch (DeviceLostException ex)
+            {
+                AppendLog(ex.Message); StatusText = "D3D recovery failed";
+                StopPreview(updateStatus: false);
+                return;
+            }
             catch (Exception ex)
             {
+                if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                 FpsText = "FPS unavailable";
                 AppendLog(ex.Message);
             }
@@ -913,7 +901,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (CanEditSession && e.PropertyName is "ColorPath" or "DepthPath" or "DepthFormat" or "EffectDir" or "PresetPath" or "RenderWidth" or "RenderHeight") _inputOverride = null;
         ScheduleSettingsSave();
+        if (e.PropertyName == nameof(SettingsViewModel.PreviewTransport)) _ = UpdatePreviewTransportAsync();
 
         if (e.PropertyName == nameof(SettingsViewModel.DepthProfile))
         {
@@ -1008,6 +998,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         return new PersistedUiSettings
         {
+            SessionPresetPath = Path.Combine(_workDir, "OfflinePreset.ini"),
             ColorPath = Settings.ColorPath,
             DepthPath = Settings.DepthPath,
             DepthFormat = Settings.DepthFormat,
@@ -1031,63 +1022,70 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         };
     }
 
-    private string BuildExportArguments()
-    {
-        EnsureGallerySelectionIfNeeded();
-        return BuildCommonArguments()
-            .Add("--output", ActiveOutputPath)
-            .Add("--width", Settings.RenderWidth)
-            .Add("--height", Settings.RenderHeight)
-            .ToString();
-    }
-
+    private string BuildExportArguments() => BuildCommonArguments().ToString();
     private string BuildPreviewArguments(string pipeName, string previewPipeName)
     {
-        EnsureGallerySelectionIfNeeded();
-        var arguments = BuildCommonArguments()
-            .Add("--control-pipe", pipeName)
-            .AddSwitch("--interactive")
-            .Add("--output", ActiveOutputPath)
-            .Add("--width", Settings.RenderWidth)
-            .Add("--height", Settings.RenderHeight);
-
-        if (IsGalleryMode)
-            arguments.AddSwitch("--disable-input-watch");
-
-        if (UseCpuPreview)
-        {
-            arguments.Add("--preview-pipe", previewPipeName);
-        }
-        else
-        {
-            arguments.AddSwitch("--preview-shared");
-        }
-
-        arguments.AddSwitch("--addon-overlay-shared");
-
+        var arguments = BuildCommonArguments().Add("--control-pipe", pipeName).AddSwitch("--interactive").AddSwitch("--addon-overlay-shared");
+        if (!CurrentRenderInput().WatchInput) arguments.AddSwitch("--disable-input-watch");
+        arguments.Add("--preview-pipe", previewPipeName);
+        arguments.AddSwitch("--preview-shared");
         return arguments.ToString();
     }
-
     private CommandLineBuilder BuildCommonArguments()
     {
-        return new CommandLineBuilder()
-            .Add("--color", ActiveColorPath)
-            .Add("--depth", ActiveDepthPath)
-            .Add("--depth-format", ActiveDepthFormat)
-            .Add("--depth-profile", ActiveDepthProfile)
-            .Add("--depth-downsample", Settings.DepthDownsample)
-            .Add("--effect-dir", Settings.EffectDir)
-            .Add("--preset", Settings.PresetPath);
+        var input = CurrentRenderInput();
+        var builder = new CommandLineBuilder().Add("--color", input.ColorPath).Add("--depth", input.DepthPath)
+            .Add("--depth-format", input.DepthFormat).Add("--depth-profile", input.DepthProfile).Add("--depth-downsample", input.DepthDownsample)
+            .Add("--effect-dir", input.EffectDir).Add("--preset", input.PresetPath).Add("--output", input.OutputPath).Add("--work-dir", _workDir);
+        if (input.Width > 0) builder.Add("--width", input.Width.ToString(CultureInfo.InvariantCulture)).Add("--height", input.Height.ToString(CultureInfo.InvariantCulture));
+        return builder;
     }
 
     private bool UseCpuPreview => string.Equals(Settings.PreviewTransport, "CPU", StringComparison.OrdinalIgnoreCase);
+
+    private async Task ApplyGraphicsStateAsync(JsonElement info)
+    {
+        AdapterLuid = info.TryGetProperty("adapterLuid", out var luid) ? luid.GetUInt64() : 0;
+        RenderWidth = info.GetProperty("width").GetUInt32(); RenderHeight = info.GetProperty("height").GetUInt32();
+        var error = info.TryGetProperty("previewError", out var e) ? e.GetString() ?? "" : "";
+        if (error.Length > 0 && error != _lastPreviewError) { _lastPreviewError = error; AppendLog(error); }
+        if (error.Length > 0 && !IsGpuPreviewActive && info.TryGetProperty("cpuPreview", out var cpu) && !cpu.GetBoolean()) StatusText = "Preview unavailable";
+        if (IsGpuPreviewActive && info.TryGetProperty("sharedPreviewHandle", out var handle) && handle.GetUInt64() == 0)
+            await FallBackToCpuPreviewAsync(error.Length > 0 ? error : "Shared GPU preview is unavailable.");
+    }
+
+    public async Task FallBackToCpuPreviewAsync(string reason)
+    {
+        if (_isDisposed || _cpuPreviewFallback || UseCpuPreview) return;
+        _cpuPreviewFallback = true;
+        OnPropertyChanged(nameof(IsGpuPreviewActive));
+        AppendLog(reason + " Switching to CPU preview; export dimensions are unchanged.");
+        try {
+            if (_rpc.IsConnected) await _rpc.CallAsync("set_preview_transport", new { cpu = true });
+            if (!_isDisposed) StatusText = "CPU preview (GPU unavailable)";
+        } catch (Exception ex) { if (!_isDisposed) { AppendLog(ex.Message); StatusText = "Preview unavailable"; } }
+    }
+
+    public void ReportPreviewError(string message) { if (!_isDisposed) AppendLog(message); }
+
+    private async Task UpdatePreviewTransportAsync()
+    {
+        _cpuPreviewFallback = false;
+        OnPropertyChanged(nameof(IsGpuPreviewActive));
+        try {
+            if (_rpc.IsConnected) {
+                await _rpc.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
+                await ApplyGraphicsStateAsync(await _rpc.CallAsync("get_runtime_info"));
+            }
+        } catch (Exception ex) { if (!_isDisposed) AppendLog(ex.Message); }
+    }
     private string ActiveColorPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.ColorPath : Settings.ColorPath;
     private string ActiveDepthPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthPath : Settings.DepthPath;
     private string ActiveDepthFormat => string.Equals(Settings.DepthProfile, "kk", StringComparison.OrdinalIgnoreCase)
         ? "raw"
         : IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.DepthFormat : Settings.DepthFormat;
     private string ActiveDepthProfile => EffectiveDepthProfile(ActiveDepthFormat);
-    private string ActiveOutputPath => IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.OutputPath : Settings.OutputPath;
+    private string ActiveOutputPath => _inputOverride?.OutputPath ?? (IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.OutputPath : Settings.OutputPath);
 
     private string EffectiveDepthProfile(string depthFormat)
     {
@@ -1452,29 +1450,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         BatchApplyReShadeShotCommand.RaiseCanExecuteChanged();
     }
 
-    private async Task<TimeSpan> BuildFrameDelayAsync(int frames)
-    {
-        if (frames <= 0)
-            return TimeSpan.Zero;
-
-        var fps = 60.0;
-        try
-        {
-            if (_rpc.IsConnected)
-            {
-                var info = await _rpc.CallAsync("get_runtime_info");
-                if (info.TryGetProperty("renderFps", out var renderFps))
-                    fps = Math.Max(1.0, renderFps.GetDouble());
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendLog("Batch frame delay uses 60 FPS fallback: " + ex.Message);
-        }
-
-        return TimeSpan.FromMilliseconds(Math.Ceiling(frames * 1000.0 / fps));
-    }
-
     private static int ParseNonNegativeInt(string text, int fallback)
     {
         return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
@@ -1485,6 +1460,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _isDisposed = true;
+        _automation.Cancel(restore: false);
+        _broker.Dispose();
         var settingsSaveCancellation = _settingsSaveCancellation;
         _settingsSaveCancellation = null;
         settingsSaveCancellation?.Cancel();

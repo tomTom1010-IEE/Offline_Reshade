@@ -1325,6 +1325,8 @@ void reshade::runtime::set_effects_state(bool enabled)
 void reshade::runtime::save_current_preset() const
 {
 	save_current_preset(ini_file::load_cache(_current_preset_path));
+	// Programmatic hosts may switch inputs or restart immediately after the RPC reply.
+	ini_file::flush_cache(_current_preset_path);
 }
 void reshade::runtime::export_current_preset(const char *path_in) const
 {
@@ -1339,6 +1341,7 @@ void reshade::runtime::export_current_preset(const char *path_in) const
 	if (ini_file *const cached_preset = ini_file::find_cache(preset_path))
 	{
 		save_current_preset(*cached_preset);
+		ini_file::flush_cache(preset_path);
 		return;
 	}
 

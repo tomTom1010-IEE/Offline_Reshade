@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using System.Globalization;
+using OfflineReShade.Core;
 using OfflineReShade.WinUI.Controls;
 using OfflineReShade.WinUI.Services;
 using OfflineReShade.WinUI.ViewModels;
@@ -16,6 +17,9 @@ namespace OfflineReShade.WinUI.Views;
 
 public sealed partial class MainWindow : Window
 {
+    private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Expander, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
+    private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly Dictionary<string, CancellationTokenSource> _uniformUpdateSources = new();
     private readonly Dictionary<string, CancellationTokenSource> _addonControlUpdateSources = new();
     private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
@@ -31,6 +35,10 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _addonInputMoveTimer = new();
     private readonly DispatcherTimer _sliderModeOverlayTimer = new();
     private bool _isPreviewDragging;
+    private bool _isClosing;
+    private int _gpuFailures, _addonGpuFailures;
+    private DateTimeOffset _gpuRetryAt, _addonRetryAt;
+    private bool _addonGpuFailed;
     private bool _updatingInputModeSwitch;
     private bool _buildingAddonOverlayTabs;
     private bool _updatingAddonControlValues;
@@ -51,26 +59,43 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = "Offline ReShade " + OfflineReShade.Core.BuildContract.ProductVersion;
+        _effectSearchTimer.Tick += (_, _) => { _effectSearchTimer.Stop(); FilterEffects(); };
 
         var windowHandle = WindowNative.GetWindowHandle(this);
         var paths = new AppPaths();
-        ViewModel = new MainWindowViewModel(paths);
+        var uiContext = new UiSynchronizationContext(DispatcherQueue);
+        SynchronizationContext.SetSynchronizationContext(uiContext);
+        ViewModel = new MainWindowViewModel(paths, uiContext);
         _previewHost = new PreviewHostService(windowHandle, PreviewSurface);
         ViewModel.Initialize(new SettingsPickerService(() => windowHandle));
         NativeAddonOverlaySwitch.IsOn = true;
         ViewModel.ControlsChanged += BuildControls;
         ViewModel.AddonControlsChanged += BuildAddonControls;
         ViewModel.AddonControlValuesChanged += UpdateAddonControlValues;
-        ViewModel.PreviewFrameReceived += frame => PreviewImage.Source = frame;
+        ViewModel.PreviewFrameReceived += frame => { if (!_isClosing) { PreviewImage.Source = frame; ClampAndApplyPreviewTransform(); } };
         ViewModel.PropertyChanged += (_, args) =>
         {
+            if (_isClosing) return;
             if (args.PropertyName == nameof(MainWindowViewModel.IsSettingsOpen))
                 UpdateContentView();
             if (args.PropertyName == nameof(MainWindowViewModel.IsPreviewRunning))
             {
+                if (!ViewModel.IsPreviewRunning) {
+                    _d3dPreview.Dispose();
+                    _addonOverlayPreview.Dispose();
+                    _gpuFailures = _addonGpuFailures = 0;
+                    _gpuRetryAt = _addonRetryAt = DateTimeOffset.MinValue;
+                    _addonGpuFailed = false;
+                }
                 _activeNativeAddonOverlayId = string.Empty;
                 UpdatePreviewTransportView();
                 UpdateAddonOverlayHostVisibility();
+            }
+            if (args.PropertyName == nameof(MainWindowViewModel.IsGpuPreviewActive)) {
+                if (!ViewModel.IsGpuPreviewActive) _d3dPreview.Dispose();
+                _gpuFailures = 0; _gpuRetryAt = DateTimeOffset.MinValue;
+                UpdatePreviewTransportView(); ClampAndApplyPreviewTransform();
             }
             if (args.PropertyName == nameof(MainWindowViewModel.IsGalleryMode) ||
                 args.PropertyName == nameof(MainWindowViewModel.IsGalleryPanelOpen))
@@ -98,6 +123,7 @@ public sealed partial class MainWindow : Window
         };
         ViewModel.Settings.PropertyChanged += (_, args) =>
         {
+            if (_isClosing) return;
             if (args.PropertyName == nameof(SettingsViewModel.PreviewTransport))
                 UpdatePreviewTransportView();
             if (args.PropertyName == nameof(SettingsViewModel.DepthFormat))
@@ -122,7 +148,7 @@ public sealed partial class MainWindow : Window
         PreviewSurface.DoubleTapped += (_, _) => ResetPreviewView();
         PreviewSurface.Loaded += (_, _) => AttachPreviewXamlRootChanged();
         PreviewSurface.SizeChanged += (_, _) => UpdatePreviewClipAndTransform();
-        ControlsScrollViewer.SizeChanged += (_, _) => UpdateControlsPanelWidth();
+        EffectsList.SizeChanged += (_, _) => UpdateControlsPanelWidth();
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
         _gpuPreviewTimer.Interval = TimeSpan.FromMilliseconds(16);
         _gpuPreviewTimer.Tick += (_, _) => RenderGpuPreviewFrame();
@@ -133,14 +159,18 @@ public sealed partial class MainWindow : Window
         _sliderModeOverlayTimer.Interval = TimeSpan.FromMilliseconds(850);
         _sliderModeOverlayTimer.Tick += (_, _) =>
         {
-            _sliderModeOverlayTimer.Stop();
+            _effectSearchTimer.Stop();
+        _sliderModeOverlayTimer.Stop();
             SliderModeOverlay.Visibility = Visibility.Collapsed;
         };
         Closed += (_, _) =>
         {
+            _isClosing = true;
             if (_previewXamlRoot is not null)
                 _previewXamlRoot.Changed -= OnPreviewXamlRootChanged;
             _previewHost.Dispose();
+            _effectSearchTimer.Stop();
+            _gpuPreviewTimer.Stop();
             _addonInputMoveTimer.Stop();
             _sliderModeOverlayTimer.Stop();
             _addonOverlayPreviewTimer.Stop();
@@ -218,7 +248,7 @@ public sealed partial class MainWindow : Window
     private void UpdateAddonOverlayHostVisibility()
     {
         var selectedOverlay = (AddonOverlayTabView.SelectedItem as TabViewItem)?.Tag as AddonOverlayViewModel;
-        var visible = ViewModel.IsPreviewRunning &&
+        var visible = !_addonGpuFailed && ViewModel.IsPreviewRunning &&
                       !ViewModel.IsSettingsOpen &&
                       ControlsTabView.SelectedIndex == 1 &&
                       NativeAddonOverlaySwitch.IsOn &&
@@ -233,7 +263,7 @@ public sealed partial class MainWindow : Window
                 ? "Start preview to load the native add-on overlay"
                 : !NativeAddonOverlaySwitch.IsOn
                     ? "Native add-on overlays are turned off"
-                    : "Preparing native add-on overlay";
+                    : _addonGpuFailed ? "GPU add-on overlay unavailable; restart preview to retry" : "Preparing native add-on overlay";
 
         if (visible)
         {
@@ -404,15 +434,16 @@ public sealed partial class MainWindow : Window
     private long GetAddonOverlayPointerLParam(PointerRoutedEventArgs args)
     {
         var point = args.GetCurrentPoint(AddonOverlaySwapChainPanel).Position;
-        var scale = AddonOverlayRasterizationScale;
-        var x = Math.Clamp((int)Math.Round(point.X * scale), 0, ushort.MaxValue);
-        var y = Math.Clamp((int)Math.Round(point.Y * scale), 0, ushort.MaxValue);
+        var sx = ViewModel.SharedAddonOverlayWidth / Math.Max(1.0, AddonOverlaySwapChainPanel.ActualWidth);
+        var sy = ViewModel.SharedAddonOverlayHeight / Math.Max(1.0, AddonOverlaySwapChainPanel.ActualHeight);
+        var x = Math.Clamp((int)Math.Round(point.X * sx), 0, ushort.MaxValue);
+        var y = Math.Clamp((int)Math.Round(point.Y * sy), 0, ushort.MaxValue);
         return (long)(uint)(x | (y << 16));
     }
 
     private void UpdatePreviewTransportView()
     {
-        var useGpuPreview = ViewModel.Settings.PreviewTransport == "GPU" && ViewModel.IsPreviewRunning && !ViewModel.IsSettingsOpen;
+        var useGpuPreview = ViewModel.IsGpuPreviewActive && ViewModel.IsPreviewRunning && !ViewModel.IsSettingsOpen;
         _previewHost.SetVisible(false);
         PreviewSwapChainPanel.Visibility = useGpuPreview ? Visibility.Visible : Visibility.Collapsed;
         PreviewImage.Visibility = useGpuPreview ? Visibility.Collapsed : Visibility.Visible;
@@ -738,27 +769,20 @@ public sealed partial class MainWindow : Window
 
     private void ClampAndApplyPreviewTransform()
     {
-        if (_previewZoom <= 1.0001)
-        {
-            _previewZoom = 1.0;
-            _previewPanX = 0.0;
-            _previewPanY = 0.0;
-        }
-        else
-        {
-            var width = Math.Max(1.0, PreviewSurface.ActualWidth);
-            var height = Math.Max(1.0, PreviewSurface.ActualHeight);
-            var minX = width - width * _previewZoom;
-            var minY = height - height * _previewZoom;
-            _previewPanX = Math.Clamp(_previewPanX, minX, 0.0);
-            _previewPanY = Math.Clamp(_previewPanY, minY, 0.0);
-        }
+        var layout = CurrentPreviewLayout();
+        _previewPanX = layout.PanX; _previewPanY = layout.PanY;
+        var fit = PreviewGeometry.Layout(PreviewSurface.ActualWidth, PreviewSurface.ActualHeight,
+            Math.Max(1u, ViewModel.RenderWidth), Math.Max(1u, ViewModel.RenderHeight), 1, 0, 0);
+        PreviewImage.Stretch = Stretch.Fill;
+        PreviewImage.HorizontalAlignment = HorizontalAlignment.Left;
+        PreviewImage.VerticalAlignment = VerticalAlignment.Top;
+        PreviewImage.Width = fit.Width; PreviewImage.Height = fit.Height;
 
         PreviewTransform.ScaleX = _previewZoom;
         PreviewTransform.ScaleY = _previewZoom;
-        PreviewTransform.TranslateX = _previewPanX;
-        PreviewTransform.TranslateY = _previewPanY;
-        if (ViewModel.Settings.PreviewTransport == "GPU")
+        PreviewTransform.TranslateX = layout.X;
+        PreviewTransform.TranslateY = layout.Y;
+        if (ViewModel.IsGpuPreviewActive)
         {
             PreviewTransform.ScaleX = 1.0;
             PreviewTransform.ScaleY = 1.0;
@@ -778,19 +802,36 @@ public sealed partial class MainWindow : Window
         ClampAndApplyPreviewTransform();
     }
 
-    private void EnsureGpuPreviewBridge()
+    private void TryPreviewGraphics(Action render, bool addon = false)
     {
-        if (ViewModel.Settings.PreviewTransport != "GPU" ||
+        if (_isClosing || (addon ? _addonGpuFailed || DateTimeOffset.UtcNow < _addonRetryAt : !ViewModel.IsGpuPreviewActive || DateTimeOffset.UtcNow < _gpuRetryAt)) return;
+        try {
+            render();
+            if (addon) _addonGpuFailures = 0; else _gpuFailures = 0;
+        } catch (Exception ex) {
+            (addon ? _addonOverlayPreview : _d3dPreview).Dispose();
+            var attempts = addon ? ++_addonGpuFailures : ++_gpuFailures;
+            if (addon) _addonRetryAt = DateTimeOffset.UtcNow.AddMilliseconds(400); else _gpuRetryAt = DateTimeOffset.UtcNow.AddMilliseconds(400);
+            ViewModel.ReportPreviewError($"{(addon ? "Add-on" : "GPU")} preview rebuild {attempts}/3: {ex.Message} (0x{ex.HResult:X8})");
+            if (attempts >= 3) {
+                if (addon) { _addonGpuFailed = true; UpdateAddonOverlayHostVisibility(); }
+                else _ = ViewModel.FallBackToCpuPreviewAsync("GPU preview could not recover.");
+            }
+        }
+    }
+
+    private void EnsureGpuPreviewBridge() => TryPreviewGraphics(EnsureGpuPreviewBridgeCore);
+    private void EnsureGpuPreviewBridgeCore()
+    {
+        if (_isClosing || !ViewModel.IsGpuPreviewActive ||
             !ViewModel.IsPreviewRunning ||
             ViewModel.SharedPreviewHandle == 0 ||
             ViewModel.SharedPreviewWidth == 0 ||
             ViewModel.SharedPreviewHeight == 0)
             return;
 
-        var rasterizationScale = PreviewRasterizationScale;
-        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * rasterizationScale));
-        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * rasterizationScale));
-        _d3dPreview.EnsureCreated(PreviewSwapChainPanel, width, height);
+        var surface = PreviewGeometry.Surface(PreviewSurface.ActualWidth, PreviewSurface.ActualHeight, PreviewRasterizationScale);
+        _d3dPreview.EnsureCreated(PreviewSwapChainPanel, surface.Width, surface.Height, ViewModel.AdapterLuid);
         UpdateGpuPreviewViewTransform();
         _d3dPreview.Render(ViewModel.SharedPreviewHandle, ViewModel.SharedPreviewWidth, ViewModel.SharedPreviewHeight);
     }
@@ -800,68 +841,38 @@ public sealed partial class MainWindow : Window
         if (!_d3dPreview.IsCreated)
             return;
 
-        var rasterizationScale = PreviewRasterizationScale;
-        var width = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualWidth * rasterizationScale));
-        var height = Math.Max(1u, (uint)Math.Round(PreviewSurface.ActualHeight * rasterizationScale));
-        _d3dPreview.Resize(width, height);
-        UpdateGpuPreviewViewTransform();
+        TryPreviewGraphics(() => {
+            var surface = PreviewGeometry.Surface(PreviewSurface.ActualWidth, PreviewSurface.ActualHeight, PreviewRasterizationScale);
+            _d3dPreview.Resize(surface.Width, surface.Height);
+            UpdateGpuPreviewViewTransform();
+        });
     }
+
+    private PreviewLayout CurrentPreviewLayout() => PreviewGeometry.Layout(
+        PreviewSurface.ActualWidth, PreviewSurface.ActualHeight, Math.Max(1u, ViewModel.RenderWidth), Math.Max(1u, ViewModel.RenderHeight), _previewZoom, _previewPanX, _previewPanY);
 
     private void UpdateGpuPreviewViewTransform()
     {
-        if (ViewModel.SharedPreviewWidth == 0 || ViewModel.SharedPreviewHeight == 0)
-        {
-            _d3dPreview.SetViewTransform(0.0, 0.0, 1.0, 1.0);
-            return;
-        }
-
-        var rasterizationScale = PreviewRasterizationScale;
-        var panelWidth = Math.Max(1.0, PreviewSurface.ActualWidth * rasterizationScale);
-        var panelHeight = Math.Max(1.0, PreviewSurface.ActualHeight * rasterizationScale);
-        var panX = _previewPanX * rasterizationScale;
-        var panY = _previewPanY * rasterizationScale;
-        var sourceAspect = (double)ViewModel.SharedPreviewWidth / ViewModel.SharedPreviewHeight;
-        var panelAspect = panelWidth / panelHeight;
-
-        double fitWidth;
-        double fitHeight;
-        double fitX;
-        double fitY;
-        if (panelAspect > sourceAspect)
-        {
-            fitHeight = panelHeight;
-            fitWidth = fitHeight * sourceAspect;
-            fitX = (panelWidth - fitWidth) * 0.5;
-            fitY = 0.0;
-        }
-        else
-        {
-            fitWidth = panelWidth;
-            fitHeight = fitWidth / sourceAspect;
-            fitX = 0.0;
-            fitY = (panelHeight - fitHeight) * 0.5;
-        }
-
-        var zoom = Math.Max(1.0, _previewZoom);
-        var destX = fitX * zoom + panX;
-        var destY = fitY * zoom + panY;
-        var destWidth = fitWidth * zoom;
-        var destHeight = fitHeight * zoom;
-        _d3dPreview.SetViewTransform(destX, destY, destWidth, destHeight);
+        var layout = CurrentPreviewLayout();
+        _previewPanX = layout.PanX; _previewPanY = layout.PanY;
+        var surface = PreviewGeometry.Surface(PreviewSurface.ActualWidth, PreviewSurface.ActualHeight, PreviewRasterizationScale);
+        var sx = surface.Width / Math.Max(1.0, PreviewSurface.ActualWidth);
+        var sy = surface.Height / Math.Max(1.0, PreviewSurface.ActualHeight);
+        _d3dPreview.SetViewTransform(layout.X * sx, layout.Y * sy, layout.Width * sx, layout.Height * sy);
     }
 
     private void RenderGpuPreviewFrame()
     {
-        if (ViewModel.Settings.PreviewTransport != "GPU" || !ViewModel.IsPreviewRunning || ViewModel.IsSettingsOpen)
+        if (_isClosing || !ViewModel.IsGpuPreviewActive || !ViewModel.IsPreviewRunning || ViewModel.IsSettingsOpen)
             return;
 
         EnsureGpuPreviewBridge();
-        _d3dPreview.RenderLastFrame();
     }
 
-    private void EnsureAddonOverlayBridge()
+    private void EnsureAddonOverlayBridge() => TryPreviewGraphics(EnsureAddonOverlayBridgeCore, addon: true);
+    private void EnsureAddonOverlayBridgeCore()
     {
-        if (!ViewModel.IsPreviewRunning ||
+        if (_isClosing || !ViewModel.IsPreviewRunning ||
             ViewModel.IsSettingsOpen ||
             ControlsTabView.SelectedIndex != 1 ||
             !NativeAddonOverlaySwitch.IsOn ||
@@ -870,9 +881,8 @@ public sealed partial class MainWindow : Window
             ViewModel.SharedAddonOverlayHeight == 0)
             return;
 
-        var width = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualWidth * AddonOverlayRasterizationScale));
-        var height = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualHeight * AddonOverlayRasterizationScale));
-        _addonOverlayPreview.EnsureCreated(AddonOverlaySwapChainPanel, width, height);
+        var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
+        _addonOverlayPreview.EnsureCreated(AddonOverlaySwapChainPanel, width, height, ViewModel.AdapterLuid);
         _addonOverlayPreview.SetViewTransform(0.0, 0.0, width, height);
         _addonOverlayPreview.Render(ViewModel.SharedAddonOverlayHandle, ViewModel.SharedAddonOverlayWidth, ViewModel.SharedAddonOverlayHeight);
 
@@ -886,10 +896,11 @@ public sealed partial class MainWindow : Window
         if (!_addonOverlayPreview.IsCreated)
             return;
 
-        var width = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualWidth * AddonOverlayRasterizationScale));
-        var height = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualHeight * AddonOverlayRasterizationScale));
-        _addonOverlayPreview.Resize(width, height);
-        _addonOverlayPreview.SetViewTransform(0.0, 0.0, width, height);
+        TryPreviewGraphics(() => {
+            var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
+            _addonOverlayPreview.Resize(width, height);
+            _addonOverlayPreview.SetViewTransform(0.0, 0.0, width, height);
+        }, addon: true);
     }
 
     private async Task SyncAddonOverlaySurfaceSizeAsync()
@@ -900,8 +911,7 @@ public sealed partial class MainWindow : Window
             !NativeAddonOverlaySwitch.IsOn)
             return;
 
-        var width = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualWidth * AddonOverlayRasterizationScale));
-        var height = Math.Max(1u, (uint)Math.Round(AddonNativeSurface.ActualHeight * AddonOverlayRasterizationScale));
+        var (width, height) = PreviewGeometry.Surface(AddonNativeSurface.ActualWidth, AddonNativeSurface.ActualHeight, AddonOverlayRasterizationScale);
         if (width == _lastRequestedAddonOverlayWidth && height == _lastRequestedAddonOverlayHeight)
             return;
 
@@ -943,30 +953,19 @@ public sealed partial class MainWindow : Window
         ControlsPanel.Children.Add(effectsEnabled);
 
         var techniquePanel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        foreach (var technique in ViewModel.Techniques)
-        {
-            var checkBox = new CheckBox
-            {
-                Content = technique.Label,
-                IsChecked = technique.IsEnabled,
-                Tag = technique
-            };
-            checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, true));
-            checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, false));
-            techniquePanel.Children.Add(checkBox);
-        }
-        ControlsPanel.Children.Add(CreateSectionExpander("Techniques", true, techniquePanel));
-
-        foreach (var effect in ViewModel.Effects)
-        {
-            var expander = CreateSectionExpander(CreateEffectHeader(effect), false, BuildEffectPanel(effect), new Thickness(0, 0, 0, 0));
-            expander.Tag = effect.Name;
-            expander.AllowDrop = true;
-            expander.DragOver += OnEffectDragOver;
-            expander.Drop += OnEffectDrop;
-            expander.Margin = new Thickness(0, 0, 0, 6);
-            ControlsPanel.Children.Add(expander);
-        }
+        var techniques = CreateSectionExpander("Techniques", false, new ScrollViewer { Content = techniquePanel, MaxHeight = 180 });
+        techniques.MaxHeight = 240;
+        techniques.Expanding += (_, _) => {
+            if (techniquePanel.Children.Count != 0) return;
+            foreach (var technique in ViewModel.Techniques) {
+                var checkBox = new CheckBox { Content = technique.Label, IsChecked = technique.IsEnabled, Tag = technique };
+                checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, true));
+                checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, false));
+                techniquePanel.Children.Add(checkBox);
+            }
+        };
+        ControlsPanel.Children.Add(techniques);
+        FilterEffects();
 
         if (ViewModel.Techniques.Count == 0 && ViewModel.Effects.Count == 0)
         {
@@ -980,6 +979,43 @@ public sealed partial class MainWindow : Window
 
         BuildAddons();
         BuildAddonControls();
+    }
+
+    private void OnEffectSearchChanged(object sender, TextChangedEventArgs args) { _effectSearchTimer.Stop(); _effectSearchTimer.Start(); }
+    private void FilterEffects()
+    {
+        if (EffectsList == null) return;
+        var query = EffectSearchBox.Text.Trim();
+        EffectsList.ItemsSource = ViewModel.Effects.Where(e => query.Length == 0 || e.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+            e.Uniforms.Any(u => u.Label.Contains(query, StringComparison.OrdinalIgnoreCase) || u.Name.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+    }
+    private void OnEffectExpanderLoaded(object sender, RoutedEventArgs args)
+    {
+        var expander = (Expander)sender;
+        if (expander.DataContext is not EffectControlViewModel effect) return;
+        expander.Tag = effect.Name; expander.Header = CreateEffectHeader(effect);
+        expander.AllowDrop = true; expander.DragOver -= OnEffectDragOver; expander.Drop -= OnEffectDrop;
+        expander.DragOver += OnEffectDragOver; expander.Drop += OnEffectDrop;
+        expander.IsExpanded = _expandedEffects.Contains(effect.Name);
+        if (expander.IsExpanded) PopulateEffect(expander);
+    }
+    private void OnEffectExpanding(Expander sender, ExpanderExpandingEventArgs args) { if (sender.Tag is string name) _expandedEffects.Add(name); PopulateEffect(sender); }
+    private void OnEffectCollapsed(Expander sender, ExpanderCollapsedEventArgs args) { if (sender.Tag is string name) _expandedEffects.Remove(name); ReleaseEffect(sender); }
+    private void OnEffectExpanderUnloaded(object sender, RoutedEventArgs args) => ReleaseEffect((Expander)sender);
+    private void PopulateEffect(Expander expander)
+    {
+        if (_effectEditors.ContainsKey(expander) || expander.DataContext is not EffectControlViewModel effect) return;
+        var sliders = _fxMappedSliders.Count; var indicators = _fxLogIndicators.Count;
+        expander.Content = BuildEffectPanel(effect);
+        _effectEditors[expander] = (_fxMappedSliders.Skip(sliders).ToList(), _fxLogIndicators.Skip(indicators).ToList());
+    }
+    private void ReleaseEffect(Expander expander)
+    {
+        if (_effectEditors.Remove(expander, out var editor)) {
+            foreach (var slider in editor.Sliders) _fxMappedSliders.Remove(slider);
+            foreach (var indicator in editor.Indicators) _fxLogIndicators.Remove(indicator);
+        }
+        expander.Content = null;
     }
 
     private void BuildAddons()
@@ -1927,7 +1963,7 @@ public sealed partial class MainWindow : Window
 
     private void UpdateControlsPanelWidth()
     {
-        var width = Math.Max(0.0, ControlsScrollViewer.ActualWidth - 24.0);
+        var width = Math.Max(0.0, EffectsList.ActualWidth - 24.0);
         if (width > 0.0)
             ControlsPanel.Width = width;
     }

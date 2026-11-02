@@ -2,6 +2,18 @@
 
 # Offline ReShade
 
+Version 0.8.3 establishes a checked upstream/dependency/interface baseline,
+version handshakes, verified CI packaging and MCP diagnostics. Existing synchronized
+GPU previews, DPI/zoom fixes, export validation and content-based batch resume remain.
+Preview zoom/fallback does not change final pixels; intentional black images remain valid.
+See [CHANGELOG](CHANGELOG.md), [MCP setup and tools](docs/MCP.md),
+[maintenance and upgrades](docs/MAINTENANCE.md), and the [stability plan](docs/STABILITY_PLAN.md).
+
+The portable release includes both .NET and Windows App SDK runtime dependencies.
+User settings are saved in `%LOCALAPPDATA%\OfflineReShade\settings.json`; existing
+`OfflineReShadeWinUI.settings.json` files beside the executable are imported when
+the new settings file does not exist.
+
 <p align="center">
   <img src="offlineReshadelogo.png" alt="Offline ReShade logo" width="480">
 </p>
@@ -138,8 +150,9 @@ UserData\cap\OfflineReShade\
 ```
 
 The WinUI client watches these files in Real Time mode. When the plugin writes a
-new color/depth pair, the native ReShade runtime reloads the input without
-restarting the effects runtime.
+new color/depth pair, the native ReShade runtime reloads the input. If source
+dimensions change in automatic-size mode, the client rebuilds the runtime at the
+new dimensions; explicitly configured output dimensions remain fixed.
 
 ### Gallery Export
 
@@ -360,6 +373,11 @@ Recommended workflow:
 `ReShade Shot` is the normal final-output button. It saves the current
 full-resolution runtime result and does not include the WinUI controls.
 
+Both `ReShade Shot` and `Save PNG` wait for FX compilation and rendered warmup
+frames and exclude all ReShade GUI. `ReShade Shot` uses the ReShade screenshot
+API and triggers screenshot add-on events; `Save PNG` directly encodes the clean
+rendered image. Without an active preview, saving starts the runtime first.
+
 ### Gallery Mode
 
 Use Gallery mode to edit archived still images or VideoExport frame sequences.
@@ -416,6 +434,17 @@ Use it after you have already tested one item manually:
 `Frame Delay` is the number of frames to wait after switching to the next
 gallery item before saving it. Use a higher value for effects that need time to
 settle. Use a lower value for simple color-only effects.
+
+In 0.8.0 the UI calls this setting `Warmup frames`. It counts actual completed
+frames after FX loading, regardless of preview FPS. A progress bar and Cancel
+button track the job. Editing is locked while a batch runs. Completed outputs
+are recorded in `.OfflineReShade.batch.json`; restarting the same batch resumes
+matching files after checking source fingerprints and output hashes. Failures
+are retried once. Zero render width/height preserves source size, including
+mixed-resolution folders; explicit width/height uses one fixed output size.
+
+The FX list uses virtualization and only creates parameter controls when an
+effect is expanded. Search matches effect filenames and parameter names.
 
 ## Depth Profiles
 
@@ -508,6 +537,13 @@ Requirements:
 - x64 build target
 
 Build the main release targets with Visual Studio MSBuild:
+
+For a complete portable distribution, use `tools/build_offline_release.ps1`.
+Add `-RunIntegrationTests` for control-layer and actual native/MCP image tests;
+Python with Pillow is required. The generated ZIP includes a source/version/file
+hash manifest. `-BaselineArchive <previous.zip>` also produces an incremental ZIP.
+The dedicated `Offline ReShade client` workflow builds actual client branches
+and verifies the resulting package.
 
 ```powershell
 & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe" OfflineReShadePrototype.vcxproj /p:Configuration=Release /p:Platform=x64 /m

@@ -133,15 +133,13 @@
       <GladReproducibleSwitch Condition="'$(GladReproducible)'=='true'">--reproducible</GladReproducibleSwitch>
       <GladMultiContextSwitch>--mx</GladMultiContextSwitch>
     </PropertyGroup>
-    <Exec Command="pip install -r requirements.txt" WorkingDirectory="glad\" ContinueOnError="true">
-      <Output TaskParameter="ExitCode" PropertyName="PipExitCode" />
-    </Exec>
-    <Error Text="Could not find Python or Pip. Make sure Python is installed and in the PATH environment variable." Condition="'$(PipExitCode)'=='9009'" />
+    <!-- The offline build restores a hash-locked Python environment before MSBuild. -->
+    <Exec Command="python -c &quot;import jinja2, markupsafe&quot;" WorkingDirectory="glad\" />
     <ItemGroup>
       <GladSpecifications Include="khronos\*.xml" />
     </ItemGroup>
     <Copy SourceFiles="@(GladSpecifications)" DestinationFolder="glad\" />
-    <Exec Command="python -m glad --out-path .\target $(GladQuietSwitch) $(GladReproducibleSwitch) --api @(GladApis, ',') --extensions @(GladExtensions, ',') $(GladLanguage) $(GladMultiContextSwitch)" WorkingDirectory="glad\" />
+    <Exec Command="python &quot;$(SolutionDir)tools\generate_offline_glad.py&quot; --out-path .\target $(GladQuietSwitch) --api @(GladApis, ',') --extensions @(GladExtensions, ',') $(GladLanguage) $(GladMultiContextSwitch)" WorkingDirectory="glad\" />
     <ItemGroup>
       <GladSpecificationsTemp Include="glad\*.xml" />
     </ItemGroup>

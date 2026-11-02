@@ -1,0 +1,180 @@
+# Offline ReShade MCP
+
+The release includes `Mcp/OfflineReShade.Mcp.exe`, a local MCP stdio server built
+with the official C# SDK. It exposes the same clean export and batch operations
+used by WinUI. No model API key is required by Offline ReShade itself.
+
+## Connect a compatible MCP client
+
+Register the server's absolute executable path in the MCP client. An example:
+
+```json
+{
+  "mcpServers": {
+    "offline_reshade": {
+      "command": "C:\\Tools\\OfflineReShade\\Mcp\\OfflineReShade.Mcp.exe",
+      "args": ["--native", "C:\\Tools\\OfflineReShade\\OfflineReShadePrototype.exe"]
+    }
+  }
+}
+```
+
+The generated `mcp-config.example.json` contains paths for the build's staging
+directory. Adjust them after moving or extracting the distribution. The process
+uses stdout exclusively for MCP messages and stderr for diagnostic logs.
+
+## Work with the current WinUI preview
+
+1. Start `OfflineReShadeWinUI.exe` and configure/start Preview.
+2. Call `list_sessions` to discover local UI instances.
+3. Call `attach_session` with the chosen session ID. You can also pass
+   `--session <id>` when launching the MCP server.
+   If Windows packaging redirects the discovery directory, copy the `MCP session ID`
+   shown in WinUI Settings and attach with that ID directly. Pipe access still
+   requires the same Windows user.
+4. Call `get_status` and wait until `loading` is false before querying effects.
+5. Call `list_effects`, preferably filtering by FX filename.
+6. Use `set_parameters` / `set_technique`, then `render_preview` to see the result.
+7. Export with `export_image` or save settings with `save_preset`.
+
+Attached MCP clients share the UI's single native connection through an automation
+broker restricted to the current Windows user. While an export/batch owns the
+session, other mutations are rejected and conflicting UI controls are disabled.
+Read-only status queries remain available. Closing an attached MCP client leaves
+the UI preview running.
+
+## Independent rendering
+
+Without attachment, `open_input` starts an owned native process. Example arguments:
+
+```json
+{
+  "colorPath": "C:\\Captures\\shot-Color.png",
+  "depthPath": "C:\\Captures\\shot-Depth.rfloat",
+  "effectDir": "C:\\Tools\\OfflineReShade\\Effects",
+  "outputPath": "C:\\Captures\\Rendered\\shot.png",
+  "depthFormat": "raw",
+  "depthProfile": "kks",
+  "width": 0,
+  "height": 0
+}
+```
+
+Depth is optional for color-only effects. Width and height must both be zero to
+use source dimensions or both be positive for a fixed output size. Raw depth is
+validated at source color dimensions (or 2x in KK mode), then resampled. Changing
+source dimensions in automatic mode restarts the native session and restores its
+saved preset. Each session keeps its own configuration, preset, logs and screenshot
+temporary directory under `%LOCALAPPDATA%/OfflineReShade/Sessions/work`.
+
+In 0.8.1, `open_input` also accepts `watchInput` (default false). A watched resolution
+change rebuilds the session on export; WinUI also rebuilds during preview polling.
+`get_status` reports `busy` while a render operation or rebuild holds the session;
+wait for it to become false before issuing another mutation. A reconnecting session
+may report `reconnecting: true` with dimensions temporarily zero.
+Invalid watched inputs block exporting the old image. Raw depth must contain finite
+normalized values in [0, 1]; no implicit clamping or NaN replacement is performed.
+Required effect compilation/creation failures and unloaded texture dependencies
+fail export explicitly. An intentional all-black render succeeds with a `warning`
+in the export result. Existing output files are replaced only after successful encoding.
+
+In 0.8.2, native protocol 4 additionally reports `adapterLuid`, `adapterName`,
+`previewSynchronization`, `cpuPreview`, `previewError`, `recoveryRequired` and
+`deviceError`. A lost device blocks exports until the owning Core/WinUI session
+rebuilds it. Automatic recovery is limited to three attempts per 30 seconds; a
+persistent failure returns an error. Recovery preserves the global Effects state.
+`cpuPreview` describes display transport, not the rendering backend: effects still
+run through D3D11. GPU sharing failures can switch the display to CPU without
+changing output dimensions or the active preset.
+
+Source and render dimensions must fit both 16384 pixels per axis and
+64 × 1024² total pixels. RAM/VRAM budget checks may reject smaller images on a busy
+or lower-memory device. They estimate base resources and headroom; arbitrary FX
+allocations are still checked by the export health validation. No implicit reduction
+of requested output size is performed. Preview surfaces have separate limits of
+8192 per axis and 16 × 1024² pixels; CPU preview defaults to a 1920-pixel longest
+edge. The preview composition transform accounts for DPI independently of output.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `list_sessions`, `attach_session` | Discover/attach to a running WinUI session |
+| `open_input` | Open or switch a color/depth pair |
+| `get_status` | Loading, dimensions, frame count and input generation |
+| `list_effects` | Paginated uniform metadata/current values and techniques |
+| `set_parameters` | Set uniforms using `effect.fx::uniform` IDs |
+| `set_technique`, `set_effects_enabled` | Enable effects or compare before/after |
+| `reorder_techniques` | Change execution order |
+| `load_preset`, `save_preset` | Load an INI or export current settings |
+| `render_preview` | Return a GUI-free PNG image to the model |
+| `export_image` | Export a full-resolution PNG using either save path |
+| `start_batch`, `get_job`, `cancel_job` | Start, inspect or cancel a batch |
+
+`set_parameters` takes an `updates` array, for example:
+
+```json
+{"updates": [{"id": "Example.fx::Exposure", "value": 0.5}]}
+```
+
+Vector values are arrays. Use IDs and ranges returned by `list_effects`; values
+are real shader units. The scalar/vector editor does not expose uniform arrays.
+
+`start_batch.items` is an array of input objects as shown above. Optional arguments:
+`warmupFrames` (default 5), `reShadeShot` (true), `resume` (true), `retries` (1).
+The job returns immediately. Poll `get_job` for running/completed/cancelled/failed.
+Cancellation preserves completed outputs. The first output directory receives
+`.OfflineReShade.batch.json`. Resume skips a file only when the job/settings
+signature, source content and output hash match. The signature includes the actual
+global Effects state, output dimensions, adapter identity, preset, FX/include/texture content and renderer
+binaries. Every item is validated before considering a checkpoint; effects reload from
+disk before rendering. Add-ons with private state conservatively disable cross-job reuse.
+Output paths must be unique
+and must not overlap any input. Each batch uses one effect directory, preset and
+output-size policy inherited from its item configuration.
+
+## Native CLI and diagnostics
+
+```powershell
+.\OfflineReShadePrototype.exe --color C:\Captures\color.png `
+  --depth C:\Captures\depth.rfloat --effect-dir .\Effects `
+  --output C:\Captures\render.png --work-dir C:\Captures\Session `
+  --warmup-frames 120 --timeout-seconds 600
+```
+
+The CLI waits for compilation and then counts real completed frames. On timeout
+or failure it returns a nonzero exit code. Previews and output are currently
+8-bit PNG; HDR/EXR and game-specific missing render inputs are outside this version.
+
+## Build and verify
+
+```powershell
+.\tools\build_offline_release.ps1 -RunIntegrationTests
+```
+
+This builds native components, publishes self-contained WinUI/MCP runtimes,
+checks forbidden files and required runtime files, runs core and GPU/MCP integration
+checks (including D3D pixel sharing, scaling and fault recovery), and writes a ZIP
+plus SHA-256 and file manifest to `build/offline-release`.
+Python with Pillow is required for the image checks. To create an incremental ZIP,
+add `-BaselineArchive C:\Downloads\previous-release.zip`.
+
+The fault tests opt in using process-local `OFFLINE_RESHADE_TEST_SHARED_FAILURE`
+and `OFFLINE_RESHADE_TEST_DEVICE_LOSS_MARKER` environment variables. Normal runs
+do not set these. A marker simulates the device-failure path without resetting the
+system GPU; it does not replace hardware driver-reset testing.
+
+## Maintenance contract (0.8.3)
+
+Native RPC is now **5**, automation broker **1**, custom offline DLL API **1**,
+and preview bridge ABI **3**. These are internal component contracts, separate
+from MCP's negotiated stdio protocol. Connecting or attaching validates the
+contract and pinned upstream before any mutation; update the whole package together.
+
+`get_diagnostics` is read-only and works before `open_input`. It reports expected
+versions, actual runtime/adapter/preview health when connected, package provenance,
+and integrity of seven core binaries. `runtimeError` explains disconnected state;
+package status is `ok`, `mismatch`, `invalid`, or `unpackaged` for a development build.
+It does not reload effects, change settings, or reset the graphics driver.
+Use `python tools/verify_offline_package.py <release.zip>` for complete archive
+verification. See [maintenance baseline and upgrade procedure](MAINTENANCE.md).

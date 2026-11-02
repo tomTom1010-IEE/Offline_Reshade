@@ -91,7 +91,7 @@ public sealed class PrototypeProcessService : IDisposable
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
-                process.WaitForExit(250);
+                process.WaitForExit(5000);
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)

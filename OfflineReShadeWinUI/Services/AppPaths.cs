@@ -6,7 +6,7 @@ public sealed class AppPaths
     {
         AppDirectory = AppContext.BaseDirectory;
         RepositoryRoot = FindRepositoryRoot() ?? AppDirectory;
-        UserSettingsPath = Path.Combine(AppDirectory, "OfflineReShadeWinUI.settings.json");
+        UserSettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OfflineReShade", "settings.json");
 
         var packagedPrototypePath = Path.Combine(AppDirectory, "OfflineReShadePrototype.exe");
         var developmentOutputDir = Path.Combine(RepositoryRoot, "bin", "x64", "Release");
@@ -22,10 +22,9 @@ public sealed class AppPaths
             DefaultEffectDir = Path.Combine(developmentOutputDir, "OfflinePrototype", "Effects");
         }
 
-        const string exportDir = @"D:\Program Files\KoikatuSunshine\UserData\cap\OfflineReShade";
-        DefaultColorPath = Path.Combine(exportDir, "coloroutput.png");
-        DefaultDepthPath = Path.Combine(exportDir, "depthoutput.rfloat");
-        DefaultOutputPath = Path.Combine(exportDir, "reshadeoutput.png");
+        DefaultColorPath = string.Empty;
+        DefaultDepthPath = string.Empty;
+        DefaultOutputPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "OfflineReShade", "reshadeoutput.png");
     }
 
     public string AppDirectory { get; }

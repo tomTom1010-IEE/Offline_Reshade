@@ -60,6 +60,8 @@ namespace reshade
 		/// Gets a boolean indicating whether effects are being loaded.
 		/// </summary>
 		bool is_loading() const { return _reload_remaining_effects != std::numeric_limits<size_t>::max() || !_reload_create_queue.empty(); }
+		std::string offline_export_error() const;
+		std::string offline_dependencies() const;
 
 		void render_effects(api::command_list *cmd_list, api::resource_view rtv, api::resource_view rtv_srgb) final;
 		void render_technique(api::effect_technique handle, api::command_list *cmd_list, api::resource_view rtv, api::resource_view rtv_srgb) final;

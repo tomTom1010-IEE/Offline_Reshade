@@ -375,7 +375,9 @@ bool reshade::runtime::on_init()
 	const api::resource_desc back_buffer_desc = _device->get_resource_desc(_swapchain->get_back_buffer(0));
 
 	// Avoid initializing on very small swap chains (e.g. implicit swap chain in The Sims 4, which is not used to present in windowed mode)
-	if (back_buffer_desc.texture.width < 160 && back_buffer_desc.texture.height < 120)
+	bool offline_runtime = false;
+	ini_file::load_cache(_config_path).get("OFFLINE", "Enabled", offline_runtime);
+	if (!offline_runtime && back_buffer_desc.texture.width < 160 && back_buffer_desc.texture.height < 120)
 		return false;
 
 	_width = back_buffer_desc.texture.width;
@@ -2929,6 +2931,51 @@ void reshade::runtime::destroy_effect(size_t effect_index, bool unload)
 	// Do not clear effect here, since it is common to be reused immediately
 }
 
+std::string reshade::runtime::offline_export_error() const
+{
+	if (is_loading()) return "Effects are still compiling.";
+	std::vector<std::string> requested;
+	if (_effects_enabled) ini_file::load_cache(_current_preset_path).get({}, "Techniques", requested);
+	std::set<size_t> required;
+	for (const std::string &name : requested)
+	{
+		const auto found = std::find_if(_techniques.begin(), _techniques.end(), [&](const technique &tech) {
+			return name == tech.name || name == tech.name + '@' + _effects[tech.effect_index].source_file.filename().u8string();
+		});
+		if (found == _techniques.end()) return "Required technique is missing or failed to compile: " + name;
+		required.insert(found->effect_index);
+	}
+	for (const technique &tech : _techniques)
+		if (tech.enabled && (_effects_enabled || _effects[tech.effect_index].addon)) required.insert(tech.effect_index);
+	for (size_t index : required)
+	{
+		const effect &fx = _effects[index];
+		if (!fx.compiled || !fx.created) return "Effect is not ready: " + fx.source_file.u8string() + "\n" + fx.errors;
+		for (const texture &tex : _textures)
+			if (std::find(tex.shared.begin(), tex.shared.end(), index) != tex.shared.end() &&
+				!tex.annotation_as_string("source").empty() && !tex.loaded)
+				return "Texture failed to load for " + fx.source_file.filename().u8string() + ": " + std::string(tex.annotation_as_string("source"));
+	}
+	return {};
+}
+
+std::string reshade::runtime::offline_dependencies() const
+{
+	if (is_loading()) return {};
+	std::set<std::filesystem::path> paths;
+	for (const effect &fx : _effects) {
+		paths.insert(fx.source_file);
+		paths.insert(fx.included_files.begin(), fx.included_files.end());
+	}
+	for (const texture &tex : _textures) {
+		std::filesystem::path path = std::filesystem::u8path(tex.annotation_as_string("source"));
+		if (!path.empty() && find_file(_texture_search_paths, path)) paths.insert(path);
+	}
+	std::string result;
+	for (const auto &path : paths) result += path.u8string() + '\n';
+	return result;
+}
+
 void reshade::runtime::load_textures(size_t effect_index)
 {
 	for (texture &tex : _textures)
@@ -2942,6 +2989,7 @@ void reshade::runtime::load_textures(size_t effect_index)
 		// Ignore textures that have no image file attached to them (e.g. plain render targets)
 		if (source_path.empty())
 			continue;
+		tex.loaded = false;
 
 		// Search for image file using the provided search paths unless the path provided is already absolute
 		if (!find_file(_texture_search_paths, source_path))

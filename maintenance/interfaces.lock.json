@@ -1,0 +1,56 @@
+{
+  "versions": {
+    "nativeRpc": 5,
+    "automationBroker": 1,
+    "offlineApi": 1,
+    "previewBridge": 3
+  },
+  "reShadeApi": 20,
+  "headers": {
+    "include/reshade.hpp": "38f6e4042e6b95a94878d9a722733976e191b7161c8ac46bd740b174b49c0afc",
+    "include/reshade_api.hpp": "2d659403f24ee4737a1834e404d00631b1fb128102d6fb74b6fb220c837b2d72",
+    "include/reshade_api_device.hpp": "a716c44b6fbb064dbbb0826687728f21aa71ed45e13564e4dc1cdf36da5bdfa0",
+    "include/reshade_api_resource.hpp": "32cdafe6d783813f3ac72ad43e426638d8d0fef56bcb558fad218a14cfb75ee3",
+    "include/reshade_api_pipeline.hpp": "a45e139c48e43da722222c6516e07c54ce5b31d513e6da211b0f959b69caa40b",
+    "include/reshade_api_format.hpp": "68caa17fef712043e810ab88770c15af009aa3c7693e5c115ddc324f2d0809a7",
+    "include/reshade_events.hpp": "2717f56e2bd89af6d708c9c316353d6581c5a41d4526629fadba51d13be57a89"
+  },
+  "previewExports": [
+    "uint32_t __stdcall ORPreview_GetAbiVersion() ",
+    "HRESULT __stdcall ORPreview_CreateV2(void *swap_chain_panel_unknown, uint32_t width, uint32_t height, uint64_t adapter_luid, void **out_bridge)",
+    "void __stdcall ORPreview_Destroy(void *bridge_ptr)",
+    "HRESULT __stdcall ORPreview_Resize(void *bridge_ptr, uint32_t width, uint32_t height)",
+    "HRESULT __stdcall ORPreview_SetDisplaySize(void *bridge_ptr, float logical_width, float logical_height)",
+    "HRESULT __stdcall ORPreview_RenderShared("
+  ],
+  "nativeMethods": [
+    "export_preset",
+    "get_compatibility",
+    "get_runtime_info",
+    "list_addon_imgui_capture",
+    "list_addon_overlays",
+    "list_addons",
+    "list_state",
+    "open_native_addon_panel",
+    "reload_effects",
+    "reorder_techniques",
+    "reset_uniform",
+    "save_output",
+    "save_preset",
+    "save_preview",
+    "save_screenshot",
+    "send_addon_overlay_input",
+    "set_addon_imgui_value",
+    "set_addon_overlay_size",
+    "set_effects_state",
+    "set_input_paths",
+    "set_input_watch_enabled",
+    "set_native_addon_overlay",
+    "set_preprocessor_definition",
+    "set_preset",
+    "set_preview_transport",
+    "set_technique_state",
+    "set_uniform",
+    "validate_export"
+  ]
+}

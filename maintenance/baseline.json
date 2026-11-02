@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.8.3",
+  "upstream": {
+    "repository": "https://github.com/crosire/reshade",
+    "commit": "0eff32e237578591a44946a0e0f9581620c026b4",
+    "tree": "59d35b5281659236812eeb4da97f536e5481e6f9",
+    "nearestTag": "v6.7.3",
+    "tagCommit": "4a50d1eddace85734871d91792ff214f13f66c01",
+    "version": "6.7.3",
+    "apiVersion": 20
+  },
+  "interfaces": {
+    "nativeRpc": 5,
+    "automationBroker": 1,
+    "offlineApi": 1,
+    "previewBridge": 3
+  },
+  "toolchain": {
+    "dotnetSdk": "9.0.315",
+    "runtimeFramework": "8.0.28",
+    "windowsSdk": "10.0.26100.0",
+    "platformToolset": "v143",
+    "python": "3.12.4",
+    "runner": "windows-2022",
+    "actionlint": {
+      "version": "1.7.12",
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_amd64.zip",
+      "sha256": "6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9"
+    },
+    "wholeProgramOptimization": false
+  },
+  "submodules": {
+    "deps/d3d12": "9e393d6d8a3b30dcc6f2806ef604ec16a27b0d7e",
+    "deps/fpng": "925796543b9d26b8edfcdcecd94c1dac280f29fc",
+    "deps/glad": "27bed1181560211b55e39a9b132fef8c5846aae5",
+    "deps/imgui": "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
+    "deps/jxl_simple_lossless": "8dc970fc771e35239db55dfbce8f46f83f8e9b73",
+    "deps/minhook": "8fda4f5481fed5797dc2651cd91e238e9b3928c6",
+    "deps/openxr": "288d3a7ebc1ad959f62d51da75baa3d27438c499",
+    "deps/spirv": "7845730cab6ebbdeb621e7349b7dc1a59c3377be",
+    "deps/stb": "28d546d5eb77d4585506a20480f4de2e706dff4c",
+    "deps/utfcpp": "819011bb01628fe1aa2f1da9f2c842a48fd5680b",
+    "deps/vma": "1076b348abd17859a116f4b111c43d58a588a086"
+  },
+  "actions": {
+    "actions/checkout": "d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/setup-dotnet": "67a3573c9a986a3f9c594539f4ab511d57bb3ce9",
+    "actions/setup-python": "ece7cb06caefa5fff74198d8649806c4678c61a1",
+    "microsoft/setup-msbuild": "30375c66a4eea26614e0d39710365f22f8b0af57",
+    "actions/upload-artifact": "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+  }
+}

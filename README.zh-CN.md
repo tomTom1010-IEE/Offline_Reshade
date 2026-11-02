@@ -1,5 +1,19 @@
 # Offline ReShade 中文使用说明
 
+0.8.3 建立上游、依赖和接口的固定基线，增加版本握手、CI 发布验证与 MCP 统一诊断。保留 GPU 同步、高 DPI 与缩放修复、导出验证和批处理内容哈希；预览缩放或降级不改变成品，合法全黑仍仅提示。详见 [更新记录](CHANGELOG.md)、[MCP 说明](docs/MCP.md)、[维护与升级流程](docs/MAINTENANCE.md) 和 [三步计划](docs/STABILITY_PLAN.md)。
+
+设备失效时会尝试重建会话，30 秒内最多自动恢复 3 次；持续失败会明确报错。源图与输出上限为单边 16384、总计 64×1024² 像素，还需通过可用内存/显存预算检查。CPU 预览默认最长边 1920，仅影响显示，不会暗中降低成品尺寸。
+
+正式便携包同时包含 .NET 和 Windows App SDK 运行依赖。设置保存到 `%LOCALAPPDATA%\OfflineReShade\settings.json`；新设置不存在时会读取程序旁旧的 `OfflineReShadeWinUI.settings.json`。
+
+两个保存按钮都会等待 FX 编译完成和实际渲染预热帧，并将 ReShade GUI 排除在输出之外。`ReShade Shot` 使用 ReShade 截图 API，会触发截图 Add-on 事件；`Save PNG` 直接将干净渲染结果编码为 PNG。没有预览时，保存操作会先启动 runtime。
+
+批处理的 `Warmup frames` 按实际完成渲染的帧数等待。执行时显示进度并锁定冲突操作，可随时取消；重试同一任务时会根据 `.OfflineReShade.batch.json`、输入文件指纹和输出 SHA-256 恢复已完成项目。单项失败会重试一次。渲染宽高同时留空时保留每张源图尺寸，支持不同分辨率混合；同时填写宽高则统一缩放颜色和深度到指定尺寸。
+
+FX 列表采用虚拟化，仅在展开效果时创建参数控件。搜索框支持 FX 文件名及参数名称。
+
+开发者可运行 `tools/build_offline_release.ps1 -RunIntegrationTests` 构建完整便携包并运行控制层、Native 和 MCP 集成测试，需要 Python 和 Pillow。输出包含版本、源提交和文件哈希清单；增加 `-BaselineArchive <旧版.zip>` 可生成增量包。
+
 <p align="center">
   <img src="offlineReshadelogo.png" alt="Offline ReShade logo" width="480">
 </p>
@@ -81,7 +95,7 @@ UserData\cap\OfflineReShade\
   metadata.json
 ```
 
-WinUI 客户端的 Real Time 模式会监听这些文件。当游戏插件写入新的 color/depth pair 时，native ReShade runtime 会重新载入输入，不需要重启 effects runtime。
+WinUI 客户端的 Real Time 模式会监听这些文件。当游戏插件写入新的 color/depth pair 时，native ReShade runtime 会重新载入输入。自动尺寸模式下，源图分辨率改变会触发 runtime 重建；明确指定的输出尺寸保持不变。
 
 ### Gallery 导出
 

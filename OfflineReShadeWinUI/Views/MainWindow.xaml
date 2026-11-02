@@ -18,6 +18,7 @@
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
       </Grid.RowDefinitions>
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
@@ -29,8 +30,8 @@
         <TextBlock Text="Offline ReShade" Foreground="White" FontSize="18" FontWeight="SemiBold" Margin="0,0,10,0" />
         <Button Content="Start Preview" Command="{x:Bind ViewModel.StartPreviewCommand}" />
         <Button Content="Stop" Command="{x:Bind ViewModel.StopPreviewCommand}" />
-        <Button Content="ReShade Shot" Command="{x:Bind ViewModel.ReShadeShotCommand}" />
-        <Button Content="Save PNG" Command="{x:Bind ViewModel.SavePngCommand}" />
+        <Button ToolTipService.ToolTip="Clean full-resolution export through the ReShade screenshot API" Content="ReShade Shot" Command="{x:Bind ViewModel.ReShadeShotCommand}" />
+        <Button ToolTipService.ToolTip="Clean full-resolution PNG export after FX compilation and warmup" Content="Save PNG" Command="{x:Bind ViewModel.SavePngCommand}" />
         <Button Content="Reload" Command="{x:Bind ViewModel.ReloadCommand}" />
         <Button Content="Save Preset" Command="{x:Bind ViewModel.SavePresetCommand}" />
         <Button Content="Settings" Command="{x:Bind ViewModel.ToggleSettingsCommand}" />
@@ -44,7 +45,7 @@
             <ColumnDefinition Width="Auto" />
           </Grid.ColumnDefinitions>
           <TextBlock Text="Real Time" Foreground="#C9D1D9" VerticalAlignment="Center" />
-          <ToggleSwitch x:Name="InputModeSwitch"
+          <ToggleSwitch x:Name="InputModeSwitch" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                         Grid.Column="1"
                         Width="52"
                         MinWidth="0"
@@ -65,10 +66,17 @@
                    IsIndeterminate="{x:Bind ViewModel.IsEffectsLoading, Mode=OneWay}"
                    Opacity="{x:Bind ViewModel.EffectsLoadingOpacity, Mode=OneWay}"
                    AutomationProperties.Name="ReShade effect compilation progress" />
+      <Grid Grid.Row="2" Grid.ColumnSpan="3" ColumnSpacing="12" Margin="0,8,0,0">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+        <ProgressBar Value="{x:Bind ViewModel.BatchProgress, Mode=OneWay}" Maximum="{x:Bind ViewModel.BatchMaximum, Mode=OneWay}"
+                     AutomationProperties.Name="Batch export progress" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" VerticalAlignment="Center" />
+        <Button Grid.Column="2" Content="Cancel batch" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="CancelBatch" />
+      </Grid>
     </Grid>
 
     <Grid Grid.Row="1">
-      <ScrollViewer x:Name="SettingsContent"
+      <ScrollViewer x:Name="SettingsContent" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                     Visibility="Collapsed"
                     Padding="18"
                     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
@@ -80,6 +88,8 @@
                 Padding="18">
           <StackPanel Spacing="12">
             <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
+            <TextBox Header="MCP session ID" Text="{x:Bind ViewModel.AutomationSessionId, Mode=OneWay}" IsReadOnly="True"
+                     AutomationProperties.AutomationId="AutomationSessionId" />
 
             <TextBlock Text="Game" />
             <ComboBox x:Name="DepthProfileBox"
@@ -229,6 +239,7 @@
               <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.ControlStatusText, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
             <TabView x:Name="ControlsTabView"
+                     IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                      Grid.Row="1"
                      IsAddTabButtonVisible="False"
                      CanDragTabs="False"
@@ -236,20 +247,35 @@
                      SelectionChanged="OnControlsTabSelectionChanged">
               <TabViewItem Header="FX"
                            IsClosable="False">
-                <ScrollViewer x:Name="ControlsScrollViewer"
-                              HorizontalScrollBarVisibility="Disabled">
-                  <StackPanel Padding="12" Spacing="12">
-                    <StackPanel x:Name="ControlsPanel" Spacing="10" />
-                    <Expander Header="Log" IsExpanded="False">
-                      <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
-                               IsReadOnly="True"
-                               AcceptsReturn="True"
-                               TextWrapping="Wrap"
-                               FontFamily="Consolas"
-                               MinHeight="180" />
-                    </Expander>
-                  </StackPanel>
-                </ScrollViewer>
+                <Grid Padding="12" RowSpacing="8">
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" /><RowDefinition Height="Auto" />
+                  </Grid.RowDefinitions>
+                  <TextBox x:Name="EffectSearchBox" Header="Search effects and parameters" TextChanged="OnEffectSearchChanged"
+                           AutomationProperties.AutomationId="EffectSearch" />
+                  <StackPanel x:Name="ControlsPanel" Grid.Row="1" Spacing="8" />
+                  <ListView x:Name="EffectsList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch"
+                            ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="ReShade effects">
+                    <ListView.ItemContainerStyle>
+                      <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="0" />
+                      </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                      <DataTemplate x:DataType="vm:EffectControlViewModel">
+                        <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Margin="0,0,0,8"
+                                  Loaded="OnEffectExpanderLoaded" Unloaded="OnEffectExpanderUnloaded"
+                                  Expanding="OnEffectExpanding" Collapsed="OnEffectCollapsed" />
+                      </DataTemplate>
+                    </ListView.ItemTemplate>
+                  </ListView>
+                  <Expander Grid.Row="3" Header="Log">
+                    <TextBox Text="{x:Bind ViewModel.LogText, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True"
+                             TextWrapping="Wrap" FontFamily="Consolas" Height="180" />
+                  </Expander>
+                </Grid>
               </TabViewItem>
               <TabViewItem Header="Add-ons"
                            AutomationProperties.AutomationId="TabAddons"
@@ -403,11 +429,11 @@
                           Command="{x:Bind ViewModel.BatchApplyReShadeShotCommand}" />
                 </Grid>
                 <TextBox Grid.Column="1"
-                         Header="Frame Delay"
+                         Header="Warmup frames" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                          Text="{x:Bind ViewModel.Settings.GalleryBatchFrameDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          InputScope="Number" />
               </Grid>
-              <ListView x:Name="GalleryList"
+              <ListView x:Name="GalleryList" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                         Grid.Row="2"
                         ItemsSource="{x:Bind ViewModel.GalleryItems, Mode=OneWay}"
                         SelectionChanged="OnGallerySelectionChanged"

@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Media.Imaging;
+using OfflineReShade.Core;
 
 namespace OfflineReShade.WinUI.Services;
 
@@ -17,6 +18,7 @@ public sealed class PreviewFrameClient : IDisposable
     private int _pendingHeight;
     private bool _applyQueued;
     private WriteableBitmap? _bitmap;
+    private int _generation;
 
     public PreviewFrameClient()
     {
@@ -30,11 +32,14 @@ public sealed class PreviewFrameClient : IDisposable
     {
         Stop();
         _cancellation = new CancellationTokenSource();
-        _readTask = Task.Run(() => ReadLoopAsync(pipeName, _cancellation.Token));
+        var token = _cancellation.Token;
+        var generation = _generation;
+        _readTask = Task.Run(() => ReadLoopAsync(pipeName, token, generation));
     }
 
     public void Stop()
     {
+        Interlocked.Increment(ref _generation);
         var cancellation = _cancellation;
         _cancellation = null;
         if (cancellation == null)
@@ -59,7 +64,7 @@ public sealed class PreviewFrameClient : IDisposable
         _bitmap = null;
     }
 
-    private async Task ReadLoopAsync(string pipeName, CancellationToken cancellationToken)
+    private async Task ReadLoopAsync(string pipeName, CancellationToken cancellationToken, int generation)
     {
         try
         {
@@ -74,13 +79,14 @@ public sealed class PreviewFrameClient : IDisposable
                 var width = BitConverter.ToInt32(header, 4);
                 var height = BitConverter.ToInt32(header, 8);
                 var byteCount = BitConverter.ToInt32(header, 12);
-                if (magic != Magic || width <= 0 || height <= 0 || byteCount != width * height * 4)
+                if (magic != Magic || width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+                    (long)width * height > PreviewGeometry.MaxPreviewPixels || byteCount != (long)width * height * 4)
                     throw new InvalidDataException("Invalid preview frame header.");
 
                 var pixels = new byte[byteCount];
                 await ReadExactAsync(pipe, pixels, cancellationToken);
 
-                QueueFrame(width, height, pixels);
+                if (!cancellationToken.IsCancellationRequested) QueueFrame(width, height, pixels, generation);
             }
         }
         catch (OperationCanceledException)
@@ -88,15 +94,16 @@ public sealed class PreviewFrameClient : IDisposable
         }
         catch (Exception ex)
         {
-            _dispatcher.TryEnqueue(() => ErrorReceived?.Invoke(ex.Message));
+            _dispatcher.TryEnqueue(() => { if (generation == _generation) ErrorReceived?.Invoke(ex.Message); });
         }
     }
 
-    private void QueueFrame(int width, int height, byte[] pixels)
+    private void QueueFrame(int width, int height, byte[] pixels, int generation)
     {
         var shouldQueue = false;
         lock (_frameLock)
         {
+            if (generation != _generation) return;
             _pendingWidth = width;
             _pendingHeight = height;
             _pendingPixels = pixels;
@@ -108,10 +115,10 @@ public sealed class PreviewFrameClient : IDisposable
         }
 
         if (shouldQueue)
-            _dispatcher.TryEnqueue(ApplyPendingFrame);
+            _dispatcher.TryEnqueue(() => { if (generation == _generation) ApplyPendingFrame(generation); });
     }
 
-    private void ApplyPendingFrame()
+    private void ApplyPendingFrame(int generation)
     {
         byte[]? pixels;
         int width;
@@ -151,7 +158,7 @@ public sealed class PreviewFrameClient : IDisposable
         }
 
         if (queueAgain)
-            _dispatcher.TryEnqueue(ApplyPendingFrame);
+            _dispatcher.TryEnqueue(() => { if (generation == _generation) ApplyPendingFrame(generation); });
     }
 
     private static async Task ReadExactAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)

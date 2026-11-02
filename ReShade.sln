@@ -47,6 +47,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OfflineReShadeWinUI", "OfflineReShadeWinUI\OfflineReShadeWinUI.csproj", "{47D669EC-0E87-486D-AD62-00817220802E}"
 EndProject
 
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OfflineReShade.Core", "OfflineReShade.Core\OfflineReShade.Core.csproj", "{26263744-96A1-4930-8BD8-452ED1F7C4BD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OfflineReShade.Mcp", "OfflineReShade.Mcp\OfflineReShade.Mcp.csproj", "{CDE8A518-B2CA-449C-8C69-15E922002EFD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug App|32-bit = Debug App|32-bit
@@ -321,6 +325,38 @@ Global
 		{47D669EC-0E87-486D-AD62-00817220802E}.Release|32-bit.ActiveCfg = Release|x64
 		{47D669EC-0E87-486D-AD62-00817220802E}.Release|64-bit.ActiveCfg = Release|x64
 		{47D669EC-0E87-486D-AD62-00817220802E}.Release|64-bit.Build.0 = Release|x64
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug App|32-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug App|64-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug App|64-bit.Build.0 = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug Setup|32-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug Setup|64-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug|32-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug|64-bit.ActiveCfg = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Debug|64-bit.Build.0 = Debug|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release App|32-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release App|64-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release App|64-bit.Build.0 = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release Setup|32-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release Setup|64-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release|32-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release|64-bit.ActiveCfg = Release|Any CPU
+		{26263744-96A1-4930-8BD8-452ED1F7C4BD}.Release|64-bit.Build.0 = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug App|32-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug App|64-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug App|64-bit.Build.0 = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug Setup|32-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug Setup|64-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug|32-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug|64-bit.ActiveCfg = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Debug|64-bit.Build.0 = Debug|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release App|32-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release App|64-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release App|64-bit.Build.0 = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release Setup|32-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release Setup|64-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release|32-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release|64-bit.ActiveCfg = Release|Any CPU
+		{CDE8A518-B2CA-449C-8C69-15E922002EFD}.Release|64-bit.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
