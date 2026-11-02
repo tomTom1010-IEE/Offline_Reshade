@@ -113,8 +113,16 @@ public sealed class McpTools(McpBridge bridge)
         => ExecuteToolAsync("export_image", Decision(new ImageExportRequest(path, warmupFrames, reShadeShot, conflictPolicy, applyInput, expectedInput), unsavedChanges, savePath, expectedRevision), cancellationToken);
 
     [McpServerTool(Name = "start_batch"), Description("Start a cancellable batch using an immutable list of inputs and output paths. Resumes matching completed files using a checkpoint and output hashes. Returns a job ID immediately.")]
-    public Task<CallToolResult> StartBatch(RenderInput[] items, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true, bool resume = true, int retries = 1)
-        => ExecuteToolAsync("batch_start", new BatchRequest(items, warmupFrames, reShadeShot, resume, retries), cancellationToken);
+    public Task<CallToolResult> StartBatch(RenderInput[] items, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true, bool resume = true, int retries = 1,
+        string conflictPolicy = "replace", long? expectedRevision = null, RenderInput? expectedInput = null)
+        => ExecuteToolAsync("batch_start", new BatchRequest(items, warmupFrames, reShadeShot, resume, retries, conflictPolicy, expectedRevision, expectedInput), cancellationToken);
+    [McpServerTool(Name = "preflight_batch", ReadOnly = true), Description("Review every batch item, invalid reason, output directories and conflict policy. Does not render or validate compilation; those checks run before each export.")]
+    public Task<JsonElement> PreflightBatch(RenderInput[] items, CancellationToken cancellationToken, int warmupFrames = 5, bool reShadeShot = true, string conflictPolicy = "replace")
+        => bridge.CallAsync("batch_preflight", new BatchRequest(items, warmupFrames, reShadeShot, ConflictPolicy: conflictPolicy), cancellationToken);
+    [McpServerTool(Name = "resume_batch"), Description("Resume a saved job.json using its frozen presets and output settings, revalidating successful output hashes. Restores the original editor context when finished or cancelled.")]
+    public Task<CallToolResult> ResumeBatch(string path, CancellationToken cancellationToken) => ExecuteToolAsync("batch_resume", new { path }, cancellationToken);
+    [McpServerTool(Name = "retry_failed_batch"), Description("Retry only failed/invalid items from a saved job.json, preserving other results and the task's frozen settings. Changed effect dependencies require a new task.")]
+    public Task<CallToolResult> RetryFailedBatch(string path, CancellationToken cancellationToken) => ExecuteToolAsync("batch_retry", new { path }, cancellationToken);
     [McpServerTool(Name = "get_job", ReadOnly = true), Description("Read the current or latest batch job's progress, state and error.")]
     public Task<JsonElement> GetJob(CancellationToken cancellationToken) => bridge.CallAsync("batch_status", token: cancellationToken);
     [McpServerTool(Name = "cancel_job"), Description("Cancel the active batch. Completed output files and the checkpoint are preserved for resume.")]

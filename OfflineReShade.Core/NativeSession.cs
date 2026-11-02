@@ -53,6 +53,8 @@ internal sealed class NativeRuntimeHost : IRenderSessionHost
         var sourcePreset = snapshot ?? input.PresetPath;
         if (!string.IsNullOrEmpty(sourcePreset) && !string.Equals(Path.GetFullPath(sourcePreset), Path.GetFullPath(workingPreset), StringComparison.OrdinalIgnoreCase))
             File.Copy(sourcePreset, workingPreset, true);
+        else if (string.IsNullOrEmpty(sourcePreset))
+            await File.WriteAllTextAsync(workingPreset, "", token);
         var pipe = "OfflineReShade.Runtime." + Guid.NewGuid().ToString("N");
         var info = new ProcessStartInfo(_nativeExe) { WorkingDirectory = Path.GetDirectoryName(_nativeExe), UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         void Add(string key, string? value) { if (!string.IsNullOrWhiteSpace(value)) { info.ArgumentList.Add(key); info.ArgumentList.Add(value); } }

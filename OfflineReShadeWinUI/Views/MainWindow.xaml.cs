@@ -36,6 +36,8 @@ public sealed partial class MainWindow : Window
         EffectsHost.Content = _effects; CanvasHost.Content = _canvas; InputHost.Content = _input;
         _effects.SliderModeChanged += ShowSliderModeOverlay;
         ViewModel.ExportRequested += OnExportRequested;
+        ViewModel.BatchRequested += OnBatchRequested;
+        ViewModel.BatchResultsRequested += OnBatchResultsRequested;
         ViewModel.PropertyChanged += OnViewModelChanged;
         ViewModel.Settings.PropertyChanged += OnSettingsChanged;
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
@@ -73,6 +75,7 @@ public sealed partial class MainWindow : Window
         {
             _isClosing = true; _sliderModeOverlayTimer.Stop();
             ViewModel.ExportRequested -= OnExportRequested; ViewModel.PropertyChanged -= OnViewModelChanged;
+            ViewModel.BatchRequested -= OnBatchRequested; ViewModel.BatchResultsRequested -= OnBatchResultsRequested;
             ViewModel.Settings.PropertyChanged -= OnSettingsChanged;
             _effects.Dispose(); _canvas.Dispose(); _input.Dispose(); ViewModel.Dispose();
         };
@@ -247,6 +250,46 @@ public sealed partial class MainWindow : Window
             };
             try { await dialog.ShowAsync(); }
             finally { ViewModel.PropertyChanged -= changed; }
+        }
+        catch (Exception error) { ViewModel.ReportUiError(error); }
+        finally { _exportDialogOpen = false; }
+    }
+    private async void OnBatchRequested()
+    {
+        if (_exportDialogOpen) return;
+        _exportDialogOpen = true;
+        var started = false;
+        try
+        {
+            var model = await ViewModel.PrepareBatchSetupAsync();
+            var panel = new BatchSetupPanel(ViewModel, model);
+            var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, RequestedTheme = RootGrid.ActualTheme,
+                Title = "Batch export", Content = panel, PrimaryButtonText = "Start batch", CloseButtonText = "Cancel",
+                IsPrimaryButtonEnabled = model.CanStart, DefaultButton = ContentDialogButton.Primary };
+            System.ComponentModel.PropertyChangedEventHandler changed = (_, _) => dialog.IsPrimaryButtonEnabled = model.CanStart && ViewModel.CanEditSession;
+            model.PropertyChanged += changed; ViewModel.PropertyChanged += changed;
+            dialog.PrimaryButtonClick += async (_, args) =>
+            {
+                var deferral = args.GetDeferral();
+                try { await ViewModel.StartReviewedBatchAsync(model.Request ?? throw new InvalidOperationException("Review the batch inputs.")); started = true; }
+                catch (Exception error) { args.Cancel = true; panel.ShowError(error.Message); ViewModel.ReportUiError(error, "batch_start"); }
+                finally { deferral.Complete(); }
+            };
+            try { await dialog.ShowAsync(); }
+            finally { model.PropertyChanged -= changed; ViewModel.PropertyChanged -= changed; }
+        }
+        catch (Exception error) { ViewModel.ReportUiError(error, "batch_preflight"); }
+        finally { _exportDialogOpen = false; }
+        if (started) OnBatchResultsRequested();
+    }
+    private async void OnBatchResultsRequested()
+    {
+        if (_exportDialogOpen) return;
+        _exportDialogOpen = true;
+        try
+        {
+            await new ContentDialog { XamlRoot = RootGrid.XamlRoot, RequestedTheme = RootGrid.ActualTheme,
+                Title = "Batch results", Content = new BatchResultsPanel(ViewModel), CloseButtonText = "Close" }.ShowAsync();
         }
         catch (Exception error) { ViewModel.ReportUiError(error); }
         finally { _exportDialogOpen = false; }

@@ -43,7 +43,7 @@ session, other mutations are rejected and conflicting UI controls are disabled.
 Read-only status queries remain available. Closing an attached MCP client leaves
 the UI preview running.
 
-### Shared operation results (automation broker 6)
+### Shared operation results (automation broker 7)
 
 WinUI and both MCP modes now use one mutation queue. Parameter updates are serialized;
 an exclusive operation (open, preset load/save, reload, export or batch) drains previously
@@ -225,12 +225,14 @@ edge. The preview composition transform accounts for DPI independently of output
 | `get_status` | Loading, dimensions, frame count and input generation |
 | `list_effects` | Paginated uniform metadata/current values and techniques |
 | `set_parameters` | Set uniforms using `effect.fx::uniform` IDs |
-| `set_technique`, `set_effects_enabled` | Enable effects or compare before/after |
+| `set_technique`, `set_effects_enabled` | Change technique or global effect state |
+| `set_preview_comparison` | Compare original/processed preview without changing exported effects |
 | `reorder_techniques` | Change execution order |
-| `load_preset`, `save_preset` | Load an INI or export current settings |
+| `load_preset`, `save_preset`, `save_preset_as`, `export_preset` | Load, save, save as, or export a separate preset copy |
 | `render_preview` | Return a GUI-free PNG image to the model |
 | `export_image` | Export a full-resolution PNG using either save path |
 | `start_batch`, `get_job`, `cancel_job` | Start, inspect or cancel a batch |
+| `preflight_batch`, `resume_batch`, `retry_failed_batch` | Review inputs or continue a saved task |
 
 `set_parameters` takes an `updates` array, for example:
 
@@ -242,17 +244,21 @@ Vector values are arrays. Use IDs and ranges returned by `list_effects`; values
 are real shader units. The scalar/vector editor does not expose uniform arrays.
 
 `start_batch.items` is an array of input objects as shown above. Optional arguments:
-`warmupFrames` (default 5), `reShadeShot` (true), `resume` (true), `retries` (1).
+`warmupFrames` (default 5), `reShadeShot` (true), `resume` (true), `retries` (1),
+and `conflictPolicy` (`replace`).
 The job returns immediately. Poll `get_job` for running/completed/cancelled/failed.
-Cancellation preserves completed outputs. The first output directory receives
-`.OfflineReShade.batch.json`. Resume skips a file only when the job/settings
+Cancellation preserves completed outputs. The first valid output directory receives
+the saved task and an optional shared `.OfflineReShade.batch.json` cache.
+Resume reuses a file only when the job/settings
 signature, source content and output hash match. The signature includes the actual
 global Effects state, output dimensions, adapter identity, preset, FX/include/texture content and renderer
 binaries. Every item is validated before considering a checkpoint; effects reload from
 disk before rendering. Add-ons with private state conservatively disable cross-job reuse.
-Output paths must be unique
-and must not overlap any input. Each batch uses one effect directory, preset and
-output-size policy inherited from its item configuration.
+Output paths must be unique and must not overlap any input or effect dependency.
+Items may use different presets, effect directories and dimensions. Each item's
+settings are frozen when the task starts; matching the current preset captures
+live unsaved FX edits. See [Frozen batch tasks](#frozen-batch-tasks-broker-7) for
+per-item results, saved-task recovery and context restoration.
 
 ## Native CLI and diagnostics
 
@@ -287,7 +293,7 @@ system GPU; it does not replace hardware driver-reset testing.
 
 ## Maintenance contract (0.8.3)
 
-Native RPC is now **7**, automation broker **6**, custom offline DLL API **1**,
+Native RPC is now **7**, automation broker **7**, custom offline DLL API **1**,
 and preview bridge ABI **3**. These are internal component contracts, separate
 from MCP's negotiated stdio protocol. Connecting or attaching validates the
 contract and pinned upstream before any mutation; update the whole package together.
@@ -311,5 +317,54 @@ It is transient and resets when the native runtime is rebuilt. `export_image` an
 preview-capture tools continue to return processed pixels even while comparison is
 active. For an intentional output without effects, use `set_effects_enabled`.
 
-Native RPC 7 and broker 6 are required; this does not change the upstream ReShade
+Native RPC 7 and broker 7 are required; this does not change the upstream ReShade
 API or preview bridge ABI.
+
+
+### Frozen batch tasks (broker 7)
+
+`preflight_batch(items, warmupFrames, reShadeShot, conflictPolicy)` returns every
+item, invalid reasons, counts and output directories without changing the editor.
+This is file/settings validation; decoding, FX compilation, textures and depth
+are checked by the native renderer before exporting each item.
+
+`start_batch` accepts `conflictPolicy`: `replace`, `rename`, `fail`, or `skip`.
+The MCP default remains `replace`; WinUI defaults to `rename`. `resume: true`
+allows fingerprint-verified cache reuse. This is separate from `skip`, which
+leaves an existing file untouched without claiming its contents are correct.
+Optional `expectedRevision` and `expectedInput` reject a stale review.
+
+Starting captures immutable preset copies, per-item output settings and effect
+resource hashes. An empty or matching source preset uses the live unsaved FX;
+an explicitly different preset uses that preset's frozen contents. Tasks are
+stored at `<output>/.OfflineReShade.jobs/<id>/job.json` with their preset INIs.
+Keep that directory together when retaining a task. Schema version 1 is required.
+Source preset changes cannot change a saved task; changed effect dependencies
+require starting a new task. Third-party Add-on private state is not serialized,
+so its outputs are not eligible for reuse between attempts.
+
+`get_job` exposes `manifestPath`, per-item `items` (index, input, state, outputPath,
+error, warning, attempts, sourceFingerprint, outputHash), and separate `exported`, `reused`, `skipped`, `failed`
+and `cancelled` counters. `completed` counts processed terminal entries, not
+successful images. One failed item does not stop later items. Overall `failed`
+can therefore contain successful outputs. A task remains `running` through
+restoration of the original editor; a restoration failure is explicit.
+
+Each task retains its own fingerprints and output hashes; deleting or replacing
+the shared `.OfflineReShade.batch.json` cache cannot erase its completion evidence.
+
+`resume_batch(path)` reads the saved task, rechecks output fingerprints/hashes and
+continues using its frozen settings. `retry_failed_batch(path)` retries only failed
+or invalid entries, preserving other results. Fix missing/corrupt inputs first;
+ambiguous gallery depth associations require fixing the selection and starting a
+new task. `cancel_job` preserves the task file and completed outputs. Retry/resume
+can be called from a fresh MCP process or from WinUI's **Resume saved task** picker.
+
+The original input, source preset identity, unsaved FX, global effects flag,
+preview comparison and pending configuration are restored after completion,
+failure or cancellation. FX history remains unchanged after verified restoration.
+An originally disconnected editor stays disconnected. Private Add-on state is
+outside this guarantee, as with normal preset loading and session reconstruction.
+Outputs are rendered to temporary files and verified again before publication;
+changed inputs/dependencies cannot overwrite a previous artwork and be reported
+as success. Legal black images remain successful exports with a warning.

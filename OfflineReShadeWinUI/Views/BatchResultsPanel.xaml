@@ -1,0 +1,23 @@
+<UserControl x:Class="OfflineReShade.WinUI.Views.BatchResultsPanel"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:vm="using:OfflineReShade.WinUI.ViewModels">
+ <Grid MinWidth="320" MaxWidth="640" RowSpacing="12">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="300"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <TextBlock Text="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+  <CommandBar Grid.Row="1" DefaultLabelPosition="Right" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+   <AppBarButton Label="Cancel" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="ResultsCancelBatch"/>
+   <AppBarButton Label="Retry failed" Command="{x:Bind ViewModel.RetryFailedBatchCommand}" AutomationProperties.AutomationId="RetryFailedBatch"/>
+   <AppBarButton Label="Resume task" Command="{x:Bind ViewModel.ResumeCurrentBatchCommand}" AutomationProperties.AutomationId="ResumeCurrentBatch"/>
+  </CommandBar>
+  <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.BatchRows}" SelectionMode="None" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="BatchItemResults" AutomationProperties.Name="Individual batch results">
+   <ListView.ItemTemplate><DataTemplate x:DataType="vm:BatchResultViewModel">
+    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <StackPanel Spacing="4"><TextBlock Text="{x:Bind Name}" TextWrapping="Wrap" FontWeight="SemiBold"/><TextBlock Text="{x:Bind Status}"/><TextBlock Text="{x:Bind Details}" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+     <Button Grid.Column="1" Content="Locate" Command="{x:Bind LocateCommand}" AutomationProperties.AutomationId="LocateBatchResult"/>
+    </Grid>
+   </DataTemplate></ListView.ItemTemplate>
+  </ListView>
+  <TextBox Grid.Row="3" Header="Saved task — use Resume saved task after restarting the app" Text="{x:Bind ViewModel.BatchManifestPath, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" AutomationProperties.AutomationId="BatchManifestPath"/>
+ </Grid>
+</UserControl>

@@ -12,7 +12,7 @@ public interface IRenderSessionHost : IAsyncDisposable
 }
 
 // Owns lifecycle decisions for both UI-attached and independent automation sessions.
-public class RenderSessionController : IAsyncDisposable
+public partial class RenderSessionController : IAsyncDisposable
 {
     private readonly IRenderSessionHost _host;
     private readonly string _snapshotDirectory;
@@ -24,6 +24,7 @@ public class RenderSessionController : IAsyncDisposable
     private readonly DeviceRecoveryBudget _recovery = new();
     private string? _lastSnapshot;
     private bool _lastEffectsEnabled = true;
+    private bool _restoreSnapshotPending;
     public EditingSession State { get; }
     public RenderInput Current { get; private set; } = new("");
     public bool IsConnected => _host.IsConnected;
@@ -73,6 +74,7 @@ public class RenderSessionController : IAsyncDisposable
     }
 
     public Task OpenAsync(RenderInput requested, CancellationToken token = default) => OpenCoreAsync(requested, false, token);
+    public Task OpenPresetInputAsync(RenderInput requested, CancellationToken token = default) => OpenCoreAsync(requested, true, token);
     public Task LoadPresetAsync(string path, CancellationToken token = default) => OpenCoreAsync(Current with { PresetPath = path }, true, token);
 
     // Saving a new source must not reload it and replace the live editing session.
@@ -145,7 +147,7 @@ public class RenderSessionController : IAsyncDisposable
                 _lastEffectsEnabled = effectsEnabled;
                 ReplaceSnapshot(snapshot);
             }
-            else if (previousInput.ColorPath.Length > 0 && _host.PersistedPresetPath is { } persisted && File.Exists(persisted))
+            else if (!_restoreSnapshotPending && previousInput.ColorPath.Length > 0 && _host.PersistedPresetPath is { } persisted && File.Exists(persisted))
             {
                 // The host flushes successful parameter mutations into its private working preset.
                 // This also recovers edits after the process died before an RPC snapshot was possible.
@@ -181,6 +183,7 @@ public class RenderSessionController : IAsyncDisposable
             {
                 if (request != _request || _disposed) throw new OperationCanceledException("Input request superseded.");
                 Current = input;
+                _restoreSnapshotPending = false;
                 State.AppliedSuccessfully(State.BeginApply(input));
                 if (replacePreset || !samePreset) ClearSnapshot();
             }

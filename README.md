@@ -435,31 +435,30 @@ CharaStudio-YYYY-MM-DD-HH-MM-SS-Reshade.png
 Color-only PNGs are valid Gallery inputs. If both raw and packed depth match a
 color file, choose the association in the input panel; it is not silently guessed.
 
-### Batch Apply
+### Batch export
 
-`Batch Apply` applies the current ReShade settings to every valid Gallery item.
+Open the Gallery from the command overflow menu and refresh its input folder.
+Preview a representative image, adjust the FX, then choose **Batch export…**.
+For temporal accumulation, denoising or other history-dependent effects, increase
+**Warmup frames** in the advanced options before starting the reviewed task.
 
-Use it after you have already tested one item manually:
+The current UI uses **Batch export…** to review all or selected gallery images,
+output directory, filename suffix, validation counts and conflict policy. Advanced
+options contain screenshot Add-on compatibility and **Warmup frames** (actual
+completed render frames). WinUI defaults to choosing an unused output filename.
 
-1. Select `Gallery`.
-2. Click `Refresh`.
-3. Click one representative thumbnail.
-4. Adjust effects until the preview looks correct.
-5. If the effect uses temporal accumulation, path tracing, denoising, or history
-   buffers, increase `Frame Delay`.
-6. Click `Batch Apply`.
+Tasks freeze presets and output settings in `.OfflineReShade.jobs/<id>/job.json`
+and adjacent preset copies. Results distinguish fresh exports, hash-verified reuse,
+explicit unverified skips, failures and cancellation. One failed item does not
+stop later items. Locate outputs, retry failed entries, or use **Resume saved task…**
+after restarting. Keep the task directory and preset files together. Effect resource
+changes require a new task. Completion and cancellation restore the original
+input, unsaved FX/history, pending configuration and preview comparison. Opaque
+third-party Add-on state is not covered and prevents reuse across attempts.
+Zero width/height preserves each source size; explicit dimensions use one output size.
 
-`Frame Delay` is the number of frames to wait after switching to the next
-gallery item before saving it. Use a higher value for effects that need time to
-settle. Use a lower value for simple color-only effects.
-
-In 0.8.0 the UI calls this setting `Warmup frames`. It counts actual completed
-frames after FX loading, regardless of preview FPS. A progress bar and Cancel
-button track the job. Editing is locked while a batch runs. Completed outputs
-are recorded in `.OfflineReShade.batch.json`; restarting the same batch resumes
-matching files after checking source fingerprints and output hashes. Failures
-are retried once. Zero render width/height preserves source size, including
-mixed-resolution folders; explicit width/height uses one fixed output size.
+The Add-ons tab shows common WinUI controls first. Native compatibility controls,
+Add-on diagnostics and ImGui capture diagnostics remain available in collapsed sections.
 
 The FX list uses virtualization and only creates parameter controls when an
 effect is expanded. Search matches effect filenames and parameter names.

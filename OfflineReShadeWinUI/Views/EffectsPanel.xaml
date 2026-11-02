@@ -68,6 +68,14 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Padding="12"
                               Spacing="10">
+                    <Expander Header="WinUI Add-on Controls"
+                              IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl12">
+                      <StackPanel x:Name="AddonControlsPanel"
+                                  Spacing="10" />
+                    </Expander>
+                    <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Expander x:Name="NativeCompatibility" Header="Native compatibility controls" IsExpanded="False" Expanding="OnNativeCompatibilityChanged" Collapsed="OnNativeCompatibilityChanged" AutomationProperties.AutomationId="NativeCompatibility">
+                      <StackPanel Spacing="12">
                     <Grid ColumnSpacing="10">
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -120,16 +128,13 @@
                                    VerticalAlignment="Center" />
                       </Grid>
                     </Border>
-                    <StackPanel x:Name="AddonsPanel"
-                                Spacing="10" />
-                    <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <Expander Header="WinUI Add-on Controls"
-                              IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl12">
-                      <StackPanel x:Name="AddonControlsPanel"
-                                  Spacing="10" />
+                      </StackPanel>
+                    </Expander>
+                    <Expander Header="Add-on diagnostics" IsExpanded="False" AutomationProperties.AutomationId="AddonDiagnostics">
+                      <StackPanel x:Name="AddonsPanel" Spacing="10" />
                     </Expander>
                     <Expander Header="ImGui Capture Debug"
-                              IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl13">
+                              IsExpanded="False" AutomationProperties.AutomationId="EffectsPanelControl13">
                       <TextBox Text="{x:Bind ViewModel.AddonDebugText, Mode=OneWay}"
                                IsReadOnly="True"
                                AcceptsReturn="True"

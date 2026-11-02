@@ -15,7 +15,7 @@ public static class ImageExport
     }
 
     public static async Task<JsonElement> WriteAsync(string destination, string policy,
-        Func<string, CancellationToken, Task<JsonElement>> render, CancellationToken token)
+        Func<string, CancellationToken, Task<JsonElement>> render, CancellationToken token, Func<string, bool>? allowedDestination = null)
     {
         var directory = System.IO.Path.GetDirectoryName(destination)!;
         Directory.CreateDirectory(directory);
@@ -33,6 +33,11 @@ public static class ImageExport
                 if (suffix > 0) selected = System.IO.Path.Combine(directory,
                     System.IO.Path.GetFileNameWithoutExtension(destination) + $" ({suffix})" + System.IO.Path.GetExtension(destination));
                 token.ThrowIfCancellationRequested();
+                if (allowedDestination != null && !allowedDestination(selected))
+                {
+                    if (policy == "rename") continue;
+                    throw new IOException("The destination overlaps a protected batch source.");
+                }
                 try { File.Move(temporary, selected, policy == "replace"); break; }
                 catch (IOException) when (policy == "rename" && File.Exists(selected)) { }
             }

@@ -34,7 +34,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public string AutomationSessionId => _broker.Descriptor.Id;
     public double BatchProgress => _automation.Job?.Completed ?? 0;
     public double BatchMaximum => Math.Max(1, _automation.Job?.Total ?? 1);
-    public string BatchStatusText => _automation.Job is { } j ? $"{j.State}: {j.Completed}/{j.Total}" + (j.Error == null ? "" : " — " + j.Error) : "No batch task";
+    public string BatchStatusText => _automation.Job is { } j ? $"{j.State}: {j.Completed}/{j.Total} · {j.Exported} exported · {j.Reused} reused · {j.Skipped} skipped · {j.Failed} failed" + (j.Error == null ? "" : " — " + j.Error) : "No batch task";
     public RelayCommand CancelBatchCommand { get; }
 
     private readonly PreviewFrameClient _previewFrames = new();
@@ -97,7 +97,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _pendingEdits = new(error => ReportUiError(error));
         _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current,
             (path, token) => ApplySessionInputAsync(_session.Current with { PresetPath = path }, token, replacePreset: true), ApplyInputWatchAsync,
-            () => { SubmitVisualEdits?.Invoke(); return _pendingEdits.FlushAsync(); }, () => HasPendingConfiguration ? CurrentRenderInput() : null, RebindPresetSourceAsync);
+            () => { SubmitVisualEdits?.Invoke(); return _pendingEdits.FlushAsync(); }, () => HasPendingConfiguration ? CurrentRenderInput() : null, RebindPresetSourceAsync,
+            _session, RestoreBatchPresentationAsync);
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
@@ -117,8 +118,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         ToggleInputModeCommand = CreateCommand(ToggleInputModeAsync, () => CanEditSession);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
-        BatchApplySavePngCommand = CreateCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
-        BatchApplyReShadeShotCommand = CreateCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
+        InitializeBatchCommands();
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
         OpenImageCommand = CreateCommand(OpenImageAsync, () => CanChooseSource);
         ConfigureListenerCommand = new RelayCommand(() => { IsSettingsOpen = false; IsInputPanelOpen = true; InputSelectionMessage = "Choose the game export folder, then start listening. Files may arrive later."; });
@@ -242,8 +242,6 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand ToggleInputModeCommand { get; }
     public RelayCommand ToggleGalleryPanelCommand { get; }
     public RelayCommand RefreshGalleryCommand { get; }
-    public AsyncRelayCommand BatchApplySavePngCommand { get; }
-    public AsyncRelayCommand BatchApplyReShadeShotCommand { get; }
     public RelayCommand ToggleSettingsCommand { get; }
     public AsyncRelayCommand PickColorCommand { get; }
     public AsyncRelayCommand PickDepthCommand { get; }
@@ -660,21 +658,21 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AddonControlsChanged?.Invoke();
     }
 
-    private async Task BatchApplyGalleryAsync(string saveMethod, string label)
-    {
-        if (!IsGalleryMode || !_session.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
-        RefreshGalleryItems();
-        var items = GalleryItems.Where(x => x.IsValid).Select(InputForGallery).ToArray();
-        var frames = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
-        await ExecuteOperationAsync("batch_start", new BatchRequest(items, frames, saveMethod == "save_screenshot"));
-    }
-
     private RenderInput CurrentRenderInput() => Settings.Editor.ToRenderInput(_paths.AppDirectory);
     private RenderInput InputForGallery(GalleryItemViewModel item) => CurrentRenderInput() with {
         ColorPath = item.ColorPath, DepthPath = item.DepthPath, DepthFormat = item.DepthFormat,
         DepthProfile = EffectiveDepthProfile(item.DepthFormat), OutputPath = item.OutputPath, WatchInput = false };
 
     private Task OpenAutomationInputAsync(RenderInput input, CancellationToken token) => ApplySessionInputAsync(input, token);
+    private async Task RestoreBatchPresentationAsync()
+    {
+        PreviewInfoText = _session.IsConnected ? Path.GetFileName(_session.Current.ColorPath) : "No image opened";
+        IsPreviewRunning = _session.IsConnected;
+        if (!_session.IsConnected) return;
+        await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
+        await RefreshControlStateAsync();
+        StartFpsPolling();
+    }
     private async Task ApplySessionInputAsync(RenderInput input, CancellationToken token, bool replacePreset = false)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -735,6 +733,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (_isDisposed) return;
             IsBatchApplying = _automation.Job?.State == "running";
+            UpdateBatchPresentation();
             foreach (var property in new[] { nameof(CanChooseSource), nameof(IsListening), nameof(InputSourceText), nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
                 nameof(StatusText), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
                 nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
@@ -1289,6 +1288,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         var selectedPath = _runtimeInput?.ColorPath;
         GalleryItems.Clear();
+        OpenBatchCommand?.RaiseCanExecuteChanged();
         var folder = Settings.GalleryInputFolder;
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) { SelectedGalleryItem = null; return; }
         var output = string.IsNullOrWhiteSpace(Settings.GalleryOutputFolder) ? folder : Settings.GalleryOutputFolder;
@@ -1299,6 +1299,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 Path.Combine(output, pairing.OutputName), !pairing.IsAmbiguous, pairing.IsAmbiguous));
         }
         SelectedGalleryItem = GalleryItems.FirstOrDefault(x => x.ColorPath.Equals(selectedPath, StringComparison.OrdinalIgnoreCase));
+        OpenBatchCommand?.RaiseCanExecuteChanged();
     }
 
     private static void ApplyIfNotNull(string? value, Action<string> apply)
@@ -1371,8 +1372,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void RaiseBatchApplyCanExecuteChanged()
     {
-        BatchApplySavePngCommand.RaiseCanExecuteChanged();
-        BatchApplyReShadeShotCommand.RaiseCanExecuteChanged();
+        OpenBatchCommand?.RaiseCanExecuteChanged();
     }
 
     private static int ParseNonNegativeInt(string text, int fallback)

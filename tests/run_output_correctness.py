@@ -93,6 +93,8 @@ try:
         tool('start_batch',items=[item],warmupFrames=2,retries=0)
         result=job();assert result['state']=='failed',result
         assert not Path(item['outputPath']).exists()
+        # Snapshot/rebuild must not erase an enabled effect that failed to compile.
+        for shot in (False,True):tool('export_image',expect_error=True,path=item['outputPath'],reShadeShot=shot,warmupFrames=2)
     folder,item=fixture('mcp-black',black);tool('open_input',**item,unsavedChanges='discard')
     for shot in (False,True):
         result=tool('export_image',path=item['outputPath'],reShadeShot=shot,warmupFrames=2)

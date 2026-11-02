@@ -115,6 +115,7 @@ try {
         Invoke-Checked 'python' @('tests\run_input_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "input-workflow-$stamp"))
         Invoke-Checked 'python' @('tests\run_export_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "export-workflow-$stamp"))
         Invoke-Checked 'python' @('tests\run_edit_history.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "edit-history-$stamp"))
+        Invoke-Checked 'python' @('tests\run_batch_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "batch-workflow-$stamp"))
         Invoke-Checked 'python' @('tests\run_preview_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "preview-workflow-$stamp"), '--graphics-sampler', (Join-Path $repo 'bin\x64\Release\OfflineReShade.Graphics.Tests.exe'))
         Invoke-Checked 'dotnet' @('run', '--project', 'tests\OfflineReShade.Core.Tests\OfflineReShade.Core.Tests.csproj', '-c', 'Release', '--no-build', '--', '--native-lifecycle', (Join-Path $stage 'OfflineReShadePrototype.exe'), (Join-Path $OutputDirectory "verification-$stamp"))
         Invoke-Checked 'python' @('tests\run_output_correctness.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "correctness-$stamp"))

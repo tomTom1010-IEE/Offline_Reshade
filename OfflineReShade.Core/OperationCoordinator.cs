@@ -46,7 +46,7 @@ public sealed class OperationCoordinator
             string? Text(string name) => result.ValueKind == JsonValueKind.Object && result.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
             var warning = Text("warning");
             if (Text("path") is { Length: > 0 } actualPath) request = request with { TargetPath = actualPath };
-            var state = request.Method == "batch_start" ? Text("state") : null;
+            var state = request.Method is "batch_start" or "batch_resume" or "batch_retry" ? Text("state") : null;
             var status = state == "failed" ? "failed" : state == "cancelled" ? "cancelled" : string.IsNullOrEmpty(warning) ? "succeeded" : "warning";
             var outcome = Activity.Finish(request, status, status == "warning" ? "output_warning" : status == "failed" ? "batch_failed" : status == "cancelled" ? "cancelled" : "ok",
                 Text("error") ?? warning ?? (status == "cancelled" ? "Operation cancelled." : "Operation completed."));

@@ -40,6 +40,13 @@ public sealed class SettingsPickerService
         var file = await picker.PickSingleFileAsync();
         return file?.Path;
     }
+    public async Task<string?> PickBatchTaskAsync()
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
+        picker.FileTypeFilter.Add(".json");
+        return (await picker.PickSingleFileAsync())?.Path;
+    }
 
     public async Task<string?> PickOutputPngAsync()
     {

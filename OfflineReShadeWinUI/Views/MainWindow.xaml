@@ -42,6 +42,7 @@
             </Flyout></AppBarButton.Flyout>
           </AppBarButton>
           <AppBarButton Label="Show or hide effects" Click="OnToggleEffects" AutomationProperties.AutomationId="ToggleEffects"  />
+          <AppBarButton Label="Resume saved batch…" Command="{x:Bind ViewModel.ResumeSavedBatchCommand}" AutomationProperties.AutomationId="MainResumeBatch" />
           <AppBarButton Label="Show or hide gallery" Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}" AutomationProperties.AutomationId="ToggleGallery"  />
           <AppBarButton Label="Input and preset" Command="{x:Bind ViewModel.OpenInputPanelCommand}"  AutomationProperties.AutomationId="MainWindowControl8" />
           <AppBarButton Label="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}"  AutomationProperties.AutomationId="MainWindowControl9" />
@@ -68,7 +69,7 @@
         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
         <ProgressBar Value="{x:Bind ViewModel.BatchProgress, Mode=OneWay}" Maximum="{x:Bind ViewModel.BatchMaximum, Mode=OneWay}"
                      AutomationProperties.Name="Batch export progress" VerticalAlignment="Center" />
-        <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" VerticalAlignment="Center" />
+        <Button Grid.Column="1" Content="Batch results" Command="{x:Bind ViewModel.ShowBatchResultsCommand}" AutomationProperties.AutomationId="BatchResults" />
         <Button Grid.Column="2" Content="Cancel batch" Command="{x:Bind ViewModel.CancelBatchCommand}" AutomationProperties.AutomationId="CancelBatch"  />
       </Grid>
       <InfoBar Grid.Row="3" Grid.ColumnSpan="3" Margin="0,8,0,0"
@@ -193,29 +194,10 @@
                 <RowDefinition Height="*" />
               </Grid.RowDefinitions>
               <Button Content="Refresh" HorizontalAlignment="Stretch" Command="{x:Bind ViewModel.RefreshGalleryCommand}"  AutomationProperties.AutomationId="MainWindowControl33" />
-              <Grid Grid.Row="1" ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="86" />
-                </Grid.ColumnDefinitions>
-                <Grid RowSpacing="6">
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                  </Grid.RowDefinitions>
-                  <Button Content="Batch Save"
-                          HorizontalAlignment="Stretch"
-                          Command="{x:Bind ViewModel.BatchApplySavePngCommand}"  AutomationProperties.AutomationId="MainWindowControl34" />
-                  <Button Grid.Row="1"
-                          Content="Batch Shot"
-                          HorizontalAlignment="Stretch"
-                          Command="{x:Bind ViewModel.BatchApplyReShadeShotCommand}"  AutomationProperties.AutomationId="MainWindowControl35" />
-                </Grid>
-                <TextBox Grid.Column="1"
-                         Header="Warmup frames" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
-                         Text="{x:Bind ViewModel.Settings.GalleryBatchFrameDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         InputScope="Number"  AutomationProperties.AutomationId="MainWindowControl36" AutomationProperties.Name="Warmup frames" />
-              </Grid>
+              <StackPanel Grid.Row="1" Spacing="8">
+                <Button Content="Batch export…" Command="{x:Bind ViewModel.OpenBatchCommand}" AutomationProperties.AutomationId="BatchExport" />
+                <Button Content="Resume saved task…" Command="{x:Bind ViewModel.ResumeSavedBatchCommand}" AutomationProperties.AutomationId="ResumeSavedBatch" />
+              </StackPanel>
               <ListView x:Name="GalleryList" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
                         Grid.Row="2"
                         ItemsSource="{x:Bind ViewModel.GalleryItems, Mode=OneWay}"

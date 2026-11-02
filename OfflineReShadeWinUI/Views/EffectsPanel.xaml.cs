@@ -134,6 +134,11 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             UpdateAddonOverlayHostVisibility();
     }
 
+    private void OnNativeCompatibilityChanged(Expander sender, object args) => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (!_isClosing) UpdateAddonOverlayHostVisibility();
+    });
+
     private void OnNativeAddonOverlayToggled(object sender, RoutedEventArgs args)
     {
         UpdateAddonOverlayHostVisibility();
@@ -144,7 +149,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var selectedOverlay = (AddonOverlayTabView.SelectedItem as TabViewItem)?.Tag as AddonOverlayViewModel;
         var visible = !_addonGpuFailed && ViewModel.IsPreviewRunning &&
                       !ViewModel.IsSettingsOpen && _paneVisible &&
-                      ControlsTabView.SelectedIndex == 1 &&
+                      ControlsTabView.SelectedIndex == 1 && NativeCompatibility.IsExpanded &&
                       NativeAddonOverlaySwitch.IsOn &&
                       selectedOverlay != null;
 
@@ -367,7 +372,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         if (_isClosing || !ViewModel.IsPreviewRunning ||
             ViewModel.IsSettingsOpen ||
-            ControlsTabView.SelectedIndex != 1 ||
+            ControlsTabView.SelectedIndex != 1 || !NativeCompatibility.IsExpanded ||
             !NativeAddonOverlaySwitch.IsOn ||
             ViewModel.SharedAddonOverlayHandle == 0 ||
             ViewModel.SharedAddonOverlayWidth == 0 ||
@@ -400,7 +405,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         if (!ViewModel.IsPreviewRunning ||
             ViewModel.IsSettingsOpen ||
-            ControlsTabView.SelectedIndex != 1 ||
+            ControlsTabView.SelectedIndex != 1 || !NativeCompatibility.IsExpanded ||
             !NativeAddonOverlaySwitch.IsOn)
             return;
 

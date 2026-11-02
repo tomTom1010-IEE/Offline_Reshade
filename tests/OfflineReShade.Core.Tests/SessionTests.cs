@@ -77,6 +77,32 @@ internal static class SessionTests
         await session.SetPresetSourceAsync(rebound);
         Check(host.Starts == starts && session.Current.PresetPath == rebound && session.State.Applied!.Input.PresetPath == rebound,
             "Save As source rebind restarted or desynchronized applied state.");
+        var draft = session.State.Draft with { RenderWidth = "unfinished", RenderHeight = "" };
+        session.State.Edit(draft);
+        host.Gain = 0.291; host.EffectsEnabled = false; host.PreviewOriginal = true;
+        var original = session.Current;
+        using (var context = await session.CaptureContextAsync())
+        {
+            await session.OpenPresetInputAsync(input with { PresetPath = diskPreset });
+            host.Gain = 0.9;
+            File.Delete(rebound);
+            await session.RestoreContextAsync(context);
+            Check(session.Current == original && session.State.Draft == draft && host.Gain == 0.291 && !host.EffectsEnabled && host.PreviewOriginal,
+                "Context restore lost unsaved FX, source identity, incomplete draft or preview comparison.");
+            host.BrokenPath = original.ColorPath;
+            await Fails<InvalidOperationException>(() => session.RestoreContextAsync(context));
+            Check(!session.IsConnected && session.State.Applied == null && session.State.Draft == draft, "Failed restore reported applied or discarded draft.");
+            host.BrokenPath = broken;
+            await session.RestoreContextAsync(context);
+            Check(host.Gain == 0.291, "A failed restore destroyed the independent context snapshot.");
+        }
+        await session.StopAsync();
+        using (var context = await session.CaptureContextAsync())
+        {
+            await session.OpenAsync(input);
+            await session.RestoreContextAsync(context);
+            Check(!session.IsConnected && session.Current == original && session.State.Draft == draft, "Disconnected context was unexpectedly reopened.");
+        }
         host.FailCapture = true;
         await session.DisposeAsync();
         Check(host.Disposed && !host.IsConnected, "Dispose did not release the owned host.");
@@ -91,6 +117,7 @@ internal static class SessionTests
         public string BrokenPath = "";
         public double Gain = 1;
         public bool EffectsEnabled = true;
+        public bool PreviewOriginal;
         public int Starts, Reloads;
         public TaskCompletionSource StartEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task StartAsync(RenderInput input, string? snapshot, CancellationToken token)
@@ -109,7 +136,7 @@ internal static class SessionTests
         public async Task<JsonElement> CallAsync(string method, object? args, CancellationToken cancellationToken)
         {
             if (!IsConnected) throw new IOException("Host stopped");
-            if (method == "get_runtime_info") return AutomationEngine.Json(new { loading = false, recoveryRequired = RecoveryRequired, effectsEnabled = EffectsEnabled, inputGeneration = 1, frameCount = 1 });
+            if (method == "get_runtime_info") return AutomationEngine.Json(new { loading = false, recoveryRequired = RecoveryRequired, effectsEnabled = EffectsEnabled, previewOriginal = PreviewOriginal, inputGeneration = 1, frameCount = 1 });
             if (method == "reload_effects") Reloads++;
             if (method == "export_preset")
             {
@@ -120,6 +147,7 @@ internal static class SessionTests
             if (method == "set_input_paths" && ((RenderInput)args!).ColorPath == BrokenPath)
             { Gain = 99; throw new InvalidOperationException("Bad input after resource replacement"); }
             if (method == "set_effects_state") EffectsEnabled = AutomationEngine.Json(args).GetProperty("enabled").GetBoolean();
+            if (method == "set_preview_comparison") PreviewOriginal = AutomationEngine.Json(args).GetProperty("original").GetBoolean();
             return AutomationEngine.Json(new { });
         }
         public ValueTask DisposeAsync() { Disposed = true; IsConnected = false; return ValueTask.CompletedTask; }

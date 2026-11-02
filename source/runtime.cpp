@@ -1332,6 +1332,27 @@ void reshade::runtime::load_current_preset()
 void reshade::runtime::save_current_preset(ini_file &preset) const
 {
 	assert(!_is_in_preset_transition);
+	bool offline_runtime = false;
+	ini_file::load_cache(_config_path).get("OFFLINE", "Enabled", offline_runtime);
+	std::vector<std::string> unresolved_techniques;
+	if (offline_runtime)
+	{
+		const ini_file &source = ini_file::load_cache(_current_preset_path);
+		std::vector<std::string> requested;
+		source.get({}, "Techniques", requested);
+		// A failed effect is absent/disabled in the live technique table. Saving a
+		// snapshot must retain that intent, or a rebuild can silently export bare input.
+		for (const std::string &name : requested)
+		{
+			const auto found = std::find_if(_techniques.begin(), _techniques.end(), [&](const technique &tech) {
+				return name == tech.name || name == tech.name + '@' + _effects[tech.effect_index].source_file.filename().u8string();
+			});
+			if (found == _techniques.end() || !_effects[found->effect_index].compiled || !_effects[found->effect_index].created)
+				unresolved_techniques.push_back(name);
+		}
+		// Also retain values belonging to unavailable effects until they can compile.
+		preset.copy_values_from(source);
+	}
 
 	// Build list of active techniques and effects
 	std::set<size_t> effect_list;
@@ -1363,7 +1384,12 @@ void reshade::runtime::save_current_preset(ini_file &preset) const
 			preset.remove_key({}, "Key" + unique_name);
 	}
 
-	if (preset.has({}, "TechniqueSorting") || !std::equal(technique_list.cbegin(), technique_list.cend(), sorted_technique_list.cbegin()))
+	for (const std::string &name : unresolved_techniques)
+	{
+		if (std::find(technique_list.begin(), technique_list.end(), name) == technique_list.end()) technique_list.push_back(name);
+		if (std::find(sorted_technique_list.begin(), sorted_technique_list.end(), name) == sorted_technique_list.end()) sorted_technique_list.push_back(name);
+	}
+	if (preset.has({}, "TechniqueSorting") || !std::equal(technique_list.cbegin(), technique_list.cend(), sorted_technique_list.cbegin(), sorted_technique_list.cend()))
 		preset.set({}, "TechniqueSorting", std::move(sorted_technique_list));
 
 	preset.set({}, "Techniques", std::move(technique_list));
@@ -1377,7 +1403,9 @@ void reshade::runtime::save_current_preset(ini_file &preset) const
 	// TODO: Do we want to save spec constants here too? The preset will be rather empty in performance mode otherwise.
 	for (size_t effect_index = 0; effect_index < _effects.size(); ++effect_index)
 	{
-		if (effect_list.find(effect_index) == effect_list.end())
+		// Offline workspaces retain edits to disabled effects too; enabling one
+		// after a batch/rebuild must not reset its parameters to shader defaults.
+		if (effect_list.find(effect_index) == effect_list.end() && !(offline_runtime && _effects[effect_index].compiled))
 			continue;
 
 		const effect &effect = _effects[effect_index];

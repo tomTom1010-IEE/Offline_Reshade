@@ -7,8 +7,6 @@ namespace OfflineReShade.Core;
 
 public sealed record RenderInput(string ColorPath, string DepthPath = "", string DepthFormat = "raw", string DepthProfile = "kks",
     string DepthDownsample = "max2x2", string OutputPath = "", string EffectDir = "", string PresetPath = "", int Width = 0, int Height = 0, bool WatchInput = false);
-public sealed record BatchRequest(RenderInput[] Items, int WarmupFrames = 5, bool ReShadeShot = true, bool Resume = true, int Retries = 1);
-public sealed record BatchStatus(string Id, string State, int Completed, int Total, string? Current, string? Error, string? Warning = null);
 
 public sealed partial class AutomationEngine
 {
@@ -22,7 +20,9 @@ public sealed partial class AutomationEngine
     private readonly Func<RenderInput?>? _pendingInput;
     private readonly OperationCoordinator _operations = new();
     private readonly InputArrivalMonitor _listener;
-    private bool _restoreAfterBatch;
+    private readonly RenderSessionController? _renderSession;
+    private readonly Func<Task>? _batchRestored;
+    private bool _batchActive;
     public PendingInput? WaitingInput => _listener.Pending;
     public bool IsBusy => _operations.IsBusy || WaitingInput != null || History.TransactionId != null;
     public bool IsExclusive => _operations.IsExclusive || WaitingInput != null;
@@ -33,12 +33,14 @@ public sealed partial class AutomationEngine
     public AutomationEngine(Func<string, object?, CancellationToken, Task<JsonElement>> call, Func<RenderInput, CancellationToken, Task> open, Func<RenderInput> current,
         Func<string, CancellationToken, Task>? loadPreset = null, Func<bool, CancellationToken, Task>? setInputWatch = null,
         Func<Task>? submitPendingEdits = null, Func<RenderInput?>? pendingInput = null,
-        Func<string, CancellationToken, Task>? setPresetSource = null)
+        Func<string, CancellationToken, Task>? setPresetSource = null,
+        RenderSessionController? renderSession = null, Func<Task>? batchRestored = null)
     {
         _call = async (m, a, t) => { var result = await call(m, a, t); if (m == "get_runtime_info") ObserveRuntime(result); return result; };
         _open = open; _current = current; _loadPreset = loadPreset; _setInputWatch = setInputWatch;
         _submitPendingEdits = submitPendingEdits; _pendingInput = pendingInput;
         _setPresetSource = setPresetSource;
+        _renderSession = renderSession; _batchRestored = batchRestored;
         _history = new(_call, WaitForEditStateAsync, ct => RuntimeOperations.WaitForFramesAsync(_call, 2, ct));
         _history.Changed += () => Changed?.Invoke();
         _listener = new InputArrivalMonitor((input, token) => _operations.RunAsync(Activity.Create("open_input", Json(input), _current()),
@@ -78,6 +80,7 @@ public sealed partial class AutomationEngine
             return Json(node);
         }
         if (method == "batch_status") return Json(Job ?? new BatchStatus("", "idle", 0, 0, null, null));
+        if (method == "batch_preflight") return Json(PreflightBatch(args.Deserialize<BatchRequest>(JsonOptions) ?? throw new ArgumentException("Missing batch request.")));
         if (method is "batch_cancel" or "cancel_operation") {
             var cancelling = method == "cancel_operation" ? IsBusy : Job?.State == "running";
             if (cancelling) Cancel();
@@ -115,7 +118,7 @@ public sealed partial class AutomationEngine
         {
             try { edits = _submitPendingEdits(); } catch (Exception error) { edits = Task.FromException(error); }
         }
-        if (method == "batch_start")
+        if (method is "batch_start" or "batch_resume" or "batch_retry")
         {
             // Admission returns a job promptly; its operation remains active through restore.
             var accepted = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -129,34 +132,6 @@ public sealed partial class AutomationEngine
     {
         try { return JsonSerializer.SerializeToNode(new { input = _pendingInput?.Invoke(), error = (string?)null }, JsonOptions); }
         catch (ArgumentException error) { return JsonSerializer.SerializeToNode(new { input = (RenderInput?)null, error = error.Message }, JsonOptions); }
-    }
-
-    private async Task StartBatchAsync(OperationRequest operation, TaskCompletionSource<JsonElement> accepted, Task edits, CancellationToken token)
-    {
-        try
-        {
-            await _operations.RunAsync(operation, async ct =>
-            {
-                await edits.WaitAsync(ct);
-                _history.RequireAccess(null);
-                var args = operation.Arguments;
-                var request = args.Deserialize<BatchRequest>(JsonOptions) ?? throw new ArgumentException("Missing batch request.");
-                if (request.Items == null || request.Items.Length == 0) throw new ArgumentException("Batch needs at least one item.");
-                if (request.WarmupFrames is < 0 or > 360000 || request.Retries is < 0 or > 5) throw new ArgumentException("Invalid warmup frames or retry count.");
-                var normalized = request.Items.Select(ValidateInput).Select(x => x with { WatchInput = false }).ToArray();
-                if (normalized.Select(x => x.OutputPath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != normalized.Length)
-                    throw new ArgumentException("Batch output paths must be unique.");
-                var sources = normalized.SelectMany(x => new[] { x.ColorPath, x.DepthPath }).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                if (normalized.Any(x => sources.Contains(x.OutputPath))) throw new ArgumentException("Batch output overlaps a source file.");
-                _restoreAfterBatch = true;
-                Job = new(Guid.NewGuid().ToString("N"), "running", 0, normalized.Length, null, null);
-                Changed?.Invoke();
-                accepted.TrySetResult(Json(Job));
-                await RunBatchAsync(request with { Items = normalized }, ct);
-                return Json(Job);
-            }, token);
-        }
-        catch (Exception error) { accepted.TrySetException(error); }
     }
 
     private async Task<JsonElement> ExecuteMutationAsync(string method, JsonElement args, CancellationToken token)
@@ -265,72 +240,9 @@ public sealed partial class AutomationEngine
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    private async Task RunBatchAsync(BatchRequest request, CancellationToken token)
-    {
-        var original = _current();
-        BatchStatus? finished = null;
-        try
-        {
-            if (string.IsNullOrEmpty(original.ColorPath)) await _open(request.Items[0], token);
-            var signature = "output-correctness-v3";
-            var checkpointPath = Path.Combine(Path.GetDirectoryName(request.Items[0].OutputPath)!, ".OfflineReShade.batch.json");
-            BatchCheckpoint checkpoint = new(signature, new());
-            if (request.Resume && File.Exists(checkpointPath))
-            {
-                try { var saved = JsonSerializer.Deserialize<BatchCheckpoint>(await File.ReadAllTextAsync(checkpointPath, token), JsonOptions); if (saved?.Signature == signature) checkpoint = saved; }
-                catch (JsonException) { }
-            }
-            for (var i = 0; i < request.Items.Length; i++)
-            {
-                token.ThrowIfCancellationRequested();
-                var item = request.Items[i];
-                Job = Job! with { Current = item.ColorPath }; Changed?.Invoke();
-                await _open(item, token);
-                await PrepareExportAsync(0, token);
-                // Recompile from disk before fingerprinting: cached GPU code must match hashed files.
-                await _call("save_preset", null, token);
-                await _call("reload_effects", null, token);
-                await PrepareExportAsync(request.WarmupFrames, token);
-                var fingerprint = await RenderFingerprintAsync(item, request, token);
-                var skip = checkpoint.Done.TryGetValue(item.OutputPath, out var done) && done.Source == fingerprint && File.Exists(item.OutputPath) && done.Hash == await FileHashAsync(item.OutputPath, token);
-                if (!skip)
-                {
-                    for (var attempt = 0; ; attempt++)
-                    {
-                        try
-                        {
-                            await PrepareExportAsync(request.WarmupFrames, token);
-                            var saved = await _call(request.ReShadeShot ? "save_screenshot" : "save_output", new { path = item.OutputPath }, token);
-                            if (saved.TryGetProperty("warning", out var warning) && !string.IsNullOrEmpty(warning.GetString()))
-                                Job = Job! with { Warning = "One or more exported images need review: " + warning.GetString() };
-                            if (fingerprint != await RenderFingerprintAsync(item, request, token)) throw new IOException("Render inputs or dependencies changed during export; output was not checkpointed.");
-                            break;
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException && attempt < request.Retries) { await Task.Delay(250, token); }
-                    }
-                    checkpoint.Done[item.OutputPath] = new(fingerprint, await FileHashAsync(item.OutputPath, token));
-                    var temp = checkpointPath + ".tmp";
-                    await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(checkpoint, JsonOptions), token);
-                    File.Move(temp, checkpointPath, true);
-                }
-                Job = Job! with { Completed = i + 1 }; Changed?.Invoke();
-            }
-            finished = Job! with { State = "completed", Current = null };
-        }
-        catch (OperationCanceledException) { finished = Job! with { State = "cancelled" }; }
-        catch (Exception ex) { finished = Job! with { State = "failed", Error = ex.Message }; }
-        finally
-        {
-            try { if (_restoreAfterBatch && !string.IsNullOrEmpty(original.ColorPath)) await _open(original, CancellationToken.None); }
-            catch (Exception ex) { finished = finished! with { State = "failed", Error = (finished!.Error is null ? "" : finished.Error + "; ") + "Restore input: " + ex.Message }; }
-            Job = finished;
-            Changed?.Invoke();
-        }
-    }
     public async Task StopAsync() { _listener.Cancel(); await _operations.StopAsync(() => { _history.CloseTransaction(); return Task.CompletedTask; }); await _listener.StopAsync(); }
     public async Task StopSessionAsync(Func<Task> stop, JsonElement? unsavedDecision = null)
     {
-        _restoreAfterBatch = false;
         _listener.Cancel();
         await _operations.StopAsync(async () => {
             _history.CloseTransaction();
@@ -351,7 +263,7 @@ public sealed partial class AutomationEngine
     }
     public void Cancel(bool restore = true)
     {
-        if (!restore) _restoreAfterBatch = false;
+        // Even stop/close must restore the user's context before its save/discard decision.
         var pending = WaitingInput;
         if (pending != null && !_operations.IsBusy) Activity.Finish(Activity.Create("listen_input", Json(pending.Input), _current()), "cancelled", "cancelled", "Stopped waiting for game output.");
         _listener.Cancel(); _operations.Cancel();
@@ -381,39 +293,11 @@ public sealed partial class AutomationEngine
                 await RuntimeOperations.WaitForFramesAsync(_call, frames, token);
                 await _call("validate_export", null, token);
                 return;
-            } catch (Exception ex) when ((ex is InputResizeException or DeviceLostException) && attempt < 3) { await _open(_current(), token); }
+            } catch (Exception ex) when ((ex is InputResizeException or DeviceLostException) && attempt < 3) {
+                if (_batchActive) await _renderSession!.OpenAsync(_current(), token);
+                else await _open(_current(), token);
+            }
         }
     }
 
-    private async Task<string> RenderFingerprintAsync(RenderInput item, BatchRequest request, CancellationToken token)
-    {
-        var state = await _call("list_state", null, token);
-        var runtime = await _call("get_runtime_info", null, token);
-        var health = await _call("validate_export", null, token);
-        var parts = new List<string> { BuildContract.ProductVersion, JsonSerializer.Serialize(item, JsonOptions), request.WarmupFrames.ToString(), request.ReShadeShot.ToString() };
-        foreach (var key in new[] { "techniques", "uniforms", "preprocessorDefinitions" })
-            if (state.TryGetProperty(key, out var value)) parts.Add(key + value.GetRawText());
-        foreach (var key in new[] { "effectsEnabled", "width", "height", "protocolVersion", "adapterLuid" })
-            if (runtime.TryGetProperty(key, out var value)) parts.Add(key + value.GetRawText());
-        var paths = new SortedSet<string>(StringComparer.OrdinalIgnoreCase) { item.ColorPath };
-        if (item.DepthPath.Length > 0) paths.Add(item.DepthPath);
-        if (item.PresetPath.Length > 0) paths.Add(item.PresetPath);
-        if (runtime.TryGetProperty("presetPath", out var preset) && !string.IsNullOrEmpty(preset.GetString())) paths.Add(preset.GetString()!);
-        if (health.TryGetProperty("dependencies", out var dependencies))
-            foreach (var path in dependencies.GetString()!.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) paths.Add(path);
-        // Include discovery changes (new/deleted shaders), not only already-loaded files.
-        if (Directory.Exists(item.EffectDir))
-            foreach (var path in Directory.EnumerateFiles(item.EffectDir, "*", SearchOption.AllDirectories))
-                if (new[] { ".fx", ".fxh", ".addonfx", ".addon", ".addon64", ".dll" }.Contains(Path.GetExtension(path).ToLowerInvariant())) paths.Add(path);
-        foreach (var path in paths) parts.Add(Path.GetFullPath(path) + ":" + await FileHashAsync(path, token));
-        // Add-on private state has no stable serialization contract. Never reuse its checkpoint.
-        if (state.TryGetProperty("addons", out var addons) && addons.TryGetProperty("addons", out var list) &&
-            list.EnumerateArray().Any(x => x.TryGetProperty("loaded", out var loaded) && loaded.GetBoolean() &&
-                ((x.TryGetProperty("file", out var file) && !string.IsNullOrEmpty(file.GetString())) ||
-                 (x.TryGetProperty("external", out var external) && external.GetBoolean())))) parts.Add(Job!.Id);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", parts))));
-    }
-    private static async Task<string> FileHashAsync(string path, CancellationToken token) { await using var s = File.OpenRead(path); return Convert.ToHexString(await SHA256.HashDataAsync(s, token)); }
-    private sealed record BatchCheckpoint(string Signature, Dictionary<string, BatchFile> Done);
-    private sealed record BatchFile(string Source, string Hash);
 }

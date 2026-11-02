@@ -84,6 +84,11 @@ public sealed class EffectEditHistory : IEditHistory
         _entries.Clear(); _cursor = 0; _current = _saved = null; _uncertain = false; _warning = null;
         _closedGroup = _group; _group = null; _revision++; Publish();
     }
+    public void Invalidate(string reason)
+    {
+        _entries.Clear(); _cursor = 0; _uncertain = true; _warning = reason;
+        _closedGroup = _group; _group = null; _revision++; Publish();
+    }
     public void CheckRevision(long? expected)
     {
         if (expected.HasValue && expected.Value != _revision) throw new InvalidOperationException("Effects changed since the decision was made. Review the unsaved changes again.");

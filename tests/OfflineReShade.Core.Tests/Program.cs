@@ -17,6 +17,7 @@ await InputWorkflowTests.RunAsync(folder);
 await ExportWorkflowTests.RunAsync(folder);
 await HistoryTests.RunAsync(folder);
 await PreviewTests.RunAsync();
+await BatchTests.RunAsync(folder);
 void Check(bool value, string message) { if (!value) throw new Exception(message); }
 async Task Expect<T>(Func<Task> action) where T : Exception { try { await action(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
 var source = Path.Combine(folder, "source.png"); await File.WriteAllTextAsync(source, "source");
@@ -67,24 +68,7 @@ async Task<JsonElement> Call(string method, object? args, CancellationToken toke
 }
 await RuntimeOperations.WaitForFramesAsync(Call, 4, CancellationToken.None);
 Check(calls >= 7, "Warmup did not wait for actual frames after loading.");
-var engine = new AutomationEngine(Call, (input, _) => { current = input; return Task.CompletedTask; }, () => current);
-async Task WaitJob() { using var stop = new CancellationTokenSource(10000); while (engine.IsBusy) await Task.Delay(10, stop.Token); }
-var request = new BatchRequest([current], WarmupFrames: 0);
-await engine.ExecuteAsync("batch_start", AutomationEngine.Json(request)); await WaitJob();
-Check(engine.Job!.State == "completed" && exports == 1, "Batch failed: " + JsonSerializer.Serialize(engine.Job));
-await engine.ExecuteAsync("batch_start", AutomationEngine.Json(request)); await WaitJob();
-Check(exports == 1, "Resume ignored checkpoint/output hash.");
-await File.WriteAllTextAsync(output, "tampered");
-await engine.ExecuteAsync("batch_start", AutomationEngine.Json(request)); await WaitJob();
-Check(exports == 2, "Resume accepted a changed output file.");
-slow = true;
-await engine.ExecuteAsync("batch_start", AutomationEngine.Json(request with { Resume = false }));
-await Expect<InvalidOperationException>(() => engine.ExecuteAsync("set_uniform", AutomationEngine.Json(new { id = "x", value = 1 })));
-await engine.ExecuteAsync("batch_cancel", AutomationEngine.Json(new { })); await WaitJob();
-Check(engine.Job!.State == "cancelled", "Batch cancellation failed.");
-Check(current.ColorPath == source, "Original input was not restored.");
-await engine.StopAsync();
-Console.WriteLine("PASS: output protection, RPC cancellation framing, real-frame warmup, batch resume/hash, edit lock and cancellation.");
+Console.WriteLine("PASS: output protection, RPC cancellation framing and real-frame warmup.");
 
 foreach (var dpi in new[] { 1.0, 1.25, 1.5, 2, 4, 10 }) {
     var surface = PreviewGeometry.Surface(7680, 4320, dpi);

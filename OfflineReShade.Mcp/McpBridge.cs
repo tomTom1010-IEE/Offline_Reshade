@@ -43,7 +43,7 @@ public sealed class McpBridge : IAsyncDisposable
             return await _attached.CallAsync(method, json, token);
         }
         _native ??= new NativeSession(_nativePath);
-        _engine ??= new AutomationEngine(_native.CallAsync, _native.OpenAsync, () => _native.Current, _native.LoadPresetAsync, _native.SetInputWatchAsync, setPresetSource: _native.SetPresetSourceAsync);
+        _engine ??= new AutomationEngine(_native.CallAsync, _native.OpenAsync, () => _native.Current, _native.LoadPresetAsync, _native.SetInputWatchAsync, setPresetSource: _native.SetPresetSourceAsync, renderSession: _native);
         return await _engine.ExecuteAsync(method, json, token);
     }
     public object ConnectionInfo() => new { mode = Mode, session = _sessionId, name = _session?.Name };

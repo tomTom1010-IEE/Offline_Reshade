@@ -229,6 +229,15 @@ namespace reshade
 			_modified_at = std::filesystem::file_time_type::clock::now();
 		}
 
+		// Copy values while retaining this INI's destination path.
+		void copy_values_from(const ini_file &source)
+		{
+			if (&source == this) return;
+			_sections = source._sections;
+			_modified = true;
+			_modified_at = std::filesystem::file_time_type::clock::now();
+		}
+
 		/// <summary>
 		/// Removes the specified <paramref name="key"/> from the <paramref name="section"/>.
 		/// </summary>
