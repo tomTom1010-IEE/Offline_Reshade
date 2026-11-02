@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _sliderModeOverlayTimer = new();
     private bool _isPreviewDragging;
     private bool _isClosing;
+    private bool _closePrepared, _closeRequested;
     private int _gpuFailures, _addonGpuFailures;
     private DateTimeOffset _gpuRetryAt, _addonRetryAt;
     private bool _addonGpuFailed;
@@ -162,6 +163,24 @@ public sealed partial class MainWindow : Window
             _effectSearchTimer.Stop();
         _sliderModeOverlayTimer.Stop();
             SliderModeOverlay.Visibility = Visibility.Collapsed;
+        };
+        AppWindow.Closing += async (_, args) =>
+        {
+            if (_closePrepared) return;
+            args.Cancel = true;
+            if (_closeRequested) return;
+            _closeRequested = true;
+            try
+            {
+                await ViewModel.PrepareCloseAsync();
+                _closePrepared = true;
+                Close();
+            }
+            catch (Exception ex)
+            {
+                _closeRequested = false;
+                await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Could not finish closing", Content = ex.Message, CloseButtonText = "OK" }.ShowAsync();
+            }
         };
         Closed += (_, _) =>
         {

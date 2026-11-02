@@ -12,15 +12,13 @@ namespace OfflineReShade.WinUI.ViewModels;
 public sealed class MainWindowViewModel : ObservableObject, IDisposable
 {
     private readonly AppPaths _paths;
-    private readonly PrototypeProcessService _prototype;
+    private readonly NativeSession _session;
     private readonly UserSettingsStore _settingsStore;
-    private readonly ReShadeRpcClient _rpc = new();
     private readonly AutomationEngine _automation;
     private readonly AutomationBroker _broker;
     private readonly string _workDir = Path.Combine(AutomationBroker.SessionDirectory, "work", Guid.NewGuid().ToString("N"));
     private RenderInput? _inputOverride;
     private RenderInput? _runtimeInput => Settings.Session.Applied?.Input;
-    private readonly DeviceRecoveryBudget _deviceRecovery = new();
     private bool _cpuPreviewFallback;
     private string _lastPreviewError = "";
     public bool IsGpuPreviewActive => !UseCpuPreview && !_cpuPreviewFallback;
@@ -41,6 +39,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _settingsSaveCancellation;
     private SettingsPickerService? _picker;
     private bool _isPreviewRunning;
+    private int _pendingOpens;
     private bool _isSettingsOpen;
     private bool _isBatchApplying;
     private bool _effectsEnabled = true;
@@ -84,29 +83,31 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         NormalizeDepthSettings();
         InferDepthProfileIfNeeded(saveIfInferred: true);
         InitializeProfilePathState();
-        _prototype = new PrototypeProcessService(paths);
-        _prototype.OutputReceived += OnPrototypeOutputReceived;
-        _prototype.PreviewExited += OnPreviewExited;
+        _session = new NativeSession(paths.PrototypePath, new(_workDir, PreviewPipe: true, AddonOverlay: true), Settings.Session);
+        _session.OutputReceived += OnPrototypeOutputReceived;
+        _session.UnexpectedExit += OnPreviewExited;
+        _session.RuntimeResetting += ResetPreviewPresentation;
+        _session.PreviewPipeCreated += _previewFrames.Start;
         _previewFrames.FrameReceived += frame => PreviewFrameReceived?.Invoke(frame);
         _previewFrames.ErrorReceived += AppendLog;
         _syncContext = uiContext ?? SynchronizationContext.Current;
 
-        _automation = new AutomationEngine((m, a, t) => _rpc.CallAsync(m, a, t), OpenAutomationInputAsync, CurrentRenderInput);
+        _automation = new AutomationEngine((m, a, t) => _session.CallAsync(m, a, t), OpenAutomationInputAsync, () => _session.Current);
         _automation.Changed += OnAutomationChanged;
         _broker = new AutomationBroker(DispatchAutomationAsync, "Offline ReShade WinUI " + BuildContract.ProductVersion);
 
         StartPreviewCommand = new AsyncRelayCommand(StartPreviewAsync, () => !IsPreviewRunning && CanEditSession);
-        StopPreviewCommand = new RelayCommand(StopPreview, () => IsPreviewRunning);
+        StopPreviewCommand = new AsyncRelayCommand(StopPreviewAsync, () => IsPreviewRunning || _pendingOpens > 0);
         CancelBatchCommand = new RelayCommand(() => _automation.Cancel(), () => _automation.Job?.State == "running");
         SavePngCommand = new AsyncRelayCommand(SavePngAsync, () => CanEditSession);
-        ReShadeShotCommand = new AsyncRelayCommand(ReShadeShotAsync, () => _rpc.IsConnected && CanEditSession);
-        ReloadCommand = new AsyncRelayCommand(ReloadAsync, () => _rpc.IsConnected && CanEditSession);
-        SavePresetCommand = new AsyncRelayCommand(SavePresetAsync, () => _rpc.IsConnected && CanEditSession);
+        ReShadeShotCommand = new AsyncRelayCommand(ReShadeShotAsync, () => _session.IsConnected && CanEditSession);
+        ReloadCommand = new AsyncRelayCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
+        SavePresetCommand = new AsyncRelayCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
         ToggleInputModeCommand = new AsyncRelayCommand(ToggleInputModeAsync, () => CanEditSession);
         ToggleGalleryPanelCommand = new RelayCommand(() => IsGalleryPanelOpen = !IsGalleryPanelOpen);
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
-        BatchApplySavePngCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
-        BatchApplyReShadeShotCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _rpc.IsConnected && !IsBatchApplying);
+        BatchApplySavePngCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_output", "Save PNG"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
+        BatchApplyReShadeShotCommand = new AsyncRelayCommand(() => BatchApplyGalleryAsync("save_screenshot", "ReShade Shot"), () => IsGalleryMode && _session.IsConnected && !IsBatchApplying);
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
         PickColorCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.ColorPath = path, picker => picker.PickPngAsync()));
         PickDepthCommand = new AsyncRelayCommand(async () => await PickPathAsync(path => Settings.DepthPath = path, picker => picker.PickDepthAsync()));
@@ -131,7 +132,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ObservableCollection<GalleryItemViewModel> GalleryItems { get; } = new();
 
     public AsyncRelayCommand StartPreviewCommand { get; }
-    public RelayCommand StopPreviewCommand { get; }
+    public AsyncRelayCommand StopPreviewCommand { get; }
     public AsyncRelayCommand SavePngCommand { get; }
     public AsyncRelayCommand ReShadeShotCommand { get; }
     public AsyncRelayCommand ReloadCommand { get; }
@@ -292,7 +293,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task SetEffectsEnabledAsync(bool enabled)
     {
         if (!CanEditSession) return;
-        await _rpc.CallAsync("set_effects_state", new { enabled });
+        await _session.CallAsync("set_effects_state", new { enabled });
         EffectsEnabled = enabled;
     }
 
@@ -300,14 +301,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         if (!CanEditSession) return;
         technique.IsEnabled = enabled;
-        await _rpc.CallAsync("set_technique_state", new { id = technique.Id, enabled });
+        await _session.CallAsync("set_technique_state", new { id = technique.Id, enabled });
         await RefreshControlStateAsync();
     }
 
     public async Task ReorderTechniquesAsync(IReadOnlyList<TechniqueViewModel> techniques)
     {
         if (!CanEditSession) return;
-        if (!_rpc.IsConnected || techniques.Count == 0)
+        if (!_session.IsConnected || techniques.Count == 0)
             return;
 
         var ids = new string[techniques.Count];
@@ -316,7 +317,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            await _rpc.CallAsync("reorder_techniques", new { ids });
+            await _session.CallAsync("reorder_techniques", new { ids });
         }
         catch
         {
@@ -353,7 +354,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task ReorderEnabledEffectsAsync(IReadOnlyList<string> orderedEffectNames)
     {
         if (!CanEditSession) return;
-        if (!_rpc.IsConnected || orderedEffectNames.Count == 0)
+        if (!_session.IsConnected || orderedEffectNames.Count == 0)
             return;
 
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -384,7 +385,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task SetUniformAsync(UniformViewModel uniform, object value)
     {
         if (!CanEditSession) return;
-        await _rpc.CallAsync("set_uniform", new { id = uniform.Id, value });
+        await _session.CallAsync("set_uniform", new { id = uniform.Id, value });
     }
 
     public async Task SetPreprocessorDefinitionAsync(PreprocessorDefinitionViewModel definition, string value)
@@ -392,7 +393,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (!CanEditSession) return;
         definition.Value = value;
         MarkEffectsLoading();
-        await _rpc.CallAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
+        await _session.CallAsync("set_preprocessor_definition", new { effectName = definition.EffectName, name = definition.Name, value });
         await Task.Delay(500);
         await RefreshControlStateAsync();
     }
@@ -400,19 +401,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task SetAddonImGuiValueAsync(AddonImGuiControlViewModel control, string value)
     {
         if (!CanEditSession) return;
-        await _rpc.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
+        await _session.CallAsync("set_addon_imgui_value", new { id = control.Id, value });
     }
 
     public async Task OpenNativeAddonPanelAsync()
     {
         if (!CanEditSession) return;
-        await _rpc.CallAsync("open_native_addon_panel");
+        await _session.CallAsync("open_native_addon_panel");
     }
 
     public async Task SelectNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
     {
         if (!CanEditSession) return;
-        await _rpc.CallAsync("set_native_addon_overlay", new
+        await _session.CallAsync("set_native_addon_overlay", new
         {
             enabled = overlay != null,
             addon = overlay?.AddonName ?? string.Empty,
@@ -424,12 +425,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public async Task SendAddonOverlayInputAsync(PreviewHostInputMessage input)
     {
         if (!CanEditSession) return;
-        if (!_rpc.IsConnected)
+        if (!_session.IsConnected)
             return;
 
         try
         {
-            await _rpc.CallAsync("send_addon_overlay_input", new
+            await _session.CallAsync("send_addon_overlay_input", new
             {
                 message = unchecked((int)input.Message),
                 wparam = unchecked((int)input.WParam),
@@ -444,10 +445,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SetAddonOverlaySurfaceSizeAsync(uint width, uint height)
     {
-        if (!_rpc.IsConnected || width == 0 || height == 0)
+        if (!_session.IsConnected || width == 0 || height == 0)
             return;
 
-        await _rpc.CallAsync("set_addon_overlay_size", new { width, height });
+        await _session.CallAsync("set_addon_overlay_size", new { width, height });
     }
 
     public async Task SelectGalleryItemAsync(GalleryItemViewModel? item)
@@ -456,7 +457,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         SelectedGalleryItem = item;
         _inputOverride = null;
         PreviewInfoText = item.BaseName;
-        if (IsGalleryMode && _rpc.IsConnected)
+        if (IsGalleryMode && _session.IsConnected)
             await OpenAutomationInputAsync(InputForGallery(item), CancellationToken.None);
     }
 
@@ -468,9 +469,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             InputMode = IsGalleryMode ? "RealTime" : "Gallery";
             _inputOverride = null;
             if (IsGalleryMode) { RefreshGalleryItems(); EnsureGallerySelection(); }
-            if (_rpc.IsConnected) {
+            if (_session.IsConnected) {
                 await OpenAutomationInputAsync(CurrentRenderInput(), CancellationToken.None);
-                await _rpc.CallAsync("set_input_watch_enabled", new { enabled = !IsGalleryMode });
+                await _session.CallAsync("set_input_watch_enabled", new { enabled = !IsGalleryMode });
             }
         } catch (Exception ex) { InputMode = previous; AppendLog(ex.Message); }
     }
@@ -481,58 +482,37 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         try
         {
-            StopPreview(updateStatus: false, cancelBatch: !preserveBatch);
-            if (IsGalleryMode && _inputOverride == null)
-                EnsureGallerySelection();
-            var launchingInput = CurrentRenderInput();
-            AutomationEngine.ValidateInput(launchingInput);
-            var apply = Settings.Session.BeginApply(launchingInput);
-            LogText = string.Empty;
+            if (IsGalleryMode && _inputOverride == null) EnsureGallerySelection();
             ControlStatusText = "Connecting";
-            var pipeName = "OfflineReShade-" + Guid.NewGuid().ToString("N");
-            var previewPipeName = pipeName + "-preview";
-            _cpuPreviewFallback = false;
-            OnPropertyChanged(nameof(IsGpuPreviewActive));
-            _lastPreviewError = "";
-            _previewFrames.Start(previewPipeName);
-            _prototype.StartPreview(BuildPreviewArguments(pipeName, previewPipeName));
-            IsPreviewRunning = true;
-            StatusText = "Preview running";
-            PreviewInfoText = IsGalleryMode && SelectedGalleryItem != null ? SelectedGalleryItem.BaseName : "Full-res ReShade runtime - preview is scaled";
-
-            await _rpc.ConnectAsync(pipeName, CancellationToken.None);
-            await Compatibility.VerifyAsync(_rpc, "native");
-            await _rpc.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
-            if (!Settings.Session.AppliedSuccessfully(apply)) return;
-            ControlStatusText = "Connected";
-            RaiseControlCommandStates();
-            await RefreshControlStateAsync();
-            StartFpsPolling();
+            await OpenAutomationInputAsync(CurrentRenderInput(), CancellationToken.None);
         }
         catch (Exception ex)
         {
             AppendLog(ex.Message);
-            StopPreview(updateStatus: false, cancelBatch: !preserveBatch);
-            ControlStatusText = "Control failed";
             StatusText = "Failed";
+            ControlStatusText = _session.IsConnected ? "Connected" : "Control failed";
             if (preserveBatch) throw;
         }
     }
 
-    private void StopPreview() => StopPreview(updateStatus: true);
+    private Task StopPreviewAsync() => StopPreviewAsync(updateStatus: true);
+    private async Task StopPreviewAsync(bool updateStatus)
+    {
+        _automation.Cancel(restore: false);
+        await _automation.StopAsync();
+        await _session.StopAsync();
+        if (updateStatus) StatusText = "Preview stopped";
+    }
 
-    private void StopPreview(bool updateStatus, bool cancelBatch = true)
+    private void ResetPreviewPresentation()
     {
         _runtimeGeneration++;
-        if (cancelBatch) _automation.Cancel(restore: false);
         StopFpsPolling();
-        _rpc.Close();
-        Settings.Session.Disconnected();
         _previewFrames.Stop();
-        _prototype.StopPreview();
+        _cpuPreviewFallback = false;
+        _lastPreviewError = "";
+        OnPropertyChanged(nameof(IsGpuPreviewActive));
         IsPreviewRunning = false;
-        if (updateStatus)
-            StatusText = "Preview stopped";
         ControlStatusText = "Disconnected";
         _controlStatePopulated = false;
         CompleteEffectsLoading();
@@ -558,7 +538,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private async Task SaveImageAsync(bool reShadeShot)
     {
         try {
-            if (!_rpc.IsConnected) await StartPreviewCoreAsync(false);
+            if (!_session.IsConnected) await StartPreviewCoreAsync(false);
             StatusText = "Rendering";
             var saved = await _automation.ExecuteAsync("export_image", AutomationEngine.Json(new { path = ActiveOutputPath, reShadeShot, warmupFrames = 5 }));
             if (saved.TryGetProperty("warning", out var warning) && !string.IsNullOrEmpty(warning.GetString())) AppendLog(warning.GetString()!);
@@ -569,7 +549,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private async Task BatchApplyGalleryAsync(string saveMethod, string label)
     {
         try {
-            if (!IsGalleryMode || !_rpc.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
+            if (!IsGalleryMode || !_session.IsConnected) throw new InvalidOperationException("Start Gallery preview before batch export.");
             RefreshGalleryItems();
             var items = GalleryItems.Where(x => x.IsValid).Select(InputForGallery).ToArray();
             var frames = ParseNonNegativeInt(Settings.GalleryBatchFrameDelay, 5);
@@ -592,26 +572,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task OpenAutomationInputAsync(RenderInput input, CancellationToken token)
     {
-        if (_isDisposed) throw new ObjectDisposedException(nameof(MainWindowViewModel));
-        input = AutomationEngine.ValidateInput(input);
-        var previous = _rpc.IsConnected ? await _rpc.CallAsync("get_runtime_info", cancellationToken: token) : default;
-        var effectsEnabled = previous.ValueKind == JsonValueKind.Object ? previous.GetProperty("effectsEnabled").GetBoolean() : EffectsEnabled;
-        var recovery = previous.ValueKind == JsonValueKind.Object && previous.TryGetProperty("recoveryRequired", out var required) && required.GetBoolean();
-        if (recovery && !_deviceRecovery.TryAcquire(DateTimeOffset.UtcNow)) throw new DeviceLostException("D3D recovery failed repeatedly. Wait 30 seconds and restart preview.");
-        var restart = recovery || _runtimeInput == null || input.EffectDir != _runtimeInput.EffectDir || input.PresetPath != _runtimeInput.PresetPath || input.Width != _runtimeInput.Width || input.Height != _runtimeInput.Height;
-        _inputOverride = input;
-        if (!_rpc.IsConnected || restart) await StartPreviewCoreAsync(true);
-        else {
-            var result = await _rpc.CallAsync("set_input_paths", input, token);
-            if (result.TryGetProperty("restartRequired", out var r) && r.GetBoolean()) await StartPreviewCoreAsync(true);
-            else ApplyInputSwitchResult(result);
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        _pendingOpens++;
+        StopPreviewCommand.RaiseCanExecuteChanged();
+        try
+        {
+            await _session.OpenAsync(input, token);
+            _inputOverride = _session.Current;
+            PreviewInfoText = Path.GetFileName(_session.Current.ColorPath);
+            var item = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, _session.Current.ColorPath, StringComparison.OrdinalIgnoreCase));
+            if (item != null) SelectedGalleryItem = item;
         }
-        await _rpc.CallAsync("set_effects_state", new { enabled = effectsEnabled }, token);
-        await _rpc.CallAsync("set_input_watch_enabled", new { enabled = input.WatchInput }, token);
-        Settings.Session.AppliedSuccessfully(Settings.Session.BeginApply(input));
-        PreviewInfoText = Path.GetFileName(input.ColorPath);
-        var galleryItem = GalleryItems.FirstOrDefault(x => string.Equals(x.ColorPath, input.ColorPath, StringComparison.OrdinalIgnoreCase));
-        if (galleryItem != null) SelectedGalleryItem = galleryItem;
+        finally
+        {
+            _pendingOpens--;
+            StopPreviewCommand.RaiseCanExecuteChanged();
+            if (!_isDisposed && _session.IsConnected)
+            {
+                await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
+                IsPreviewRunning = true;
+                ControlStatusText = "Connected";
+                StatusText = "Preview running";
+                RaiseControlCommandStates();
+                await RefreshControlStateAsync();
+                StartFpsPolling();
+            }
+        }
     }
 
     private Task<JsonElement> DispatchAutomationAsync(string method, JsonElement args, CancellationToken token)
@@ -639,14 +625,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private async Task ReloadAsync()
     {
         MarkEffectsLoading();
-        await _rpc.CallAsync("reload_effects");
+        await _session.CallAsync("reload_effects");
         await Task.Delay(500);
         await RefreshControlStateAsync();
     }
 
     private async Task SavePresetAsync()
     {
-        await _rpc.CallAsync("save_preset");
+        await _session.CallAsync("save_preset");
         AppendLog("Preset saved.");
     }
 
@@ -659,7 +645,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var generation = _runtimeGeneration;
         try
         {
-            var runtimeInfo = await _rpc.CallAsync("get_runtime_info");
+            var runtimeInfo = await _session.CallAsync("get_runtime_info");
             if (_isDisposed || generation != _runtimeGeneration) return;
             await ApplyGraphicsStateAsync(runtimeInfo);
             if (_isDisposed || generation != _runtimeGeneration) return;
@@ -669,7 +655,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            var state = await _rpc.CallAsync("list_state");
+            var state = await _session.CallAsync("list_state");
             if (_isDisposed || generation != _runtimeGeneration) return;
             if (IsRuntimeLoading(state))
             {
@@ -835,14 +821,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             try
             {
-                if (_rpc.IsConnected)
+                if (_session.IsConnected)
                 {
-                    var info = await _rpc.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
+                    var info = await _session.CallAsync("get_runtime_info", cancellationToken: cancellationToken);
                     if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                     var needsRecovery = info.TryGetProperty("recoveryRequired", out var recovery) && recovery.GetBoolean();
                     if (CanEditSession && (needsRecovery || info.TryGetProperty("restartRequired", out var restart) && restart.GetBoolean())) {
                         if (needsRecovery) AppendLog("D3D device lost; rebuilding the rendering session.");
-                        await _automation.ExecuteAsync("open_input", AutomationEngine.Json(CurrentRenderInput()), CancellationToken.None);
+                        await _automation.ExecuteAsync("open_input", AutomationEngine.Json(_session.Current), CancellationToken.None);
                         return; // The replacement runtime owns a new polling loop.
                     }
                     if (needsRecovery) { await Task.Delay(100, cancellationToken); continue; } // The active export/batch owns recovery.
@@ -868,7 +854,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     {
                         await RefreshControlStateAsync();
                     }
-                    var addonUi = await _rpc.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
+                    var addonUi = await _session.CallAsync("list_addon_imgui_capture", cancellationToken: cancellationToken);
                     if (_isDisposed || cancellationToken.IsCancellationRequested) return;
                     ApplyAddonUiState(addonUi);
                 }
@@ -884,7 +870,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             catch (DeviceLostException ex)
             {
                 AppendLog(ex.Message); StatusText = "D3D recovery failed";
-                StopPreview(updateStatus: false);
+                await StopPreviewAsync(updateStatus: false);
                 return;
             }
             catch (Exception ex)
@@ -1018,25 +1004,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Editor = Settings.Editor, Preferences = Settings.Preferences };
     }
 
-    private string BuildExportArguments() => BuildCommonArguments().ToString();
-    private string BuildPreviewArguments(string pipeName, string previewPipeName)
-    {
-        var arguments = BuildCommonArguments().Add("--control-pipe", pipeName).AddSwitch("--interactive").AddSwitch("--addon-overlay-shared");
-        if (!CurrentRenderInput().WatchInput) arguments.AddSwitch("--disable-input-watch");
-        arguments.Add("--preview-pipe", previewPipeName);
-        arguments.AddSwitch("--preview-shared");
-        return arguments.ToString();
-    }
-    private CommandLineBuilder BuildCommonArguments()
-    {
-        var input = CurrentRenderInput();
-        var builder = new CommandLineBuilder().Add("--color", input.ColorPath).Add("--depth", input.DepthPath)
-            .Add("--depth-format", input.DepthFormat).Add("--depth-profile", input.DepthProfile).Add("--depth-downsample", input.DepthDownsample)
-            .Add("--effect-dir", input.EffectDir).Add("--preset", input.PresetPath).Add("--output", input.OutputPath).Add("--work-dir", _workDir);
-        if (input.Width > 0) builder.Add("--width", input.Width.ToString(CultureInfo.InvariantCulture)).Add("--height", input.Height.ToString(CultureInfo.InvariantCulture));
-        return builder;
-    }
-
     private bool UseCpuPreview => string.Equals(Settings.PreviewTransport, "CPU", StringComparison.OrdinalIgnoreCase);
 
     private async Task ApplyGraphicsStateAsync(JsonElement info)
@@ -1057,7 +1024,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsGpuPreviewActive));
         AppendLog(reason + " Switching to CPU preview; export dimensions are unchanged.");
         try {
-            if (_rpc.IsConnected) await _rpc.CallAsync("set_preview_transport", new { cpu = true });
+            if (_session.IsConnected) await _session.CallAsync("set_preview_transport", new { cpu = true });
             if (!_isDisposed) StatusText = "CPU preview (GPU unavailable)";
         } catch (Exception ex) { if (!_isDisposed) { AppendLog(ex.Message); StatusText = "Preview unavailable"; } }
     }
@@ -1069,9 +1036,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _cpuPreviewFallback = false;
         OnPropertyChanged(nameof(IsGpuPreviewActive));
         try {
-            if (_rpc.IsConnected) {
-                await _rpc.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
-                await ApplyGraphicsStateAsync(await _rpc.CallAsync("get_runtime_info"));
+            if (_session.IsConnected) {
+                await _session.CallAsync("set_preview_transport", new { cpu = UseCpuPreview });
+                await ApplyGraphicsStateAsync(await _session.CallAsync("get_runtime_info"));
             }
         } catch (Exception ex) { if (!_isDisposed) AppendLog(ex.Message); }
     }
@@ -1426,10 +1393,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void OnPreviewExited()
     {
-        if (_syncContext != null)
-            _syncContext.Post(_ => StopPreview(), null);
-        else
-            StopPreview();
+        async void Handle(object? _)
+        {
+            if (_isDisposed || _session.IsConnected) return;
+            try { await StopPreviewAsync(false); StatusText = "Rendering process exited"; }
+            catch (Exception ex) { AppendLog(ex.Message); }
+        }
+        if (_syncContext != null) _syncContext.Post(Handle, null); else Handle(null);
+    }
+
+    public async Task PrepareCloseAsync()
+    {
+        _automation.Cancel(restore: false);
+        await _automation.StopAsync();
+        if (_settingsStore.LoadError == null) await SaveSettingsNowAsync();
+        else AppendLog(_settingsStore.LoadError);
+        StopFpsPolling();
+        await _session.DisposeAsync();
     }
 
     private void RaiseControlCommandStates()
@@ -1473,10 +1453,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         Settings.PropertyChanged -= OnSettingsPropertyChanged;
         Settings.Session.Changed -= OnEditingSessionChanged;
-        _prototype.OutputReceived -= OnPrototypeOutputReceived;
+        _session.OutputReceived -= OnPrototypeOutputReceived;
+        _session.UnexpectedExit -= OnPreviewExited;
+        _session.RuntimeResetting -= ResetPreviewPresentation;
+        _session.PreviewPipeCreated -= _previewFrames.Start;
         StopFpsPolling();
-        _rpc.Dispose();
         _previewFrames.Dispose();
-        _prototype.Dispose();
     }
 }

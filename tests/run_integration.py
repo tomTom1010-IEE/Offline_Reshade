@@ -95,9 +95,25 @@ try:
     for i in range(3):
         dest=work/f'repeated-{i}.png';tool('export_image',path=str(dest),warmupFrames=1)
         img=Image.open(dest).convert('RGB'); assert img.getextrema()==((0,0),(255,255),(0,0)),img.getextrema()
+    preset_before=preset.read_bytes()
+    tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':0.25}])
     tool('open_input',**config(c2,d2,work/'mcp-second.png'))
     tool('export_image',path=str(work/'mcp-second.png'),warmupFrames=3,reShadeShot=False)
     assert Image.open(work/'mcp-second.png').size==(480,320)
+    assert 60 <= Image.open(work/'mcp-second.png').convert('RGB').getpixel((8,6))[1] <= 70,'Resize lost unsaved effect parameters'
+    tool('open_input',**config(c2,d2,work/'mcp-scaled.png'),width=160,height=120)
+    tool('export_image',path=str(work/'mcp-scaled.png'),warmupFrames=2)
+    scaled=Image.open(work/'mcp-scaled.png').convert('RGB')
+    assert scaled.size==(160,120) and 60 <= scaled.getpixel((8,6))[1] <= 70,'Explicit render resize lost parameters'
+    damaged=work/'damaged.png';damaged.write_bytes(b'incomplete')
+    failure=rpc('tools/call',{'name':'open_input','arguments':config(damaged,d2,work/'damaged-output.png')})
+    assert failure.get('isError'),failure
+    tool('export_image',path=str(work/'after-failed-open.png'),warmupFrames=2)
+    restored=Image.open(work/'after-failed-open.png').convert('RGB')
+    assert restored.size==(160,120) and 60 <= restored.getpixel((8,6))[1] <= 70,'Failed input did not restore previous image/parameters'
+    assert preset.read_bytes()==preset_before,'Rebuild silently overwrote the source preset'
+    tool('set_parameters',updates=[{'id':'Integration.fx::Gain','value':1}])
+    print('PASS: source/explicit resolution changes preserve unsaved parameters; damaged input restores the previous session without saving the source preset',flush=True)
     items=[config(c1,d1,work/'batch-first.png'),config(c2,d2,work/'batch-second.png')]
     tool('start_batch',items=items,warmupFrames=3)
     for _ in range(200):

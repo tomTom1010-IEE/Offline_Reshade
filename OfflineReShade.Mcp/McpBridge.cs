@@ -36,6 +36,6 @@ public sealed class McpBridge : IAsyncDisposable
         return await _engine.ExecuteAsync(method, json, token);
     }
     public object ConnectionInfo() => new { mode = Mode, session = _sessionId, name = _session?.Name };
-    private async Task DisposeOwnedAsync() { if (_engine != null) await _engine.StopAsync(); _native?.Dispose(); _native = null; _engine = null; }
+    private async Task DisposeOwnedAsync() { if (_engine != null) await _engine.StopAsync(); if (_native != null) await _native.DisposeAsync(); _native = null; _engine = null; }
     public async ValueTask DisposeAsync() { await DisposeOwnedAsync(); _attached?.Dispose(); }
 }

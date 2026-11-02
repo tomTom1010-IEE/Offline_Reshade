@@ -111,6 +111,7 @@ try {
         Invoke-Checked (Join-Path $repo 'bin\x64\Release\OfflineReShade.Graphics.Tests.exe') @()
         Invoke-Checked 'dotnet' @('run', '--project', 'tests\OfflineReShade.Core.Tests\OfflineReShade.Core.Tests.csproj', '-c', 'Release', '--nologo')
         Invoke-Checked 'python' @('tests\run_integration.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "verification-$stamp"))
+        Invoke-Checked 'dotnet' @('run', '--project', 'tests\OfflineReShade.Core.Tests\OfflineReShade.Core.Tests.csproj', '-c', 'Release', '--no-build', '--', '--native-lifecycle', (Join-Path $stage 'OfflineReShadePrototype.exe'), (Join-Path $OutputDirectory "verification-$stamp"))
         Invoke-Checked 'python' @('tests\run_output_correctness.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "correctness-$stamp"))
         Invoke-Checked 'python' @('tests\run_d3d_recovery.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "graphics-$stamp"))
         Invoke-Checked 'python' @('tests\run_compatibility.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "compatibility-$stamp"))
