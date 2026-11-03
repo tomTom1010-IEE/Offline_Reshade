@@ -562,10 +562,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var header = new TextBlock
         {
             Text = item.Name.ToUpperInvariant() + "   " + item.Count.ToString(CultureInfo.InvariantCulture),
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            CharacterSpacing = 60,
+            Style = (Style)Application.Current.Resources["SectionHeaderStyle"],
             Margin = new Thickness(4, 14, 0, 4)
         };
         AutomationProperties.SetHeadingLevel(header, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
@@ -601,13 +598,14 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         Grid.SetColumn(toggle, 1);
         header.Children.Add(toggle);
 
+        // Styles resolve theme brushes per element; Application.Current.Resources would return the app theme's brush.
         var title = new TextBlock
         {
             Text = item.DisplayName,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = (Brush)Application.Current.Resources[item.IsEnabled ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush"]
+            VerticalAlignment = VerticalAlignment.Center
         };
+        if (!item.IsEnabled) title.Style = (Style)Application.Current.Resources["SecondaryTextStyle"];
         ToolTipService.SetToolTip(title, item.Name + Environment.NewLine + string.Join(Environment.NewLine, item.Techniques.Select(static technique => "• " + technique.Name)));
         Grid.SetColumn(title, 2);
         header.Children.Add(title);
@@ -619,16 +617,18 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             header.Children.Add(passes);
         }
 
-        header.Background = TransparentBrush;
+        var restStyle = (Style)Application.Current.Resources["ListRowRestStyle"];
+        var hoverStyle = (Style)Application.Current.Resources["ListRowHoverStyle"];
+        header.Style = restStyle;
         header.CornerRadius = new CornerRadius(4);
-        header.PointerEntered += (_, _) => header.Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"];
-        header.PointerExited += (_, _) => header.Background = TransparentBrush;
-        header.PointerCanceled += (_, _) => header.Background = TransparentBrush;
+        header.PointerEntered += (_, _) => header.Style = hoverStyle;
+        header.PointerExited += (_, _) => header.Style = restStyle;
+        header.PointerCanceled += (_, _) => header.Style = restStyle;
 
         if (item.Parameters is { } effect && (effect.Uniforms.Any(static uniform => !IsInfoOnly(uniform)) || effect.PreprocessorDefinitions.Count != 0))
         {
             parts.Chevron = new FontIcon { Glyph = ChevronDown, FontSize = 12 };
-            parts.ExpandButton = new Button { Content = parts.Chevron, Width = 32, Height = 32, Style = (Style)Resources["SubtleIconButtonStyle"] };
+            parts.ExpandButton = new Button { Content = parts.Chevron, Width = 32, Height = 32, Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"] };
             AutomationProperties.SetAutomationId(parts.ExpandButton, "ExpandEffect_" + MakeAutomationId(item.Name));
             parts.ExpandButton.Click += (_, _) => SetEffectExpanded(parts, parts.Parameters?.Visibility != Visibility.Visible);
             Grid.SetColumn(parts.ExpandButton, 4);
@@ -1611,8 +1611,8 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         {
             Width = 24,
             Height = 32,
-            Content = new FontIcon { Glyph = "\uE76F", FontSize = 14, Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"] },
-            Style = (Style)Resources["SubtleIconButtonStyle"],
+            Content = new FontIcon { Glyph = "\uE76F", FontSize = 14, Style = (Style)Application.Current.Resources["TertiaryIconStyle"] },
+            Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"],
             Tag = item.Name,
             CanDrag = true
         };
@@ -1772,10 +1772,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var label = new TextBlock
         {
             Text = title.ToUpperInvariant(),
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            CharacterSpacing = 40,
-            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            Style = (Style)Application.Current.Resources["SectionHeaderStyle"],
             VerticalAlignment = VerticalAlignment.Center
         };
         var headerContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -1784,7 +1781,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var header = new Button
         {
             Content = headerContent,
-            Style = (Style)Resources["SubtleIconButtonStyle"],
+            Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"],
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(4, 6, 4, 6),
@@ -1902,7 +1899,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             return panel;
         }
 
-        var reset = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Width = 28, Height = 28, Style = (Style)Resources["SubtleIconButtonStyle"] };
+        var reset = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Width = 28, Height = 28, Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"] };
         AutomationProperties.SetAutomationId(reset, "Reset_" + MakeAutomationId(uniform.Id));
         AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
         ToolTipService.SetToolTip(reset, "Reset to shader default (can be undone)");
@@ -2082,8 +2079,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             row.Children.Add(new TextBlock
             {
                 Text = ComponentName(uniform, i),
-                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                Style = (Style)Application.Current.Resources["SecondaryCaptionStyle"],
                 VerticalAlignment = VerticalAlignment.Center
             });
             Grid.SetColumn(slider, 1);

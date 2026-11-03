@@ -4,14 +4,6 @@
  xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
  xmlns:views="using:OfflineReShade.WinUI.Views">
   <UserControl.Resources>
-    <Style x:Key="SubtleIconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Padding" Value="0" />
-      <Setter Property="MinWidth" Value="0" />
-      <Setter Property="MinHeight" Value="0" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
     <DataTemplate x:Key="EffectRowTemplate" x:DataType="vm:EffectListItem">
       <ContentControl HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsTabStop="False"
                       DataContextChanged="OnEffectRowDataContextChanged" Loaded="OnEffectRowLoaded" Unloaded="OnEffectRowUnloaded" />

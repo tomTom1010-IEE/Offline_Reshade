@@ -27,6 +27,10 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "Offline ReShade " + BuildContract.ProductVersion;
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        AppWindow.TitleBar.PreferredHeightOption = Microsoft.UI.Windowing.TitleBarHeightOption.Tall;
+        SystemBackdrop = new MicaBackdrop();
         var windowHandle = WindowNative.GetWindowHandle(this);
         var uiContext = new UiSynchronizationContext(DispatcherQueue);
         SynchronizationContext.SetSynchronizationContext(uiContext);
@@ -42,6 +46,7 @@ public sealed partial class MainWindow : Window
         ViewModel.Settings.PropertyChanged += OnSettingsChanged;
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
         RootGrid.SizeChanged += (_, _) => ArrangeWorkspace();
+        RootGrid.ActualThemeChanged += (_, _) => UpdateCaptionButtons();
         _sliderModeOverlayTimer.Tick += (_, _) => { _sliderModeOverlayTimer.Stop(); SliderModeOverlay.Visibility = Visibility.Collapsed; };
         AppWindow.Closing += async (_, args) =>
         {
@@ -104,6 +109,19 @@ public sealed partial class MainWindow : Window
     {
         RootGrid.RequestedTheme = ViewModel.Settings.Theme switch { "Dark" => ElementTheme.Dark, "Light" => ElementTheme.Light, _ => ElementTheme.Default };
         ThemeBox.SelectedIndex = ViewModel.Settings.Theme switch { "Light" => 1, "Dark" => 2, _ => 0 };
+        UpdateCaptionButtons();
+    }
+    // Caption buttons are drawn by the system, so they need the window's theme explicitly when it differs from Windows.
+    private void UpdateCaptionButtons()
+    {
+        var dark = RootGrid.ActualTheme == ElementTheme.Dark;
+        var bar = AppWindow.TitleBar;
+        var foreground = dark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
+        bar.ButtonBackgroundColor = bar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        bar.ButtonForegroundColor = bar.ButtonHoverForegroundColor = bar.ButtonPressedForegroundColor = foreground;
+        bar.ButtonInactiveForegroundColor = dark ? Windows.UI.Color.FromArgb(0xFF, 0x9A, 0x9A, 0x9A) : Windows.UI.Color.FromArgb(0xFF, 0x75, 0x75, 0x75);
+        bar.ButtonHoverBackgroundColor = dark ? Windows.UI.Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF) : Windows.UI.Color.FromArgb(0x10, 0x00, 0x00, 0x00);
+        bar.ButtonPressedBackgroundColor = dark ? Windows.UI.Color.FromArgb(0x10, 0xFF, 0xFF, 0xFF) : Windows.UI.Color.FromArgb(0x0A, 0x00, 0x00, 0x00);
     }
     private void OnThemeSelectionChanged(object sender, SelectionChangedEventArgs args)
     {
@@ -116,12 +134,10 @@ public sealed partial class MainWindow : Window
     }
     private void OnCloseInput(object sender, RoutedEventArgs args) => ViewModel.IsInputPanelOpen = false;
     private void OnWorkspaceSizeChanged(object sender, SizeChangedEventArgs args) => ArrangeWorkspace();
-    private void OnToggleEffects(object sender, RoutedEventArgs args) => ViewModel.Settings.EffectsPaneOpen = !ViewModel.Settings.EffectsPaneOpen;
     private void ArrangeWorkspace()
     {
         if (ViewModel == null || _effects == null) return;
         InputSplit.OpenPaneLength = Math.Min(440, Math.Max(0, RootGrid.ActualWidth));
-        ToolbarFps.Visibility = RootGrid.ActualWidth >= 1100 ? Visibility.Visible : Visibility.Collapsed;
         var layout = WorkspaceLayout.Arrange(Math.Max(0, MainContent.ActualWidth - 24), ViewModel.Settings.EffectsPaneWidth, ViewModel.IsGalleryPanelOpen);
         EffectsSplit.OpenPaneLength = layout.EffectsWidth;
         EffectsSplit.DisplayMode = layout.EffectsInline ? SplitViewDisplayMode.Inline : SplitViewDisplayMode.Overlay;
@@ -297,6 +313,41 @@ public sealed partial class MainWindow : Window
         catch (Exception error) { ViewModel.ReportUiError(error); }
         finally { _exportDialogOpen = false; }
     }
+    private async void OnShowShortcuts(object sender, RoutedEventArgs args)
+    {
+        if (_exportDialogOpen) return;
+        var shortcuts = new (string Keys, string Action)[]
+        {
+            ("Ctrl+O", "Open image"), ("Ctrl+E", "Export image"), ("Ctrl+S", "Save preset"),
+            ("Ctrl+Z / Ctrl+Y", "Undo / redo"), ("Ctrl+F", "Search effects and parameters"),
+            ("Ctrl+0 / Ctrl+1", "Fit / 100%"), ("Ctrl+B", "Compare with the original image"),
+            ("Arrow keys", "Pan the canvas"), ("L", "Toggle logarithmic sliders"),
+            ("Ctrl + wheel on a slider", "Change slider sensitivity")
+        };
+        var table = new Grid { ColumnSpacing = 24, RowSpacing = 8 };
+        table.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        table.ColumnDefinitions.Add(new ColumnDefinition());
+        for (var i = 0; i < shortcuts.Length; i++)
+        {
+            table.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var keys = new TextBlock { Text = shortcuts[i].Keys, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var action = new TextBlock { Text = shortcuts[i].Action, TextWrapping = TextWrapping.Wrap };
+            Grid.SetRow(keys, i); Grid.SetRow(action, i); Grid.SetColumn(action, 1);
+            table.Children.Add(keys); table.Children.Add(action);
+        }
+        var content = new StackPanel { Spacing = 16 };
+        content.Children.Add(table);
+        content.Children.Add(new TextBlock { Text = "Text fields keep their normal editing shortcuts.", Style = (Style)Application.Current.Resources["SecondaryTextStyle"], TextWrapping = TextWrapping.Wrap });
+        _exportDialogOpen = true;
+        try
+        {
+            await new ContentDialog { XamlRoot = RootGrid.XamlRoot, RequestedTheme = RootGrid.ActualTheme, Title = "Keyboard shortcuts",
+                Content = content, CloseButtonText = "Close", DefaultButton = ContentDialogButton.Close }.ShowAsync();
+        }
+        catch (Exception error) { ViewModel.ReportUiError(error); }
+        finally { _exportDialogOpen = false; }
+    }
     public static Visibility BoolVisibility(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
+    public static Visibility ToneVisibility(string tone, string expected) => BoolVisibility(tone == expected);
     public static InfoBarSeverity NoticeSeverity(string status) => status is "failed" or "rejected" ? InfoBarSeverity.Error : status == "warning" ? InfoBarSeverity.Warning : InfoBarSeverity.Informational;
 }

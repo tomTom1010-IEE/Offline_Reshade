@@ -162,9 +162,26 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         (HasPendingConfiguration ? " · Input changes pending" : "");
     public string DocumentSummary => _runtimeInput is not { } input ? "Input settings — open an image to begin" :
         $"{Path.GetFileName(input.ColorPath)} · {(input.DepthPath.Length == 0 ? "Color only" : "Depth linked")} · {(input.PresetPath.Length == 0 ? "Working preset" : Path.GetFileName(input.PresetPath))}";
+    public string SourceTitle => Activity.Runtime.WaitingForInput ? "Waiting for game output" : _runtimeInput is { } input ? Path.GetFileName(input.ColorPath) : "No image";
+    public string PresetTitle => _runtimeInput is { PresetPath.Length: > 0 } input ? Path.GetFileNameWithoutExtension(input.PresetPath) : "Working preset";
+    public bool IsPresetModified => _automation.History.IsModified;
+    public bool IsExclusiveOperationRunning => Activity.IsExclusive;
+    public string StatusTone => Activity switch
+    {
+        { Runtime.Error: not null } => "error",
+        { IsExclusive: true } or { Runtime.WaitingForInput: true } or { Runtime.Compiling: true } => "busy",
+        { Runtime.PreviewWarning: not null } => "warning",
+        { Runtime.HasFrame: true } => "ready",
+        _ => "idle"
+    };
+    public string StatusSourceText => _runtimeInput is not { } input ? "Input settings" : string.Join(" · ", new[] {
+        Path.GetFileName(input.ColorPath), RenderWidth > 0 ? $"{RenderWidth} × {RenderHeight}" : "",
+        input.DepthPath.Length == 0 ? "Color only" : "Depth " + input.DepthProfile.ToUpperInvariant(),
+        IsListening ? "Live" : "" }.Where(static part => part.Length > 0));
+    // Nothing is "pending" before the first image is applied.
     public string FooterEditStatus => string.Join(" · ", new[] {
         _automation.History.IsModified ? "Unsaved FX changes" : "",
-        HasPendingConfiguration ? "Input changes pending" : "" }.Where(x => x.Length > 0));
+        _runtimeInput != null && HasPendingConfiguration ? "Input changes pending" : "" }.Where(x => x.Length > 0));
     public string InputSourceText => Activity.Runtime.WaitingForInput ? $"Waiting for game output: {Activity.Runtime.InputPath}"
         : IsListening ? "Game output — automatic updates are enabled" : "Files — changes are applied manually";
 
@@ -284,7 +301,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public bool ShowEmptyCanvas => Activity.ShowEmpty;
     public string EmptyTitle => Activity.EmptyTitle;
     public string EmptyMessage => Activity.Runtime.InputPath.Length == 0 && !IsOperationRunning && Activity.Runtime.Error == null
-        ? "Use Open image or Listen for game output in the toolbar above." : Activity.EmptyMessage;
+        ? "Open an image (Ctrl+O) or listen for game output from the image menu at the top." : Activity.EmptyMessage;
     public bool HasBatchTask => _automation.Job != null;
     public bool IsOperationRunning => _automation.IsBusy;
     public bool FeedbackOpen { get => Activity.Notice != null || Activity.Runtime.Error != null || Activity.Runtime.PreviewWarning != null; set { if (!value) _automation.Activity.Dismiss(); } }
@@ -743,7 +760,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             UpdateBatchPresentation();
             foreach (var property in new[] { nameof(CanChooseSource), nameof(IsListening), nameof(InputSourceText), nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
                 nameof(StatusText), nameof(InputSummary), nameof(DocumentSummary), nameof(FooterEditStatus), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
-                nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
+                nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath),
+                nameof(SourceTitle), nameof(PresetTitle), nameof(IsExclusiveOperationRunning), nameof(StatusTone), nameof(StatusSourceText) }) OnPropertyChanged(property);
             OpenImageCommand.RaiseCanExecuteChanged(); StartListeningCommand.RaiseCanExecuteChanged(); StopListeningCommand.RaiseCanExecuteChanged();
             PickWatchFolderCommand.RaiseCanExecuteChanged(); PickColorCommand.RaiseCanExecuteChanged(); PickDepthCommand.RaiseCanExecuteChanged(); PickPresetCommand.RaiseCanExecuteChanged();
             ClearDepthCommand.RaiseCanExecuteChanged(); StopPreviewCommand.RaiseCanExecuteChanged();
@@ -1039,6 +1057,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CurrentInputText)); OnPropertyChanged(nameof(CurrentDepthText)); OnPropertyChanged(nameof(CurrentPresetText));
         OnPropertyChanged(nameof(InputSummary)); OnPropertyChanged(nameof(DocumentSummary)); OnPropertyChanged(nameof(FooterEditStatus));
         OnPropertyChanged(nameof(InputSourceText)); OnPropertyChanged(nameof(IsListening));
+        OnPropertyChanged(nameof(SourceTitle)); OnPropertyChanged(nameof(PresetTitle)); OnPropertyChanged(nameof(StatusSourceText));
         OnPropertyChanged(nameof(HasPendingConfiguration));
         OnPropertyChanged(nameof(ConfigurationStatusText));
     }
@@ -1150,8 +1169,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         PreviewOriginal = info.TryGetProperty("previewOriginal", out var original) && original.GetBoolean();
         AdapterLuid = info.TryGetProperty("adapterLuid", out var luid) ? luid.GetUInt64() : 0;
-        RenderWidth = info.GetProperty("width").GetUInt32(); RenderHeight = info.GetProperty("height").GetUInt32();
+        var (width, height) = (info.GetProperty("width").GetUInt32(), info.GetProperty("height").GetUInt32());
+        var sizeChanged = width != RenderWidth || height != RenderHeight;
+        RenderWidth = width; RenderHeight = height;
         OnPropertyChanged(nameof(ExportDimensionsText));
+        if (sizeChanged) OnPropertyChanged(nameof(StatusSourceText));
         var error = info.TryGetProperty("previewError", out var e) ? e.GetString() ?? "" : "";
         if (error.Length > 0 && error != _lastPreviewError) { _lastPreviewError = error; AppendLog(error); }
         if (IsGpuPreviewActive && info.TryGetProperty("sharedPreviewHandle", out var handle) && handle.GetUInt64() == 0)

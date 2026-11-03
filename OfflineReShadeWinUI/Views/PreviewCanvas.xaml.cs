@@ -100,9 +100,9 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
         ZoomStatus.Text = $"{(_viewport.IsFit ? "Fit · " : "")}{scale * 100:0.#}% · {(ViewModel.PreviewOriginal ? "Original input — preview only" : "Processed preview")}";
         var pw = ViewModel.IsGpuPreviewActive ? (int)ViewModel.SharedPreviewWidth : _cpuWidth;
         var ph = ViewModel.IsGpuPreviewActive ? (int)ViewModel.SharedPreviewHeight : _cpuHeight;
-        ResolutionStatus.Text = !ViewModel.IsPreviewRunning ? "Open an image to preview" :
-            $"Render {ViewModel.RenderWidth} × {ViewModel.RenderHeight} · Preview {pw} × {ph}" +
-            (pw > 0 && (pw < ViewModel.RenderWidth || ph < ViewModel.RenderHeight) ? " (downsampled; 100% uses render pixels)" : "");
+        // The status bar shows the render size; only a downsampled preview needs mentioning here.
+        ResolutionStatus.Text = pw > 0 && (pw < ViewModel.RenderWidth || ph < ViewModel.RenderHeight)
+            ? $"Preview downsampled to {pw} × {ph}; 100% uses render pixels" : "";
         ToolTipService.SetToolTip(ZoomStatus, ZoomStatus.Text);
         ToolTipService.SetToolTip(ResolutionStatus, ResolutionStatus.Text);
         Render();

@@ -30,7 +30,7 @@ public sealed partial class MainWindowViewModel
     private void NotifyHistoryState()
     {
         OnPropertyChanged(nameof(FooterEditStatus)); OnPropertyChanged(nameof(PresetEditStatus)); OnPropertyChanged(nameof(HistoryWarning));
-        OnPropertyChanged(nameof(InputSummary));
+        OnPropertyChanged(nameof(InputSummary)); OnPropertyChanged(nameof(IsPresetModified));
         UndoCommand?.RaiseCanExecuteChanged(); RedoCommand?.RaiseCanExecuteChanged(); SavePresetAsCommand?.RaiseCanExecuteChanged();
     }
     public void BeginUniformGesture()
@@ -101,7 +101,7 @@ public sealed partial class MainWindowViewModel
     {
         await _session.SetPresetSourceAsync(path, token);
         Settings.PresetPath = path; // Preserve unrelated pending fields.
-        OnPropertyChanged(nameof(CurrentPresetText));
+        OnPropertyChanged(nameof(CurrentPresetText)); OnPropertyChanged(nameof(PresetTitle));
     }
     private async Task SavePresetAsAsync()
     {

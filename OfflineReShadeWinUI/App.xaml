@@ -18,6 +18,32 @@
       <Style x:Key="SectionBorderStyle" TargetType="Border">
         <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
       </Style>
+      <!-- Code-built UI uses these styles so colours follow the window theme, not the application theme. -->
+      <Style x:Key="SecondaryCaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+      </Style>
+      <Style x:Key="SectionHeaderStyle" TargetType="TextBlock" BasedOn="{StaticResource SecondaryCaptionStyle}">
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="CharacterSpacing" Value="60" />
+      </Style>
+      <Style x:Key="TertiaryIconStyle" TargetType="FontIcon">
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+      </Style>
+      <Style x:Key="ListRowRestStyle" TargetType="Grid">
+        <Setter Property="Background" Value="Transparent" />
+      </Style>
+      <Style x:Key="ListRowHoverStyle" TargetType="Grid">
+        <Setter Property="Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+      </Style>
+      <!-- Borderless button for icons and inline links; the hover/pressed fill comes from the default template. -->
+      <Style x:Key="SubtleIconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="MinWidth" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+      </Style>
     </ResourceDictionary>
   </Application.Resources>
 </Application>
