@@ -551,10 +551,15 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private Task<JsonElement> SubmitEditAsync(string method, object args) => _automation.ExecuteSubmittedEditAsync(method, AutomationEngine.Json(args));
     public Task SetUniformAsync(UniformViewModel uniform, object value) =>
-        _pendingEdits.SubmitNowAsync("uniform:" + uniform.Id, () => SubmitEditAsync("set_uniform", new { id = uniform.Id, value }));
+        _pendingEdits.SubmitNowAsync(uniform.AddonService.Length == 0 ? "uniform:" + uniform.Id : "service:" + uniform.AddonService + ":" + uniform.Id, () => uniform.AddonService.Length == 0 ? SubmitEditAsync("set_uniform", new { id = uniform.Id, value }) : SetServiceParameterAsync(uniform, value));
+    public Task<JsonElement> ReadAddonServicesAsync() => _automation.ExecuteAsync("list_addon_services", AutomationEngine.Json(new { }));
+    private Task<JsonElement> SetServiceParameterAsync(UniformViewModel uniform, object value) => SubmitEditAsync("mutate_addon_service", new { addon = uniform.AddonService, method = "set", request = new { id = uniform.Id, value = value is Array ? value : new[] { value } } });
+    public Task InvokeAddonActionAsync(string addon, string id) => _automation.ExecuteAsync("mutate_addon_service", AutomationEngine.Json(new { addon, method = "action", request = new { id, arguments = new { } } }));
+    public Task PressUniformAsync(UniformViewModel uniform) => _automation.ExecuteAsync("press_uniform", AutomationEngine.Json(new { id = uniform.Id }));
 
     public void QueueUniformEdit(UniformViewModel uniform, object value)
     {
+        if (uniform.AddonService.Length != 0) { _pendingEdits.Enqueue("service:" + uniform.AddonService + ":" + uniform.Id, () => SetServiceParameterAsync(uniform, value)); return; }
         var gesture = _uniformGesture;
         _pendingEdits.Enqueue("uniform:" + uniform.Id, async () => {
             var transactionId = gesture == null ? null : await gesture;
@@ -962,6 +967,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         return string.Join('\u001F',
             control.Id,
             control.Kind,
+            control.IsEnabled.ToString(),
             control.Label,
             control.Minimum,
             control.Maximum,

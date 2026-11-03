@@ -11,8 +11,8 @@
     "apiVersion": 20
   },
   "interfaces": {
-    "nativeRpc": 7,
-    "automationBroker": 7,
+    "nativeRpc": 8,
+    "automationBroker": 8,
     "offlineApi": 1,
     "previewBridge": 3
   },

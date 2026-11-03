@@ -100,6 +100,7 @@ namespace
 		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
 		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
 		bool (*inject_addon_imgui_value)(const char *, const char *) = nullptr;
+        const char *(*call_addon_service)(reshade::api::effect_runtime *, const char *, const char *, const char *) = nullptr;
 	};
 
 	struct shared_preview_state
@@ -669,6 +670,7 @@ namespace
 		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
 		result.get_addon_imgui_capture_json = reinterpret_cast<decltype(result.get_addon_imgui_capture_json)>(GetProcAddress(result.module, "ReShadeGetAddonImGuiCaptureJson"));
 		result.inject_addon_imgui_value = reinterpret_cast<decltype(result.inject_addon_imgui_value)>(GetProcAddress(result.module, "ReShadeInjectAddonImGuiValue"));
+        result.call_addon_service = reinterpret_cast<decltype(result.call_addon_service)>(GetProcAddress(result.module, "ReShadeCallAddonService"));
 		return result;
 	}
 
@@ -1963,6 +1965,8 @@ namespace
 			if (!label.empty()) state.result += ",\"label\":" + json_string(label);
 			if (!category.empty()) state.result += ",\"category\":" + json_string(category);
 			if (!ui_type.empty()) state.result += ",\"uiType\":" + json_string(ui_type);
+			for (const auto &annotation : { "ui_tooltip", "ui_text", "ui_units" })
+				state.result += "," + json_string(annotation) + ":" + json_string(uniform_annotation_string(runtime, variable, annotation));
 			if (!ui_items.empty()) state.result += ",\"items\":" + json_string_array_from_nul_list(ui_items);
 			double min_value = 0.0, max_value = 0.0, step_value = 0.0;
 			if (uniform_annotation_number(runtime, variable, "ui_min", min_value) || uniform_annotation_number(runtime, variable, "ui_minimum", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
@@ -2100,8 +2104,8 @@ namespace
 		using addon_overlay_resize_callback = std::function<bool(uint32_t, uint32_t)>;
 		using runtime_loading_callback = std::function<bool()>;
 
-		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, frame_rate_stats *stats, const shared_preview_state *shared_preview, const shared_addon_overlay_state *shared_addon_overlay, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input, addon_overlay_select_callback addon_overlay_select, addon_overlay_input_callback addon_overlay_input, addon_overlay_resize_callback addon_overlay_resize, runtime_loading_callback runtime_loading, validation_callback validation, validation_callback dependencies) :
-			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _shared_addon_overlay(shared_addon_overlay), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input)), _addon_overlay_select(std::move(addon_overlay_select)), _addon_overlay_input(std::move(addon_overlay_input)), _addon_overlay_resize(std::move(addon_overlay_resize)), _runtime_loading(std::move(runtime_loading)), _validation(std::move(validation)), _dependencies(std::move(dependencies))
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, frame_rate_stats *stats, const shared_preview_state *shared_preview, const shared_addon_overlay_state *shared_addon_overlay, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input, addon_overlay_select_callback addon_overlay_select, addon_overlay_input_callback addon_overlay_input, addon_overlay_resize_callback addon_overlay_resize, runtime_loading_callback runtime_loading, validation_callback validation, validation_callback dependencies, std::function<std::string(const std::string &, const std::string &, const std::string &)> service) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _shared_addon_overlay(shared_addon_overlay), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input)), _addon_overlay_select(std::move(addon_overlay_select)), _addon_overlay_input(std::move(addon_overlay_input)), _addon_overlay_resize(std::move(addon_overlay_resize)), _runtime_loading(std::move(runtime_loading)), _validation(std::move(validation)), _dependencies(std::move(dependencies)), _service(std::move(service))
 		{
 		}
 
@@ -2291,6 +2295,13 @@ namespace
 				{
 					return make_response(command.id, _addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}");
 				}
+                if (command.method == "call_addon_service") {
+                    std::string addon, method, request;
+                    if (!json_get_raw_string(command.params, "addon", addon) || !json_get_raw_string(command.params, "serviceMethod", method) || !json_get_raw_string(command.params, "request", request) || request.size() > 1048576)
+                        return make_error(command.id, "bad_params", "Missing or oversized service request.");
+                    if (method != "get" && method != "set" && method != "action") return make_error(command.id, "bad_params", "Unknown service method.");
+                    return make_response(command.id, _service(addon, method, request));
+                }
 				if (command.method == "list_addon_imgui_capture")
 				{
 					return make_response(command.id, _addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}");
@@ -2304,7 +2315,12 @@ namespace
 						return make_error(command.id, "not_supported", "Add-on ImGui input injection is not available.");
 					if (!_addon_imgui_input(id, value))
 						return make_error(command.id, "inject_failed", "Add-on ImGui input injection was not accepted.");
-					return make_response(command.id, "{}");
+					return make_response(command.id, "{\"status\":\"queued\",\"id\":" + json_string(id) + "}");
+				}
+				if (command.method == "cancel_addon_imgui_value") {
+					std::string id;
+					if (!json_get_raw_string(command.params, "id", id)) return make_error(command.id, "bad_params", "Missing control ID.");
+					return make_response(command.id, _service("@imgui", "cancel", id));
 				}
 				if (command.method == "open_native_addon_panel")
 				{
@@ -2600,6 +2616,7 @@ namespace
 		addon_state_callback _addon_state;
 		addon_imgui_state_callback _addon_imgui_state;
 		addon_imgui_input_callback _addon_imgui_input;
+        std::function<std::string(const std::string &, const std::string &, const std::string &)> _service;
 		addon_overlay_select_callback _addon_overlay_select;
 		addon_overlay_input_callback _addon_overlay_input;
 		addon_overlay_resize_callback _addon_overlay_resize;
@@ -3137,7 +3154,15 @@ int run_offline(int argc, wchar_t **argv)
 		const auto runtime_loading = [&]() {
 			return reshade.is_runtime_loading != nullptr && reshade.is_runtime_loading(runtime);
 		};
-		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, opts.addon_overlay_shared ? &shared_addon_overlay : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input, addon_overlay_select, addon_overlay_input, addon_overlay_resize, runtime_loading, validate_export, export_dependencies);
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, opts.addon_overlay_shared ? &shared_addon_overlay : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input, addon_overlay_select, addon_overlay_input, addon_overlay_resize, runtime_loading, validate_export, export_dependencies,
+            [&](const std::string &addon, const std::string &method, const std::string &request) -> std::string {
+                if (addon == "@imgui" && method == "cancel") {
+                    if (reshade.inject_addon_imgui_value) reshade.inject_addon_imgui_value(request.c_str(), nullptr);
+                    return "{}";
+                }
+                if (!reshade.call_addon_service) return "{\"supported\":false,\"error\":\"Service API unavailable\"}";
+                return reshade.call_addon_service(runtime, addon.c_str(), method.c_str(), request.c_str());
+            });
 		control->start();
 	}
 

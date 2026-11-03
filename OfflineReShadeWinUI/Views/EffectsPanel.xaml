@@ -105,7 +105,14 @@
 
       <ScrollViewer x:Name="AddonsPage" Grid.Row="1" Visibility="Collapsed" HorizontalScrollBarVisibility="Disabled" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}">
         <StackPanel Padding="12" Spacing="10">
-          <Expander Header="WinUI Add-on Controls" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="EffectsPanelControl12">
+          <Expander Header="Independent Add-on services" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="IndependentAddonServices">
+            <StackPanel Spacing="8">
+              <TextBlock Text="These controls use a declared business interface. Refresh to read current values. Private Add-on state is not covered by FX undo." TextWrapping="Wrap" />
+              <Button Content="Refresh services" Click="OnRefreshServices" AutomationProperties.AutomationId="RefreshAddonServices" />
+              <StackPanel x:Name="AddonServicesPanel" Spacing="8" />
+            </StackPanel>
+          </Expander>
+          <Expander Header="ImGui compatibility controls" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="EffectsPanelControl12">
             <StackPanel x:Name="AddonControlsPanel" Spacing="10" />
           </Expander>
           <TextBlock Text="{x:Bind ViewModel.AddonHistoryCapability, Mode=OneWay}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

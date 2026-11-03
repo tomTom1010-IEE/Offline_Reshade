@@ -34,6 +34,10 @@ public sealed class UniformViewModel : ObservableObject
     public double? Maximum { get; }
     public double? Step { get; }
     public bool IsReadOnly { get; }
+    public string Tooltip { get; init; } = "";
+    public string Description { get; init; } = "";
+    public string Units { get; init; } = "";
+    public string AddonService { get; init; } = "";
 
     public void SetValues(object?[] values)
     {

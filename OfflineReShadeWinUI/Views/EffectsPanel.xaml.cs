@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using OfflineReShade.Core;
 using OfflineReShade.WinUI.Controls;
 using OfflineReShade.WinUI.Services;
@@ -17,8 +18,46 @@ namespace OfflineReShade.WinUI.Views;
 
 public sealed partial class EffectsPanel : UserControl, IDisposable
 {
-    private const string ChevronDown = "", ChevronUp = "", ChevronRight = "";
+    private const string ChevronDown = "\uE70D", ChevronUp = "\uE70E", ChevronRight = "\uE76C";
     private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
+    private async void OnRefreshServices(object sender, RoutedEventArgs e)
+    {
+        await RunUiCommandAsync(async () => {
+            var result = await ViewModel.ReadAddonServicesAsync();
+            AddonServicesPanel.Children.Clear();
+            foreach (var service in result.GetProperty("services").EnumerateArray()) {
+                var addon = service.GetProperty("addon").GetString()!;
+                var group = new StackPanel { Spacing = 8 };
+                group.Children.Add(new TextBlock { Text = addon, TextWrapping = TextWrapping.Wrap });
+                if (service.GetProperty("error").GetString() is { Length: > 0 } error) { group.Children.Add(new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap }); }
+                else {
+                    var schema = service.GetProperty("schema");
+                    if (schema.TryGetProperty("scope", out var scope) && scope.GetString() == "companion_fx") group.Children.Add(new TextBlock { Text = "Companion FX parameters only. Private Add-on controls require a supported business interface.", TextWrapping = TextWrapping.Wrap });
+                    if (schema.TryGetProperty("privateAdapterError", out var adapterError) && adapterError.GetString() is { Length: > 0 } reason)
+                        group.Children.Add(new TextBlock { Text = reason, TextWrapping = TextWrapping.Wrap });
+                    foreach (var p in schema.GetProperty("parameters").EnumerateArray()) {
+                        var node = JsonNode.Parse(p.GetRawText())!.AsObject();
+                        node["addonService"] = addon; node["effectName"] = addon; node["name"] = node["id"]!.GetValue<string>();
+                        var uniform = JsonStateParser.ParseUniforms(AutomationEngine.Json(new { uniforms = new[] { node } }))[0];
+                        group.Children.Add(BuildUniformEditor(uniform));
+                    }
+                    if (schema.TryGetProperty("actions", out var actions)) foreach (var action in actions.EnumerateArray()) {
+                        var id = action.GetProperty("id").GetString()!;
+                        if (action.TryGetProperty("requiresArguments", out var required) && required.GetBoolean()) {
+                            group.Children.Add(new TextBlock { Text = $"{id} — use MCP invoke_addon_action with the declared arguments.", TextWrapping = TextWrapping.Wrap });
+                            continue;
+                        }
+                        var button = new Button { Content = action.TryGetProperty("label", out var label) ? label.GetString() : id };
+                        AutomationProperties.SetAutomationId(button, "ServiceAction_" + MakeAutomationId(addon + id));
+                        button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.InvokeAddonActionAsync(addon, id));
+                        group.Children.Add(button);
+                    }
+                }
+                AddonServicesPanel.Children.Add(group);
+            }
+            if (AddonServicesPanel.Children.Count == 0) AddonServicesPanel.Children.Add(new TextBlock { Text = "No independent service available for the loaded Add-ons.", TextWrapping = TextWrapping.Wrap });
+        });
+    }
     private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _toggledSections = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<FrameworkElement, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
@@ -625,7 +664,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         header.PointerExited += (_, _) => header.Style = restStyle;
         header.PointerCanceled += (_, _) => header.Style = restStyle;
 
-        if (item.Parameters is { } effect && (effect.Uniforms.Any(static uniform => !IsInfoOnly(uniform)) || effect.PreprocessorDefinitions.Count != 0))
+        if (item.Parameters is { } effect && (effect.Uniforms.Any(IsShown) || effect.PreprocessorDefinitions.Count != 0))
         {
             parts.Chevron = new FontIcon { Glyph = ChevronDown, FontSize = 12 };
             parts.ExpandButton = new Button { Content = parts.Chevron, Width = 32, Height = 32, Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"] };
@@ -663,8 +702,9 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         return false;
     }
 
-    // "radio" uniforms without items only carry help text (ui_text), which the runtime does not report.
+    // "radio" uniforms without items only carry help text (ui_text); show that text, or nothing if it is empty.
     private static bool IsInfoOnly(UniformViewModel uniform) => uniform.UiType == "radio" && uniform.Items.Length == 0;
+    private static bool IsShown(UniformViewModel uniform) => !IsInfoOnly(uniform) || uniform.Description.Length != 0;
 
     private bool UniformMatchesQuery(UniformViewModel uniform) =>
         uniform.Label.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase) || uniform.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase);
@@ -1070,7 +1110,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             if (stopKinds.Contains(control.Kind, StringComparer.Ordinal))
                 break;
 
-            if (control.IsTreeNode || control.IsCollapsingHeader)
+            if (control.IsTreeNode)
             {
                 ++index;
                 StackPanel childPanel;
@@ -1132,7 +1172,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             {
                 ++index;
                 var popupPanel = control.IsOpen
-                    ? BuildAddonControlSequence(controls, ref index, "popup_end")
+                    ? BuildAddonControlSequence(controls, ref index, control.Kind == "combo_begin" ? "combo_end" : "popup_end")
                     : new StackPanel { Spacing = 8 };
                 if (index < controls.Count && controls[index].IsPopupEnd)
                     ++index;
@@ -1167,7 +1207,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             if (control.IsTreeEnd || control.IsTabBarEnd || control.IsTabItemEnd || control.IsPopupEnd || control.IsMenuEnd)
                 break;
 
-            var editor = BuildAddonControlEditor(control);
+            var editor = new ContentControl { Content = BuildAddonControlEditor(control), IsEnabled = control.IsEnabled, HorizontalContentAlignment = HorizontalAlignment.Stretch };
             panel.Children.Add(editor);
             lastElement = editor;
             ++index;
@@ -1733,7 +1773,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private FrameworkElement BuildEffectPanel(EffectControlViewModel effect)
     {
         var panel = new StackPanel { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
-        var uniforms = effect.Uniforms.Where(static uniform => !IsInfoOnly(uniform)).ToArray();
+        var uniforms = effect.Uniforms.Where(IsShown).ToArray();
         var definitions = effect.PreprocessorDefinitions.ToArray();
         if (_effectQuery.Length != 0 && !effect.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase))
         {
@@ -1749,7 +1789,8 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             var groupPanel = new StackPanel { Spacing = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
             foreach (var uniform in group)
                 groupPanel.Children.Add(BuildUniformEditor(uniform));
-            panel.Children.Add(showHeaders ? CreateCategorySection(effect.Name, group.Key, groupPanel, collapsedByDefault: false) : groupPanel);
+            // Sections that only hold help text (e.g. Marty's "overview / help") start closed.
+            panel.Children.Add(showHeaders ? CreateCategorySection(effect.Name, group.Key, groupPanel, collapsedByDefault: group.All(IsInfoOnly)) : groupPanel);
         }
 
         if (definitions.Length != 0)
@@ -1873,15 +1914,40 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private FrameworkElement BuildUniformEditor(UniformViewModel uniform)
     {
         var panel = new StackPanel { Spacing = 2, HorizontalAlignment = HorizontalAlignment.Stretch };
+        if (IsInfoOnly(uniform))
+        {
+            panel.Children.Add(new TextBlock { Text = uniform.Description, Style = (Style)Application.Current.Resources["SecondaryTextStyle"], TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+            return panel;
+        }
+        // ui_type "button" is a momentary shader action, not a stored value.
+        if (uniform.AddonService.Length == 0 && !uniform.IsReadOnly && uniform.UiType == "button" && uniform.Type == "bool")
+        {
+            var button = new Button { Content = uniform.Label.Trim(), HorizontalAlignment = HorizontalAlignment.Left };
+            if (uniform.Tooltip.Length != 0) ToolTipService.SetToolTip(button, uniform.Tooltip);
+            AutomationProperties.SetName(button, uniform.Label.Trim());
+            AutomationProperties.SetAutomationId(button, "UniformButton_" + MakeAutomationId(uniform.Id));
+            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.PressUniformAsync(uniform));
+            panel.Children.Add(button);
+            return panel;
+        }
+
         var header = new Grid { ColumnSpacing = 4, MinHeight = 32 };
         header.ColumnDefinitions.Add(new ColumnDefinition());
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var label = new TextBlock { Text = uniform.Label, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
-        if (!string.Equals(uniform.Label, uniform.Name, StringComparison.Ordinal)) ToolTipService.SetToolTip(label, uniform.Name);
+        var tooltip = uniform.Tooltip.Length != 0 ? uniform.Tooltip : string.Equals(uniform.Label, uniform.Name, StringComparison.Ordinal) ? "" : uniform.Name;
+        if (tooltip.Length != 0) ToolTipService.SetToolTip(label, tooltip);
         header.Children.Add(label);
+        // Units and the logarithmic-scale marker sit just before the value.
+        var meta = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        if (uniform.Units.Length != 0) meta.Children.Add(new TextBlock { Text = uniform.Units, Style = (Style)Application.Current.Resources["SecondaryCaptionStyle"], VerticalAlignment = VerticalAlignment.Center });
+        Grid.SetColumn(meta, 1);
+        header.Children.Add(meta);
         panel.Children.Add(header);
+        if (uniform.Description.Length != 0)
+            panel.Children.Add(new TextBlock { Text = uniform.Description, Style = (Style)Application.Current.Resources["SecondaryCaptionStyle"], TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4) });
 
         if (uniform.IsReadOnly)
         {
@@ -1899,13 +1965,17 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             return panel;
         }
 
-        var reset = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Width = 28, Height = 28, Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"] };
+        var reset = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 12 }, Width = 28, Height = 28, Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"] };
         AutomationProperties.SetAutomationId(reset, "Reset_" + MakeAutomationId(uniform.Id));
         AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
         ToolTipService.SetToolTip(reset, "Reset to shader default (can be undone)");
         reset.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.ResetUniformAsync(uniform));
-        Grid.SetColumn(reset, 3);
-        header.Children.Add(reset);
+        // Add-on service parameters have no shader default to restore.
+        if (uniform.AddonService.Length == 0)
+        {
+            Grid.SetColumn(reset, 3);
+            header.Children.Add(reset);
+        }
 
         var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
         if (hasChoiceEditor)
@@ -1956,9 +2026,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             return panel;
         }
 
-        var indicator = CreateLogIndicator(_fxLogIndicators);
-        Grid.SetColumn(indicator, 1);
-        header.Children.Add(indicator);
+        meta.Children.Add(CreateLogIndicator(_fxLogIndicators));
 
         // Exact renderer values are kept apart from the rounded display text, so editing one
         // component never re-sends a rounded copy of the others.
@@ -1969,6 +2037,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var editorEpoch = _controlEpoch;
         var textRevision = 0;
         var updatingText = false;
+        Action? valuesChanged = null;
         double[] CurrentValues(int changedIndex = -1, double changedValue = 0)
         {
             var values = exact.ToArray();
@@ -2005,6 +2074,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 sliders[i].SetMappedValue(values[i], false);
                 ShowValue(i, values[i]);
             }
+            valuesChanged?.Invoke();
         }
         _uniformTextCommits.Add((panel, CommitTextAsync));
 
@@ -2025,8 +2095,12 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
             slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
             _fxMappedSliders.Add(slider);
-            slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
-            slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            // Service parameters are private Add-on state outside FX history, so they skip undo gestures.
+            if (uniform.AddonService.Length == 0)
+            {
+                slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
+                slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            }
 
             var textBox = new TextBox
             {
@@ -2050,6 +2124,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 dirty[componentIndex] = false;
                 ShowValue(componentIndex, args.Value);
                 QueueUniformUpdate(uniform, values.Length == 1 ? values[0] : values);
+                valuesChanged?.Invoke();
             };
             textBox.KeyDown += async (_, args) =>
             {
@@ -2087,6 +2162,53 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             Grid.SetColumn(textBox, 2);
             row.Children.Add(textBox);
             panel.Children.Add(row);
+        }
+
+        if (string.Equals(uniform.UiType, "color", StringComparison.OrdinalIgnoreCase) && exact.Length is 3 or 4)
+        {
+            // The picker works in 0-1; HDR or out-of-gamut values stay editable in the numeric rows.
+            static byte Channel(double value) => (byte)Math.Round(Math.Clamp(value, 0, 1) * 255);
+            Windows.UI.Color CurrentColor() => Windows.UI.Color.FromArgb(exact.Length == 4 ? Channel(exact[3]) : (byte)255, Channel(exact[0]), Channel(exact[1]), Channel(exact[2]));
+            var fill = new SolidColorBrush(CurrentColor());
+            var picker = new ColorPicker { Color = CurrentColor(), IsAlphaEnabled = exact.Length == 4, IsMoreButtonVisible = true };
+            AutomationProperties.SetName(picker, uniform.Label);
+            AutomationProperties.SetAutomationId(picker, "UniformColor_" + MakeAutomationId(uniform.Id));
+            var flyout = new Flyout { Content = picker };
+            var swatch = new Button
+            {
+                Content = new Border { Width = 32, Height = 20, CornerRadius = new CornerRadius(4), Background = fill, Style = (Style)Application.Current.Resources["ColorSwatchStyle"] },
+                Padding = new Thickness(4),
+                Style = (Style)Application.Current.Resources["SubtleIconButtonStyle"],
+                Flyout = flyout
+            };
+            AutomationProperties.SetName(swatch, "Pick colour for " + uniform.Label);
+            ToolTipService.SetToolTip(swatch, "Pick a colour");
+            valuesChanged = () => fill.Color = CurrentColor();
+            var syncingPicker = false;
+            picker.ColorChanged += (_, args) =>
+            {
+                if (syncingPicker) return;
+                var color = args.NewColor;
+                var channels = new[] { color.R / 255.0, color.G / 255.0, color.B / 255.0, color.A / 255.0 };
+                for (var i = 0; i < exact.Length; ++i)
+                {
+                    exact[i] = channels[i];
+                    dirty[i] = false;
+                    sliders[i].SetMappedValue(channels[i], false);
+                    ShowValue(i, channels[i]);
+                }
+                fill.Color = CurrentColor();
+                QueueUniformUpdate(uniform, exact.ToArray());
+            };
+            // One picker session is one undo step, like one slider drag.
+            flyout.Opened += (_, _) =>
+            {
+                syncingPicker = true; picker.Color = CurrentColor(); syncingPicker = false;
+                if (uniform.AddonService.Length == 0) ViewModel.BeginUniformGesture();
+            };
+            if (uniform.AddonService.Length == 0) flyout.Closed += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            Grid.SetColumn(swatch, 2);
+            header.Children.Add(swatch);
         }
 
         return panel;

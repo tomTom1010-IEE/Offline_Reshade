@@ -83,7 +83,7 @@ public sealed partial class AutomationEngine
         }
         var reset = method == "set_preset" || method == "open_input" && (_current().ColorPath.Length == 0 || ReplacesPreset(method, args));
         var response = await ExecuteMutationAsync(method, args, token);
-        if (reset) _history.ResetContext();
+        if (reset) { _history.ResetContext(); _martyRecoveryError = null; }
         return response;
     }
 }

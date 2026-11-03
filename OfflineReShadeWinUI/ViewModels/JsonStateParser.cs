@@ -46,7 +46,8 @@ public static class JsonStateParser
                 GetStringArray(item, "items"),
                 GetNullableDouble(item, "min"),
                 GetNullableDouble(item, "max"),
-                GetNullableDouble(item, "step"), item.TryGetProperty("readOnly", out var readOnly) && readOnly.ValueKind == JsonValueKind.True));
+                GetNullableDouble(item, "step"), item.TryGetProperty("readOnly", out var readOnly) && readOnly.ValueKind == JsonValueKind.True)
+                { Tooltip = GetString(item, "ui_tooltip"), Description = GetString(item, "ui_text"), Units = GetString(item, "ui_units"), AddonService = GetString(item, "addonService") });
         }
 
         return result;
@@ -285,7 +286,7 @@ public static class JsonStateParser
                 GetString(control, "min"),
                 GetString(control, "max"),
                 GetStringArray(control, "items"),
-                GetInt(control, "components")));
+                GetInt(control, "components")) { IsEnabled = !control.TryGetProperty("enabled", out var enabled) || enabled.ValueKind != JsonValueKind.False });
         }
 
         return result;
@@ -294,6 +295,7 @@ public static class JsonStateParser
     private static bool IsRedrawableAddonControl(string kind)
     {
         return kind == "button" ||
+            kind == "combo_begin" || kind == "combo_end" ||
             kind == "checkbox" ||
             kind == "combo" ||
             kind == "list_box" ||

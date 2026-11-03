@@ -7,6 +7,7 @@
 
 #include "reshade.hpp"
 #include "offline_contract.hpp"
+#include "offline_addon_service.hpp"
 #include "addon_manager.hpp"
 #include "runtime.hpp"
 #include "dll_log.hpp"
@@ -15,6 +16,7 @@
 #include <cstring> // std::strlen
 #include <fstream>
 #include <deque>
+#include <Windows.h>
 
 namespace
 {
@@ -278,6 +280,7 @@ bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
 		json += ",\"apiVersion\":" + std::to_string(info.api_version);
 		json += ",\"external\":" + std::string(info.external ? "true" : "false");
 		json += ",\"loaded\":" + std::string(info.handle != nullptr ? "true" : "false");
+		json += ",\"businessApiVersion\":" + std::string(info.handle && GetProcAddress(static_cast<HMODULE>(info.handle), "OfflineReShadeAddonServiceV1") ? "1" : "0");
 		json += ",\"events\":[";
 		bool first_event = true;
 		bool has_limited_event = false;
@@ -297,7 +300,11 @@ bool ReShadeGetAddonOverlayStateJson(char *value, size_t *size)
 			json += ",\"support\":" + reshade_json_string(support) + '}';
 		}
 		json += ']';
-		json += ",\"offlineCompatibility\":" + reshade_json_string(has_limited_event ? "partial" : "runtime_compatible");
+		const bool requires_camera = info.file == "MartysMods_ParallaxDOF.addon64" || info.name == "MARTYSMODS Parallax DOF";
+		json += ",\"offlineCompatibility\":" + reshade_json_string(requires_camera ? "requires_game_camera" : (has_limited_event ? "partial" : "events_supported"));
+		json += ",\"capabilities\":{\"schemaVersion\":1,\"eventSupport\":" + reshade_json_string(has_limited_event ? "partial" : "supported") +
+			",\"renderSupport\":" + reshade_json_string(requires_camera ? "requires_igcs_camera" : "not_verified") +
+			",\"uiSupport\":\"imgui_compatibility\",\"privateStateHistory\":false}";
 		const bool has_event_overlay = std::any_of(info.event_callbacks.cbegin(), info.event_callbacks.cend(),
 			[](const std::pair<uint32_t, void *> &event) { return event.first == static_cast<uint32_t>(reshade::addon_event::reshade_overlay); });
 		json += ",\"hasEventOverlay\":" + std::string(has_event_overlay ? "true" : "false");
@@ -569,6 +576,23 @@ void ReShadeBeginPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 	if (reshade::api::command_list *const immediate_command_list = queue->get_immediate_command_list())
 		reshade::invoke_addon_event<reshade::addon_event::execute_command_list>(queue, immediate_command_list);
 	reshade::invoke_addon_event<reshade::addon_event::present>(queue, swapchain, nullptr, nullptr, 0, nullptr);
+}
+
+extern "C" __declspec(dllexport) const char *ReShadeCallAddonService(reshade::api::effect_runtime *runtime, const char *addon, const char *method, const char *request)
+{
+	static thread_local std::string response;
+	response = "{\"supported\":false,\"error\":\"No independent service for this Add-on\"}";
+	if (!runtime || !addon || !method || !request || (std::strcmp(method, "get") && std::strcmp(method, "set") && std::strcmp(method, "action"))) return response.c_str();
+	for (const auto &info : reshade::addon_loaded_info) {
+		if (!info.handle || info.name != addon) continue;
+		const auto service = reinterpret_cast<offline_addon_service_v1>(GetProcAddress(static_cast<HMODULE>(info.handle), "OfflineReShadeAddonServiceV1"));
+		if (!service) break;
+		const char *payload = service(runtime, method, request);
+		if (!payload || strnlen(payload, 1048577) > 1048576) { response = "{\"supported\":false,\"error\":\"Invalid service response\"}"; break; }
+		response = "{\"supported\":true,\"payload\":" + reshade_json_string(payload) + "}";
+		break;
+	}
+	return response.c_str();
 }
 
 void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
