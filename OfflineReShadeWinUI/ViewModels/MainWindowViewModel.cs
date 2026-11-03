@@ -460,6 +460,28 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         await RefreshControlStateAsync();
     }
 
+    public async Task SetTechniquesStateAsync(IReadOnlyList<TechniqueViewModel> techniques, bool enabled)
+    {
+        try
+        {
+            foreach (var technique in techniques.Where(technique => technique.IsEnabled != enabled))
+            {
+                await ExecuteOperationAsync("set_technique_state", new { id = technique.Id, enabled });
+                technique.IsEnabled = enabled;
+            }
+        }
+        finally
+        {
+            await RefreshControlStateAsync();
+        }
+    }
+
+    public async Task ReorderEffectsAsync(IReadOnlyList<string> orderedEffectNames)
+    {
+        try { await ReorderEnabledEffectsAsync(orderedEffectNames); }
+        finally { await RefreshControlStateAsync(); }
+    }
+
     public async Task ReorderTechniquesAsync(IReadOnlyList<TechniqueViewModel> techniques)
     {
         if (!_session.IsConnected || techniques.Count == 0)
@@ -478,31 +500,6 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             await RefreshControlStateAsync();
             throw;
         }
-    }
-
-    public IReadOnlyList<string> MoveEffect(string draggedEffectName, string targetEffectName, bool insertAfter)
-    {
-        var effects = Effects.ToList();
-        var from = effects.FindIndex(effect => string.Equals(effect.Name, draggedEffectName, StringComparison.OrdinalIgnoreCase));
-        var to = effects.FindIndex(effect => string.Equals(effect.Name, targetEffectName, StringComparison.OrdinalIgnoreCase));
-        if (from < 0 || to < 0 || from == to)
-            return effects.Select(static effect => effect.Name).ToArray();
-
-        var moving = effects[from];
-        effects.RemoveAt(from);
-        if (from < to)
-            --to;
-        if (insertAfter)
-            ++to;
-
-        to = Math.Clamp(to, 0, effects.Count);
-        effects.Insert(to, moving);
-
-        Effects.Clear();
-        foreach (var effect in effects)
-            Effects.Add(effect);
-
-        return effects.Select(static effect => effect.Name).ToArray();
     }
 
     public async Task ReorderEnabledEffectsAsync(IReadOnlyList<string> orderedEffectNames)

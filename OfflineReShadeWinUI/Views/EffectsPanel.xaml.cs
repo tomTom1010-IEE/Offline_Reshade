@@ -17,8 +17,14 @@ namespace OfflineReShade.WinUI.Views;
 
 public sealed partial class EffectsPanel : UserControl, IDisposable
 {
+    private const string ChevronDown = "", ChevronUp = "", ChevronRight = "";
+    private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
     private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<Expander, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
+    private readonly HashSet<string> _toggledSections = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<FrameworkElement, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
+    private List<string> _activeEffectOrder = new();
+    private string _effectQuery = string.Empty;
+    private bool _updatingMasterSwitch;
     private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly Dictionary<string, Action<AddonImGuiControlViewModel>> _addonControlValueUpdaters = new();
     private readonly List<MappedSlider> _fxMappedSliders = new();
@@ -56,7 +62,6 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         _addonOverlayPreviewTimer.Tick += (_, _) => RenderAddonOverlayFrame();
         _addonInputMoveTimer.Interval = TimeSpan.FromMilliseconds(16);
         _addonInputMoveTimer.Tick += (_, _) => FlushAddonOverlayMouseMove();
-        EffectsList.SizeChanged += (_, _) => UpdateControlsPanelWidth();
         ViewModel.ControlsChanged += BuildControls;
         ViewModel.AddonControlsChanged += BuildAddonControls;
         ViewModel.AddonControlValuesChanged += UpdateAddonControlValues;
@@ -89,6 +94,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             if (!ViewModel.IsPreviewRunning) { _addonOverlayPreview.Dispose(); _addonGpuFailures = 0; _addonRetryAt = DateTimeOffset.MinValue; _addonGpuFailed = false; }
             _activeNativeAddonOverlayId = string.Empty;
         }
+        if (args.PropertyName is nameof(MainWindowViewModel.IsEffectsLoading) or nameof(MainWindowViewModel.IsPreviewRunning)) UpdateEffectsState();
         if (args.PropertyName == nameof(MainWindowViewModel.SharedAddonOverlayHandle)) { _lastRequestedAddonOverlayWidth = _lastRequestedAddonOverlayHeight = 0; }
         if (args.PropertyName is nameof(MainWindowViewModel.IsSettingsOpen) or nameof(MainWindowViewModel.IsPreviewRunning) or nameof(MainWindowViewModel.SharedAddonOverlayHandle) or nameof(MainWindowViewModel.SharedAddonOverlayWidth) or nameof(MainWindowViewModel.SharedAddonOverlayHeight)) UpdateAddonOverlayHostVisibility();
     }
@@ -123,8 +129,13 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         ViewModel.AddonControlValuesChanged -= UpdateAddonControlValues; ViewModel.SubmitVisualEdits -= FlushVisibleEdits;
         ViewModel.PropertyChanged -= OnViewModelChanged; ViewModel.Settings.PropertyChanged -= OnSettingsChanged;
     }
-    private void OnControlsTabSelectionChanged(object sender, SelectionChangedEventArgs args)
+    private bool IsAddonsPageSelected => PanelSelector?.SelectedItem is { } selected && ReferenceEquals(selected, AddonsPageItem);
+    private void OnPanelSelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {
+        if (EffectsPage == null || AddonsPage == null || NativeCompatibility == null) return;
+        var addons = IsAddonsPageSelected;
+        EffectsPage.Visibility = addons ? Visibility.Collapsed : Visibility.Visible;
+        AddonsPage.Visibility = addons ? Visibility.Visible : Visibility.Collapsed;
         UpdateAddonOverlayHostVisibility();
     }
 
@@ -149,7 +160,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var selectedOverlay = (AddonOverlayTabView.SelectedItem as TabViewItem)?.Tag as AddonOverlayViewModel;
         var visible = !_addonGpuFailed && ViewModel.IsPreviewRunning &&
                       !ViewModel.IsSettingsOpen && _paneVisible &&
-                      ControlsTabView.SelectedIndex == 1 && NativeCompatibility.IsExpanded &&
+                      IsAddonsPageSelected && NativeCompatibility.IsExpanded &&
                       NativeAddonOverlaySwitch.IsOn &&
                       selectedOverlay != null;
 
@@ -372,7 +383,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         if (_isClosing || !ViewModel.IsPreviewRunning ||
             ViewModel.IsSettingsOpen ||
-            ControlsTabView.SelectedIndex != 1 || !NativeCompatibility.IsExpanded ||
+            !IsAddonsPageSelected || !NativeCompatibility.IsExpanded ||
             !NativeAddonOverlaySwitch.IsOn ||
             ViewModel.SharedAddonOverlayHandle == 0 ||
             ViewModel.SharedAddonOverlayWidth == 0 ||
@@ -405,7 +416,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         if (!ViewModel.IsPreviewRunning ||
             ViewModel.IsSettingsOpen ||
-            ControlsTabView.SelectedIndex != 1 || !NativeCompatibility.IsExpanded ||
+            !IsAddonsPageSelected || !NativeCompatibility.IsExpanded ||
             !NativeAddonOverlaySwitch.IsOn)
             return;
 
@@ -435,90 +446,326 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         _controlEpoch++;
         _uniformTextCommits.Clear();
-        ControlsPanel.Children.Clear();
         _fxMappedSliders.Clear();
         _fxLogIndicators.Clear();
+        _effectEditors.Clear();
         AddonsPanel.Children.Clear();
         AddonControlsPanel.Children.Clear();
-        UpdateControlsPanelWidth();
 
-        var effectsEnabled = new CheckBox
-        {
-            Content = "Effects Enabled",
-            IsChecked = ViewModel.EffectsEnabled,
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        effectsEnabled.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetEffectsEnabledAsync(true));
-        effectsEnabled.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetEffectsEnabledAsync(false));
-        AutomationProperties.SetAutomationId(effectsEnabled, "EffectsEnabled");
-        ControlsPanel.Children.Add(effectsEnabled);
-
-        var techniquePanel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        var techniques = CreateSectionExpander("Techniques", false, new ScrollViewer { Content = techniquePanel, MaxHeight = 180 });
-        techniques.MaxHeight = 240;
-        techniques.Expanding += (_, _) => {
-            if (techniquePanel.Children.Count != 0) return;
-            foreach (var technique in ViewModel.Techniques) {
-                var checkBox = new CheckBox { Content = technique.Label, IsChecked = technique.IsEnabled, Tag = technique };
-                checkBox.Checked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, true));
-                checkBox.Unchecked += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync((TechniqueViewModel)checkBox.Tag, false));
-                AutomationProperties.SetAutomationId(checkBox, "Technique_" + MakeAutomationId(technique.Id));
-                techniquePanel.Children.Add(checkBox);
-            }
-        };
-        ControlsPanel.Children.Add(techniques);
+        _updatingMasterSwitch = true;
+        EffectsMasterSwitch.IsOn = ViewModel.EffectsEnabled;
+        _updatingMasterSwitch = false;
         FilterEffects();
-
-        if (ViewModel.Techniques.Count == 0 && ViewModel.Effects.Count == 0)
-        {
-            ControlsPanel.Children.Add(new TextBlock
-            {
-                Text = "Start preview to load ReShade controls.",
-                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
-                TextWrapping = TextWrapping.Wrap
-            });
-        }
 
         BuildAddons();
         BuildAddonControls();
     }
 
-    private void OnEffectSearchChanged(object sender, TextChangedEventArgs args) { _effectSearchTimer.Stop(); _effectSearchTimer.Start(); }
+    private async void OnEffectsMasterToggled(object sender, RoutedEventArgs args)
+    {
+        if (_updatingMasterSwitch || EffectsMasterSwitch.IsOn == ViewModel.EffectsEnabled) return;
+        if (!await RunUiCommandAsync(() => ViewModel.SetEffectsEnabledAsync(EffectsMasterSwitch.IsOn)))
+        {
+            _updatingMasterSwitch = true;
+            EffectsMasterSwitch.IsOn = ViewModel.EffectsEnabled;
+            _updatingMasterSwitch = false;
+        }
+    }
+
+    private void OnEffectSearchChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args) { _effectSearchTimer.Stop(); _effectSearchTimer.Start(); }
+
+    // Active effects keep their render order; available effects are sorted by name.
     private void FilterEffects()
     {
         if (EffectsList == null) return;
+        var query = _effectQuery = EffectSearchBox.Text.Trim();
+        var parameters = ViewModel.Effects.ToDictionary(static effect => effect.Name, StringComparer.OrdinalIgnoreCase);
+        var techniques = ViewModel.Techniques.GroupBy(static technique => technique.EffectName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(static group => group.Key, static group => (IReadOnlyList<TechniqueViewModel>)group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        _activeEffectOrder = ViewModel.Techniques.Where(static technique => technique.IsEnabled)
+            .Select(static technique => technique.EffectName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var activeNames = new HashSet<string>(_activeEffectOrder, StringComparer.OrdinalIgnoreCase);
+
+        var active = _activeEffectOrder.Select(name => new EffectListItem(name, techniques[name], parameters.GetValueOrDefault(name)))
+            .Where(item => item.Matches(query)).ToList();
+        var available = techniques.Keys.Where(name => !activeNames.Contains(name)).OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+            .Select(name => new EffectListItem(name, techniques[name], null)).Where(item => item.Matches(query)).ToList();
+
+        var items = new List<EffectListItem>();
+        if (active.Count != 0 || (query.Length == 0 && available.Count != 0))
+            items.Add(EffectListItem.Section("Active", active.Count));
+        if (active.Count == 0 && query.Length == 0 && available.Count != 0)
+            items.Add(EffectListItem.Hint("No effects are on. Switch one on below."));
+        items.AddRange(active);
+        if (available.Count != 0)
+        {
+            items.Add(EffectListItem.Section("Available", available.Count));
+            items.AddRange(available);
+        }
+
+        EffectsList.ItemsSource = items;
+        UpdateEffectsState();
+    }
+
+    private void UpdateEffectsState()
+    {
+        if (EffectsList == null) return;
+        EffectsMasterSwitch.IsEnabled = ViewModel.IsPreviewRunning && ViewModel.Techniques.Count != 0;
         var query = EffectSearchBox.Text.Trim();
-        EffectsList.ItemsSource = ViewModel.Effects.Where(e => query.Length == 0 || e.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-            e.Uniforms.Any(u => u.Label.Contains(query, StringComparison.OrdinalIgnoreCase) || u.Name.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+        var hasRows = EffectsList.ItemsSource is IEnumerable<EffectListItem> items && items.Any(static item => item.Kind == EffectListItemKind.Effect);
+        (string Title, string Message)? empty = hasRows ? null
+            : ViewModel.Techniques.Count != 0 ? ($"No matches for “{query}”", "Search looks at effect, pass and parameter names.")
+            : ViewModel.IsEffectsLoading ? ("Compiling effects…", "The first compile of a large effect folder can take a while.")
+            : !ViewModel.IsPreviewRunning ? ("No image open", "Open an image or listen for game output to load effects.")
+            : ("No effects found", "Add .fx files to the effects folder, or choose another folder in Settings.");
+        EffectsEmptyState.Visibility = empty == null ? Visibility.Collapsed : Visibility.Visible;
+        EffectsList.Visibility = empty == null ? Visibility.Visible : Visibility.Collapsed;
+        if (empty is { } state) { EffectsEmptyTitle.Text = state.Title; EffectsEmptyMessage.Text = state.Message; }
     }
-    private void OnEffectExpanderLoaded(object sender, RoutedEventArgs args)
+
+    private sealed class EffectRowParts(EffectListItem item)
     {
-        var expander = (Expander)sender;
-        if (expander.DataContext is not EffectControlViewModel effect) return;
-        expander.Tag = effect.Name; expander.Header = CreateEffectHeader(effect);
-        expander.AllowDrop = true; expander.DragOver -= OnEffectDragOver; expander.Drop -= OnEffectDrop;
-        expander.DragOver += OnEffectDragOver; expander.Drop += OnEffectDrop;
-        expander.IsExpanded = _expandedEffects.Contains(effect.Name);
-        if (expander.IsExpanded) PopulateEffect(expander);
+        public EffectListItem Item { get; } = item;
+        public StackPanel? Parameters { get; set; }
+        public FontIcon? Chevron { get; set; }
+        public Button? ExpandButton { get; set; }
     }
-    private void OnEffectExpanding(Expander sender, ExpanderExpandingEventArgs args) { if (sender.Tag is string name) _expandedEffects.Add(name); PopulateEffect(sender); }
-    private void OnEffectCollapsed(Expander sender, ExpanderCollapsedEventArgs args) { if (sender.Tag is string name) _expandedEffects.Remove(name); ReleaseEffect(sender); }
-    private void OnEffectExpanderUnloaded(object sender, RoutedEventArgs args) => ReleaseEffect((Expander)sender);
-    private void PopulateEffect(Expander expander)
+
+    private void OnEffectRowDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args) => BindEffectRow((ContentControl)sender);
+    private void OnEffectRowLoaded(object sender, RoutedEventArgs args) => BindEffectRow((ContentControl)sender);
+    private void OnEffectRowUnloaded(object sender, RoutedEventArgs args) => ClearEffectRow((ContentControl)sender);
+
+    // List containers are recycled, so rows are rebuilt whenever their item changes.
+    private void BindEffectRow(ContentControl host)
     {
-        if (_effectEditors.ContainsKey(expander) || expander.DataContext is not EffectControlViewModel effect) return;
+        if (host.DataContext is not EffectListItem item) { ClearEffectRow(host); return; }
+        if (ReferenceEquals(host.Tag, item) && host.Content != null) return;
+        ClearEffectRow(host);
+        host.Tag = item;
+        host.Content = item.Kind switch
+        {
+            EffectListItemKind.Section => CreateSectionHeader(item),
+            EffectListItemKind.Hint => new TextBlock { Text = item.Name, Style = (Style)Application.Current.Resources["SecondaryTextStyle"], TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 0, 4, 8) },
+            _ => CreateEffectRow(item)
+        };
+    }
+
+    private void ClearEffectRow(ContentControl host)
+    {
+        if (host.Content is FrameworkElement { Tag: EffectRowParts parts }) ReleaseEffect(parts.Parameters);
+        host.Content = null;
+        host.Tag = null;
+    }
+
+    private static FrameworkElement CreateSectionHeader(EffectListItem item)
+    {
+        var header = new TextBlock
+        {
+            Text = item.Name.ToUpperInvariant() + "   " + item.Count.ToString(CultureInfo.InvariantCulture),
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            CharacterSpacing = 60,
+            Margin = new Thickness(4, 14, 0, 4)
+        };
+        AutomationProperties.SetHeadingLevel(header, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+        return header;
+    }
+
+    private FrameworkElement CreateEffectRow(EffectListItem item)
+    {
+        var parts = new EffectRowParts(item);
+        var row = new Grid { Background = TransparentBrush, Tag = parts };
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var header = new Grid { MinHeight = 40, ColumnSpacing = 6 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition());
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.Children.Add(header);
+
+        if (item.IsEnabled) header.Children.Add(CreateEffectGrip(item));
+
+        var toggle = CreateCompactSwitch(item.IsEnabled);
+        AutomationProperties.SetName(toggle, item.DisplayName);
+        AutomationProperties.SetAutomationId(toggle, "EffectToggle_" + MakeAutomationId(item.Name));
+        ToolTipService.SetToolTip(toggle, item.IsEnabled ? "Turn off " + item.DisplayName : "Turn on " + item.DisplayName);
+        toggle.Toggled += async (_, _) =>
+        {
+            if (toggle.IsOn == item.IsEnabled) return;
+            await RunUiCommandAsync(() => ViewModel.SetTechniquesStateAsync(item.Techniques, toggle.IsOn));
+        };
+        Grid.SetColumn(toggle, 1);
+        header.Children.Add(toggle);
+
+        var title = new TextBlock
+        {
+            Text = item.DisplayName,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = (Brush)Application.Current.Resources[item.IsEnabled ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush"]
+        };
+        ToolTipService.SetToolTip(title, item.Name + Environment.NewLine + string.Join(Environment.NewLine, item.Techniques.Select(static technique => "• " + technique.Name)));
+        Grid.SetColumn(title, 2);
+        header.Children.Add(title);
+
+        if (item.Techniques.Count > 1)
+        {
+            var passes = CreatePassesButton(item);
+            Grid.SetColumn(passes, 3);
+            header.Children.Add(passes);
+        }
+
+        header.Background = TransparentBrush;
+        header.CornerRadius = new CornerRadius(4);
+        header.PointerEntered += (_, _) => header.Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"];
+        header.PointerExited += (_, _) => header.Background = TransparentBrush;
+        header.PointerCanceled += (_, _) => header.Background = TransparentBrush;
+
+        if (item.Parameters is { } effect && (effect.Uniforms.Any(static uniform => !IsInfoOnly(uniform)) || effect.PreprocessorDefinitions.Count != 0))
+        {
+            parts.Chevron = new FontIcon { Glyph = ChevronDown, FontSize = 12 };
+            parts.ExpandButton = new Button { Content = parts.Chevron, Width = 32, Height = 32, Style = (Style)Resources["SubtleIconButtonStyle"] };
+            AutomationProperties.SetAutomationId(parts.ExpandButton, "ExpandEffect_" + MakeAutomationId(item.Name));
+            parts.ExpandButton.Click += (_, _) => SetEffectExpanded(parts, parts.Parameters?.Visibility != Visibility.Visible);
+            Grid.SetColumn(parts.ExpandButton, 4);
+            header.Children.Add(parts.ExpandButton);
+            // The whole header toggles the parameters, except its own buttons and switch.
+            header.Tapped += (_, args) =>
+            {
+                if (IsInsideControl(args.OriginalSource as DependencyObject, header)) return;
+                args.Handled = true;
+                SetEffectExpanded(parts, parts.Parameters?.Visibility != Visibility.Visible);
+            };
+
+            parts.Parameters = new StackPanel { Margin = new Thickness(30, 2, 6, 16), Visibility = Visibility.Collapsed };
+            Grid.SetRow(parts.Parameters, 1);
+            row.Children.Add(parts.Parameters);
+            SetEffectExpanded(parts, _expandedEffects.Contains(item.Name) || MatchesOnlyByParameter(item), remember: false);
+        }
+
+        if (item.IsEnabled)
+        {
+            row.AllowDrop = true;
+            row.DragOver += OnEffectDragOver;
+            row.Drop += OnEffectDrop;
+        }
+        return row;
+    }
+
+    private static bool IsInsideControl(DependencyObject? source, DependencyObject stop)
+    {
+        for (var current = source; current != null && !ReferenceEquals(current, stop); current = VisualTreeHelper.GetParent(current))
+            if (current is ButtonBase or ToggleSwitch) return true;
+        return false;
+    }
+
+    // "radio" uniforms without items only carry help text (ui_text), which the runtime does not report.
+    private static bool IsInfoOnly(UniformViewModel uniform) => uniform.UiType == "radio" && uniform.Items.Length == 0;
+
+    private bool UniformMatchesQuery(UniformViewModel uniform) =>
+        uniform.Label.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase) || uniform.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase);
+
+    // Searching for a parameter opens the effects that contain it and lists only the matches.
+    private bool MatchesOnlyByParameter(EffectListItem item) => _effectQuery.Length != 0 &&
+        !item.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase) &&
+        !item.Techniques.Any(technique => technique.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase));
+
+    private static ToggleSwitch CreateCompactSwitch(bool isOn)
+    {
+        var toggle = new ToggleSwitch { IsOn = isOn, OnContent = string.Empty, OffContent = string.Empty, MinWidth = 0, VerticalAlignment = VerticalAlignment.Center };
+        toggle.Resources["ToggleSwitchPreContentMargin"] = 0.0;
+        toggle.Resources["ToggleSwitchPostContentMargin"] = 0.0;
+        return toggle;
+    }
+
+    private FrameworkElement CreatePassesButton(EffectListItem item)
+    {
+        var menu = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.BottomEdgeAlignedRight };
+        foreach (var technique in item.Techniques)
+        {
+            var entry = new ToggleMenuFlyoutItem { Text = technique.Name, IsChecked = technique.IsEnabled };
+            AutomationProperties.SetAutomationId(entry, "Technique_" + MakeAutomationId(technique.Id));
+            entry.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetTechniqueStateAsync(technique, entry.IsChecked));
+            menu.Items.Add(entry);
+        }
+        var button = new DropDownButton
+        {
+            Content = $"{item.EnabledCount}/{item.Techniques.Count}",
+            Flyout = menu,
+            FontSize = 12,
+            Padding = new Thickness(8, 2, 6, 2),
+            MinHeight = 0,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetName(button, $"Passes in {item.DisplayName}: {item.EnabledCount} of {item.Techniques.Count} on");
+        ToolTipService.SetToolTip(button, "Passes in this effect");
+        return button;
+    }
+
+    // Rows restore their state with remember: false, so a search can open effects without keeping them open.
+    private void SetEffectExpanded(EffectRowParts parts, bool expanded, bool remember = true)
+    {
+        if (parts.Parameters == null || parts.Item.Parameters == null || parts.Chevron == null || parts.ExpandButton == null) return;
+        if (remember && expanded) _expandedEffects.Add(parts.Item.Name);
+        else if (remember) _expandedEffects.Remove(parts.Item.Name);
+        if (expanded) PopulateEffect(parts.Parameters, parts.Item.Parameters);
+        else ReleaseEffect(parts.Parameters);
+        parts.Parameters.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+        parts.Chevron.Glyph = expanded ? ChevronUp : ChevronDown;
+        AutomationProperties.SetName(parts.ExpandButton, (expanded ? "Hide parameters of " : "Show parameters of ") + parts.Item.DisplayName);
+        ToolTipService.SetToolTip(parts.ExpandButton, expanded ? "Hide parameters" : "Show parameters");
+    }
+
+    private void PopulateEffect(StackPanel host, EffectControlViewModel effect)
+    {
+        if (_effectEditors.ContainsKey(host)) return;
         var sliders = _fxMappedSliders.Count; var indicators = _fxLogIndicators.Count;
-        expander.Content = BuildEffectPanel(effect);
-        _effectEditors[expander] = (_fxMappedSliders.Skip(sliders).ToList(), _fxLogIndicators.Skip(indicators).ToList());
+        host.Children.Clear();
+        host.Children.Add(BuildEffectPanel(effect));
+        _effectEditors[host] = (_fxMappedSliders.Skip(sliders).ToList(), _fxLogIndicators.Skip(indicators).ToList());
     }
-    private void ReleaseEffect(Expander expander)
+
+    private void ReleaseEffect(StackPanel? host)
     {
-        if (_effectEditors.Remove(expander, out var editor)) {
+        if (host == null) return;
+        if (_effectEditors.Remove(host, out var editor)) {
             foreach (var slider in editor.Sliders) _fxMappedSliders.Remove(slider);
             foreach (var indicator in editor.Indicators) _fxLogIndicators.Remove(indicator);
         }
-        expander.Content = null;
+        host.Children.Clear();
     }
+
+    private void OnPanelMenuOpening(object? sender, object args)
+    {
+        var width = ViewModel.Settings.EffectsPaneWidth;
+        PanelWidthNarrow.IsChecked = width < 360;
+        PanelWidthMedium.IsChecked = width >= 360 && width < 460;
+        PanelWidthWide.IsChecked = width >= 460;
+    }
+
+    private void OnPanelWidthClick(object sender, RoutedEventArgs args)
+    {
+        if (sender is FrameworkElement { Tag: string tag } && double.TryParse(tag, NumberStyles.Float, CultureInfo.InvariantCulture, out var width))
+            ViewModel.Settings.EffectsPaneWidth = width;
+    }
+
+    private void OnExpandActiveClick(object sender, RoutedEventArgs args)
+    {
+        foreach (var effect in ViewModel.Effects) _expandedEffects.Add(effect.Name);
+        FilterEffects();
+    }
+
+    private void OnCollapseAllClick(object sender, RoutedEventArgs args)
+    {
+        _expandedEffects.Clear();
+        FilterEffects();
+    }
+
+    private void OnShowLogClick(object sender, RoutedEventArgs args) => FlyoutBase.ShowAttachedFlyout(PanelMoreButton);
 
     private void BuildAddons()
     {
@@ -1358,61 +1605,49 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         return builder.ToString();
     }
 
-    private FrameworkElement CreateEffectHeader(EffectControlViewModel effect)
+    private FrameworkElement CreateEffectGrip(EffectListItem item)
     {
-        var headerGrid = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
-        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        headerGrid.ColumnDefinitions.Add(new ColumnDefinition());
-
-        var gripIcon = new TextBlock
-        {
-            Text = "\uE700",
-            FontFamily = new FontFamily("Segoe MDL2 Assets"),
-            FontSize = 13,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
         var grip = new Button
         {
-            Width = 28,
-            Height = 28,
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(4),
-            Content = gripIcon,
-            Tag = effect.Name,
+            Width = 24,
+            Height = 32,
+            Content = new FontIcon { Glyph = "\uE76F", FontSize = 14, Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"] },
+            Style = (Style)Resources["SubtleIconButtonStyle"],
+            Tag = item.Name,
             CanDrag = true
         };
         grip.DragStarting += OnEffectDragStarting;
-        AutomationProperties.SetName(grip, "Move " + effect.Name);
-        AutomationProperties.SetAutomationId(grip, "MoveEffect_" + MakeAutomationId(effect.Name));
-        ToolTipService.SetToolTip(grip, "Drag to reorder, or open move commands");
+        AutomationProperties.SetName(grip, "Move " + item.DisplayName);
+        AutomationProperties.SetAutomationId(grip, "MoveEffect_" + MakeAutomationId(item.Name));
+        ToolTipService.SetToolTip(grip, "Drag to change the render order, or click for move commands");
         var menu = new MenuFlyout();
-        foreach (var direction in new[] { -1, 1 })
+        foreach (var (text, offset) in new[] { ("Move up", -1), ("Move down", 1), ("Move to top", int.MinValue), ("Move to bottom", int.MaxValue) })
         {
-            var item = new MenuFlyoutItem { Text = direction < 0 ? "Move up" : "Move down" };
-            item.Click += async (_, _) =>
+            var entry = new MenuFlyoutItem { Text = text };
+            entry.Click += async (_, _) =>
             {
-                var names = ViewModel.Effects.Select(x => x.Name).ToArray();
-                var index = Array.IndexOf(names, effect.Name); var target = index + direction;
-                if (index < 0 || target < 0 || target >= names.Length) return;
-                var order = ViewModel.MoveEffect(effect.Name, names[target], direction > 0);
-                await RunUiCommandAsync(() => ViewModel.ReorderEnabledEffectsAsync(order));
+                var index = _activeEffectOrder.FindIndex(name => string.Equals(name, item.Name, StringComparison.OrdinalIgnoreCase));
+                if (index < 0) return;
+                var target = Math.Clamp(offset switch { int.MinValue => 0, int.MaxValue => _activeEffectOrder.Count - 1, _ => index + offset }, 0, _activeEffectOrder.Count - 1);
+                if (target != index) await ReorderActiveEffectAsync(item.Name, _activeEffectOrder[target], target > index);
             };
-            menu.Items.Add(item);
+            menu.Items.Add(entry);
         }
         grip.Flyout = menu;
-        headerGrid.Children.Add(grip);
+        return grip;
+    }
 
-        var title = new TextBlock
-        {
-            Text = effect.Name,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        Grid.SetColumn(title, 1);
-        headerGrid.Children.Add(title);
-
-        return headerGrid;
+    private async Task ReorderActiveEffectAsync(string movingEffectName, string targetEffectName, bool insertAfter)
+    {
+        var order = _activeEffectOrder.ToList();
+        var from = order.FindIndex(name => string.Equals(name, movingEffectName, StringComparison.OrdinalIgnoreCase));
+        var to = order.FindIndex(name => string.Equals(name, targetEffectName, StringComparison.OrdinalIgnoreCase));
+        if (from < 0 || to < 0 || from == to) return;
+        order.RemoveAt(from);
+        if (from < to) --to;
+        if (insertAfter) ++to;
+        order.Insert(Math.Clamp(to, 0, order.Count), movingEffectName);
+        await RunUiCommandAsync(() => ViewModel.ReorderEffectsAsync(order));
     }
 
     private void OnEffectDragStarting(UIElement sender, DragStartingEventArgs args)
@@ -1435,28 +1670,16 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private async void OnEffectDrop(object sender, DragEventArgs args)
     {
         args.Handled = true;
-        if (sender is not FrameworkElement { Tag: string targetEffectName } target ||
-            string.IsNullOrEmpty(_draggedEffectName) ||
-            string.Equals(_draggedEffectName, targetEffectName, StringComparison.OrdinalIgnoreCase))
-        {
-            _draggedEffectName = null;
-            return;
-        }
-
         var draggedEffectName = _draggedEffectName;
         _draggedEffectName = null;
-        var insertAfter = args.GetPosition(target).Y > target.ActualHeight * 0.5;
+        if (sender is not FrameworkElement { Tag: EffectRowParts parts } target ||
+            string.IsNullOrEmpty(draggedEffectName) ||
+            string.Equals(draggedEffectName, parts.Item.Name, StringComparison.OrdinalIgnoreCase))
+            return;
 
-        var orderedEffectNames = ViewModel.MoveEffect(draggedEffectName, targetEffectName, insertAfter);
-        BuildControls();
-        await RunUiCommandAsync(() => ViewModel.ReorderEnabledEffectsAsync(orderedEffectNames));
-    }
-
-    private void UpdateControlsPanelWidth()
-    {
-        var width = Math.Max(0.0, EffectsList.ActualWidth - 24.0);
-        if (width > 0.0)
-            ControlsPanel.Width = width;
+        // Compare against the header so dropping on an expanded effect is not always "after".
+        var insertAfter = args.GetPosition(target).Y > Math.Min(target.ActualHeight, 40.0) * 0.5;
+        await ReorderActiveEffectAsync(draggedEffectName, parts.Item.Name, insertAfter);
     }
 
     private Expander CreateSectionExpander(object header, bool isExpanded, UIElement content, Thickness? contentMargin = null)
@@ -1507,39 +1730,86 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         expander.Collapsed += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, "false"));
         return expander;
     }
-    private static FrameworkElement CreateNestedSectionExpander(object header, bool isExpanded, UIElement content) =>
-        new Expander { Header = header, IsExpanded = isExpanded, Content = content,
-            HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
-
     private FrameworkElement BuildEffectPanel(EffectControlViewModel effect)
     {
-        var panel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
-
-        if (effect.PreprocessorDefinitions.Count != 0)
+        var panel = new StackPanel { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var uniforms = effect.Uniforms.Where(static uniform => !IsInfoOnly(uniform)).ToArray();
+        var definitions = effect.PreprocessorDefinitions.ToArray();
+        if (_effectQuery.Length != 0 && !effect.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase))
         {
-            var definitionsPanel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
-            foreach (var definition in effect.PreprocessorDefinitions)
-                definitionsPanel.Children.Add(BuildPreprocessorEditor(definition));
-
-            panel.Children.Add(CreateNestedSectionExpander("Preprocessor Definitions", false, definitionsPanel));
+            var matchingUniforms = uniforms.Where(UniformMatchesQuery).ToArray();
+            var matchingDefinitions = definitions.Where(definition => definition.Name.Contains(_effectQuery, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matchingUniforms.Length != 0 || matchingDefinitions.Length != 0) (uniforms, definitions) = (matchingUniforms, matchingDefinitions);
         }
 
-        foreach (var group in effect.Uniforms.GroupBy(static uniform => uniform.Category))
+        var groups = uniforms.GroupBy(static uniform => uniform.Category).ToArray();
+        var showHeaders = groups.Length > 1 || definitions.Length != 0;
+        foreach (var group in groups)
         {
-            var groupPanel = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            var groupPanel = new StackPanel { Spacing = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
             foreach (var uniform in group)
                 groupPanel.Children.Add(BuildUniformEditor(uniform));
+            panel.Children.Add(showHeaders ? CreateCategorySection(effect.Name, group.Key, groupPanel, collapsedByDefault: false) : groupPanel);
+        }
 
-            panel.Children.Add(CreateNestedSectionExpander(group.Key, true, groupPanel));
+        if (definitions.Length != 0)
+        {
+            var definitionsPanel = new StackPanel { Spacing = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
+            foreach (var definition in definitions)
+                definitionsPanel.Children.Add(BuildPreprocessorEditor(definition));
+            panel.Children.Add(CreateCategorySection(effect.Name, "Preprocessor definitions", definitionsPanel, collapsedByDefault: true));
         }
 
         return panel;
     }
 
+    // Flat, collapsible category header; remembers sections the user opened or closed.
+    private FrameworkElement CreateCategorySection(string effectName, string title, FrameworkElement content, bool collapsedByDefault)
+    {
+        var key = effectName + "::" + title;
+        var collapsed = collapsedByDefault != _toggledSections.Contains(key);
+        var chevron = new FontIcon { Glyph = collapsed ? ChevronRight : ChevronDown, FontSize = 10 };
+        var label = new TextBlock
+        {
+            Text = title.ToUpperInvariant(),
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            CharacterSpacing = 40,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var headerContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        headerContent.Children.Add(chevron);
+        headerContent.Children.Add(label);
+        var header = new Button
+        {
+            Content = headerContent,
+            Style = (Style)Resources["SubtleIconButtonStyle"],
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(4, 6, 4, 6),
+            Margin = new Thickness(-4, 0, 0, 0)
+        };
+        AutomationProperties.SetName(header, title);
+        content.Margin = new Thickness(0, 4, 0, 6);
+        content.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        header.Click += (_, _) =>
+        {
+            var nowCollapsed = content.Visibility == Visibility.Visible;
+            content.Visibility = nowCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            chevron.Glyph = nowCollapsed ? ChevronRight : ChevronDown;
+            if (nowCollapsed != collapsedByDefault) _toggledSections.Add(key); else _toggledSections.Remove(key);
+        };
+        var section = new StackPanel();
+        section.Children.Add(header);
+        section.Children.Add(content);
+        return section;
+    }
+
     private FrameworkElement BuildPreprocessorEditor(PreprocessorDefinitionViewModel definition)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(new TextBlock { Text = definition.Name, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = definition.Name, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
         var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
         row.ColumnDefinitions.Add(new ColumnDefinition());
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1574,6 +1844,19 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             TextWrapping = TextWrapping.Wrap,
             VerticalAlignment = VerticalAlignment.Center
         };
+        var indicator = CreateLogIndicator(indicatorCollection);
+
+        var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch };
+        header.ColumnDefinitions.Add(new ColumnDefinition());
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(label);
+        Grid.SetColumn(indicator, 1);
+        header.Children.Add(indicator);
+        return header;
+    }
+
+    private TextBlock CreateLogIndicator(ICollection<FrameworkElement> indicatorCollection)
+    {
         var indicator = new TextBlock
         {
             Text = "L",
@@ -1586,40 +1869,51 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         ToolTipService.SetToolTip(indicator, "Symmetric logarithmic scale");
         AutomationProperties.SetName(indicator, "Symmetric logarithmic scale enabled");
         indicatorCollection.Add(indicator);
-
-        var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch };
-        header.ColumnDefinitions.Add(new ColumnDefinition());
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(label);
-        Grid.SetColumn(indicator, 1);
-        header.Children.Add(indicator);
-        return header;
+        return indicator;
     }
 
+    // Each parameter is a label row (label, compact editor, reset) plus, for numbers, full-width sliders.
     private FrameworkElement BuildUniformEditor(UniformViewModel uniform)
     {
-        var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
-        var hasNumericSlider = !hasChoiceEditor && uniform.Type != "bool";
-        panel.Children.Add(hasNumericSlider
-            ? CreateMappedSliderLabel(uniform.Label, _fxLogIndicators)
-            : new TextBlock { Text = uniform.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        var panel = new StackPanel { Spacing = 2, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var header = new Grid { ColumnSpacing = 4, MinHeight = 32 };
+        header.ColumnDefinitions.Add(new ColumnDefinition());
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var label = new TextBlock { Text = uniform.Label, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+        if (!string.Equals(uniform.Label, uniform.Name, StringComparison.Ordinal)) ToolTipService.SetToolTip(label, uniform.Name);
+        header.Children.Add(label);
+        panel.Children.Add(header);
+
         if (uniform.IsReadOnly)
         {
-            panel.Children.Add(new TextBlock { Text = "Shader-managed value — not stored in presets", TextWrapping = TextWrapping.Wrap });
-            panel.Children.Add(new TextBlock { Text = string.Join(", ", uniform.Values.Select(x => Convert.ToString(x, CultureInfo.InvariantCulture))), TextWrapping = TextWrapping.Wrap });
+            var value = new TextBlock
+            {
+                Text = string.Join(", ", uniform.Values.Select(x => x is double or float ? FormatNumber(ToDouble(x), uniform) : Convert.ToString(x, CultureInfo.InvariantCulture))),
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+                MaxWidth = 160
+            };
+            ToolTipService.SetToolTip(value, "Managed by the shader; not stored in presets");
+            Grid.SetColumn(value, 2);
+            header.Children.Add(value);
             return panel;
         }
-        var reset = new Button { Content = "Reset", HorizontalAlignment = HorizontalAlignment.Right };
+
+        var reset = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Width = 28, Height = 28, Style = (Style)Resources["SubtleIconButtonStyle"] };
         AutomationProperties.SetAutomationId(reset, "Reset_" + MakeAutomationId(uniform.Id));
         AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
-        ToolTipService.SetToolTip(reset, "Restore the shader default (can be undone)");
+        ToolTipService.SetToolTip(reset, "Reset to shader default (can be undone)");
         reset.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.ResetUniformAsync(uniform));
-        panel.Children.Add(reset);
+        Grid.SetColumn(reset, 3);
+        header.Children.Add(reset);
 
+        var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
         if (hasChoiceEditor)
         {
-            var combo = new ComboBox { MinWidth = 180, Tag = uniform, HorizontalAlignment = HorizontalAlignment.Stretch };
+            var combo = new ComboBox { MinWidth = 120, MaxWidth = 200, Tag = uniform, VerticalAlignment = VerticalAlignment.Center };
             AutomationProperties.SetName(combo, uniform.Label);
             AutomationProperties.SetAutomationId(combo, "UniformChoice_" + MakeAutomationId(uniform.Id));
             foreach (var item in uniform.Items)
@@ -1630,86 +1924,135 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 if (combo.SelectedIndex >= 0)
                     await RunUiCommandAsync(() => ViewModel.SetUniformAsync((UniformViewModel)combo.Tag, combo.SelectedIndex));
             };
-            panel.Children.Add(combo);
+            Grid.SetColumn(combo, 2);
+            header.Children.Add(combo);
             return panel;
         }
 
         if (uniform.Type == "bool")
         {
             var components = uniform.Values.Length == 0 ? new[] { false } : uniform.Values.Select(ToBool).ToArray();
+            async Task CommitBoolAsync() => await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, components.Length == 1 ? components[0] : components.ToArray()));
+            if (components.Length == 1)
+            {
+                var toggle = CreateCompactSwitch(components[0]);
+                AutomationProperties.SetAutomationId(toggle, "UniformBool_" + MakeAutomationId(uniform.Id) + "_0");
+                AutomationProperties.SetName(toggle, uniform.Label);
+                toggle.Toggled += async (_, _) => { components[0] = toggle.IsOn; await CommitBoolAsync(); };
+                Grid.SetColumn(toggle, 2);
+                header.Children.Add(toggle);
+                return panel;
+            }
+
+            var checks = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
             for (var index = 0; index < components.Length; index++)
             {
                 var component = index;
-                var checkBox = new CheckBox { Content = components.Length == 1 ? uniform.EffectName : "Component " + (index + 1), IsChecked = components[index] };
+                var checkBox = new CheckBox { Content = ComponentName(uniform, index), IsChecked = components[index], MinWidth = 0 };
                 AutomationProperties.SetAutomationId(checkBox, "UniformBool_" + MakeAutomationId(uniform.Id) + "_" + index);
-                AutomationProperties.SetName(checkBox, uniform.Label + (components.Length == 1 ? "" : " component " + (index + 1)));
-                async void Changed(object sender, RoutedEventArgs e)
-                {
-                    components[component] = checkBox.IsChecked == true;
-                    await RunUiCommandAsync(() => ViewModel.SetUniformAsync(uniform, components.Length == 1 ? components[0] : components.ToArray()));
-                }
+                AutomationProperties.SetName(checkBox, uniform.Label + " " + ComponentName(uniform, index));
+                async void Changed(object sender, RoutedEventArgs e) { components[component] = checkBox.IsChecked == true; await CommitBoolAsync(); }
                 checkBox.Checked += Changed; checkBox.Unchecked += Changed;
-                panel.Children.Add(checkBox);
+                checks.Children.Add(checkBox);
             }
+            panel.Children.Add(checks);
             return panel;
         }
 
-        var numericValues = uniform.Values.Length == 0 ? new[] { 0.0 } : uniform.Values.Select(ToDouble).ToArray();
+        var indicator = CreateLogIndicator(_fxLogIndicators);
+        Grid.SetColumn(indicator, 1);
+        header.Children.Add(indicator);
+
+        // Exact renderer values are kept apart from the rounded display text, so editing one
+        // component never re-sends a rounded copy of the others.
+        var exact = uniform.Values.Length == 0 ? new[] { 0.0 } : uniform.Values.Select(ToDouble).ToArray();
+        var dirty = new bool[exact.Length];
         var textBoxes = new List<TextBox>();
         var sliders = new List<MappedSlider>();
         var editorEpoch = _controlEpoch;
-        var textDirty = false;
         var textRevision = 0;
         var updatingText = false;
+        double[] CurrentValues(int changedIndex = -1, double changedValue = 0)
+        {
+            var values = exact.ToArray();
+            for (var i = 0; i < values.Length; ++i)
+            {
+                if (i == changedIndex) values[i] = changedValue;
+                else if (dirty[i] && TryParseNumber(textBoxes[i].Text, out var typed)) values[i] = typed;
+            }
+            return values;
+        }
+        void ShowValue(int index, double value)
+        {
+            updatingText = true;
+            textBoxes[index].Text = FormatNumber(value, uniform);
+            updatingText = false;
+        }
         async Task CommitTextAsync()
         {
-            if (!textDirty || editorEpoch != _controlEpoch) return;
+            if (!dirty.Any(static flag => flag) || editorEpoch != _controlEpoch) return;
             var revision = textRevision;
-            if (!TryBuildNumericValue(textBoxes, out var value)) { await ViewModel.RejectUniformEditAsync(uniform); return; }
-            await ViewModel.SetUniformAsync(uniform, value);
-            if (revision == textRevision) { textDirty = false; ApplyTextValuesToSliders(textBoxes, sliders); }
+            var values = exact.ToArray();
+            for (var i = 0; i < values.Length; ++i)
+            {
+                if (!dirty[i]) continue;
+                if (!TryParseNumber(textBoxes[i].Text, out values[i])) { await ViewModel.RejectUniformEditAsync(uniform); return; }
+            }
+            await ViewModel.SetUniformAsync(uniform, values.Length == 1 ? values[0] : values);
+            if (revision != textRevision) return;
+            for (var i = 0; i < values.Length; ++i)
+            {
+                if (!dirty[i]) continue;
+                exact[i] = values[i];
+                dirty[i] = false;
+                sliders[i].SetMappedValue(values[i], false);
+                ShowValue(i, values[i]);
+            }
         }
         _uniformTextCommits.Add((panel, CommitTextAsync));
-        for (var i = 0; i < numericValues.Length; ++i)
+
+        for (var i = 0; i < exact.Length; ++i)
         {
             var componentIndex = i;
-            var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(82) });
-
             var isSlider = string.Equals(uniform.UiType, "slider", StringComparison.OrdinalIgnoreCase);
-            var minimum = uniform.Minimum ?? (isSlider ? 0.0 : numericValues[i] - Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0));
-            var maximum = uniform.Maximum ?? (isSlider ? 1.0 : numericValues[i] + Math.Max(1.0, Math.Abs(numericValues[i]) * 2.0));
+            var minimum = uniform.Minimum ?? (isSlider ? 0.0 : exact[i] - Math.Max(1.0, Math.Abs(exact[i]) * 2.0));
+            var maximum = uniform.Maximum ?? (isSlider ? 1.0 : exact[i] + Math.Max(1.0, Math.Abs(exact[i]) * 2.0));
             if (Math.Abs(maximum - minimum) < 0.000001)
                 maximum = minimum + 1.0;
 
             var step = uniform.Step ?? (uniform.Type == "float" ? 0.001 : 1.0);
-            var slider = new MappedSlider
-            {
-                Tag = uniform,
-                MinWidth = 40,
-                HorizontalAlignment = HorizontalAlignment.Stretch
-            };
-            AutomationProperties.SetName(slider, uniform.Label + " component " + (i + 1));
+            var slider = new MappedSlider { Tag = uniform, MinWidth = 40, HorizontalAlignment = HorizontalAlignment.Stretch };
+            AutomationProperties.SetName(slider, exact.Length == 1 ? uniform.Label : uniform.Label + " " + ComponentName(uniform, i));
             AutomationProperties.SetAutomationId(slider, "UniformSlider_" + MakeAutomationId(uniform.Id) + "_" + i);
-            slider.ConfigureRange(minimum, maximum, numericValues[i], step);
+            slider.ConfigureRange(minimum, maximum, exact[i], step);
             slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
             slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
             _fxMappedSliders.Add(slider);
             slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
             slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
-            var textBox = new TextBox { Text = numericValues[i].ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
-            AutomationProperties.SetName(textBox, uniform.Label + " component " + (i + 1));
+
+            var textBox = new TextBox
+            {
+                Text = FormatNumber(exact[i], uniform),
+                Width = 76,
+                MinWidth = 0,
+                MinHeight = 28,
+                Padding = new Thickness(8, 4, 6, 4),
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            AutomationProperties.SetName(textBox, exact.Length == 1 ? uniform.Label + " value" : uniform.Label + " " + ComponentName(uniform, i) + " value");
             AutomationProperties.SetAutomationId(textBox, "UniformNumber_" + MakeAutomationId(uniform.Id) + "_" + i);
-            textBox.TextChanged += (_, _) => { if (!updatingText) { textDirty = true; textRevision++; } };
+            textBox.TextChanged += (_, _) => { if (!updatingText) { dirty[componentIndex] = true; textRevision++; } };
             textBoxes.Add(textBox);
             sliders.Add(slider);
             slider.MappedValueChanged += (_, args) =>
             {
-                updatingText = true;
-                textBox.Text = args.Value.ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture);
-                updatingText = false;
-                QueueUniformUpdate(uniform, BuildNumericValue(textBoxes, componentIndex, args.Value));
+                var values = CurrentValues(componentIndex, args.Value);
+                exact[componentIndex] = args.Value;
+                dirty[componentIndex] = false;
+                ShowValue(componentIndex, args.Value);
+                QueueUniformUpdate(uniform, values.Length == 1 ? values[0] : values);
             };
             textBox.KeyDown += async (_, args) =>
             {
@@ -1719,13 +2062,33 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                     await RunUiCommandAsync(CommitTextAsync);
                 }
             };
-            textBox.LostFocus += async (_, _) =>
-            {
-                await RunUiCommandAsync(CommitTextAsync);
-            };
+            textBox.LostFocus += async (_, _) => await RunUiCommandAsync(CommitTextAsync);
 
+            if (exact.Length == 1)
+            {
+                Grid.SetColumn(textBox, 2);
+                header.Children.Add(textBox);
+                panel.Children.Add(slider);
+                continue;
+            }
+
+            // Same right-hand columns as the label row, so value boxes line up with scalar ones.
+            var row = new Grid { ColumnSpacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
+            textBox.Margin = new Thickness(4, 0, 0, 0);
+            row.Children.Add(new TextBlock
+            {
+                Text = ComponentName(uniform, i),
+                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Grid.SetColumn(slider, 1);
             row.Children.Add(slider);
-            Grid.SetColumn(textBox, 1);
+            Grid.SetColumn(textBox, 2);
             row.Children.Add(textBox);
             panel.Children.Add(row);
         }
@@ -1733,16 +2096,17 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         return panel;
     }
 
-    private static void ApplyTextValuesToSliders(IReadOnlyList<TextBox> boxes, IReadOnlyList<MappedSlider> sliders)
-    {
-        for (var i = 0; i < boxes.Count && i < sliders.Count; ++i)
-        {
-            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
-                continue;
+    private static string ComponentName(UniformViewModel uniform, int index) =>
+        (string.Equals(uniform.UiType, "color", StringComparison.OrdinalIgnoreCase) ? "RGBA" : "XYZW") is var names && index < names.Length
+            ? names[index].ToString() : (index + 1).ToString(CultureInfo.InvariantCulture);
 
-            sliders[i].SetMappedValue(value, false);
-        }
-    }
+    // Floats are shown at single precision so 0.3f reads "0.3" rather than "0.300000012".
+    private static string FormatNumber(double value, UniformViewModel uniform) => uniform.Type == "float"
+        ? value.ToString("G7", CultureInfo.InvariantCulture)
+        : Math.Round(value).ToString("0", CultureInfo.InvariantCulture);
+
+    private static bool TryParseNumber(string text, out double value) =>
+        double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
 
     private void QueueUniformUpdate(UniformViewModel uniform, object value) => ViewModel.QueueUniformEdit(uniform, value);
     private void FlushVisibleEdits()
@@ -1750,36 +2114,6 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         FlushAddonOverlayMouseMove();
         _uniformTextCommits.RemoveAll(x => x.Owner.XamlRoot == null);
         foreach (var entry in _uniformTextCommits.ToArray()) _ = RunUiCommandAsync(entry.Commit);
-    }
-
-    private static object BuildNumericValue(IReadOnlyList<TextBox> boxes, int changedIndex, double changedValue)
-    {
-        var values = new double[boxes.Count];
-        for (var i = 0; i < values.Length; ++i)
-        {
-            if (i == changedIndex)
-                values[i] = changedValue;
-            else if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]))
-                values[i] = 0;
-        }
-
-        return values.Length == 1 ? values[0] : values;
-    }
-
-    private static bool TryBuildNumericValue(IReadOnlyList<TextBox> boxes, out object value)
-    {
-        var values = new double[boxes.Count];
-        for (var i = 0; i < values.Length; ++i)
-        {
-            if (!double.TryParse(boxes[i].Text, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]) || !double.IsFinite(values[i]))
-            {
-                value = 0.0;
-                return false;
-            }
-        }
-
-        value = values.Length == 1 ? values[0] : values;
-        return true;
     }
 
     private static bool ToBool(object? value) => value is bool boolValue ? boolValue : ToDouble(value) != 0;
