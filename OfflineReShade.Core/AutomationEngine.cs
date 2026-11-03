@@ -63,7 +63,7 @@ public sealed partial class AutomationEngine
     // Only the pending-edit owner uses this entry to avoid recursively flushing itself.
     public Task<JsonElement> ExecuteSubmittedEditAsync(string method, JsonElement args, CancellationToken token = default)
     {
-        if (method is not ("set_uniform" or "reset_uniform" or "begin_edit" or "end_edit" or "set_addon_imgui_value" or "send_addon_overlay_input")) throw new ArgumentException("Not a submitted edit.");
+        if (method is not ("set_uniform" or "reset_uniform" or "begin_edit" or "end_edit" or "set_addon_imgui_value" or "send_addon_overlay_input" or "mutate_addon_service")) throw new ArgumentException("Not a submitted edit.");
         return ExecuteCoreAsync(method, args, false, token);
     }
     private async Task<JsonElement> ExecuteCoreAsync(string method, JsonElement args, bool submitPending, CancellationToken token)
@@ -71,6 +71,7 @@ public sealed partial class AutomationEngine
         // Display selection neither submits pending edits nor enters preset history.
         if (method == "set_preview_comparison") return await _call(method, args, token);
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
+        if (method == "list_addon_services") return await ListAddonServicesAsync(token);
         if (method == "get_operation_status") {
             var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();
             node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
@@ -136,6 +137,44 @@ public sealed partial class AutomationEngine
 
     private async Task<JsonElement> ExecuteMutationAsync(string method, JsonElement args, CancellationToken token)
     {
+        if (method == "mutate_addon_service") return await MutateAddonServiceAsync(args, token);
+        if (method == "press_uniform")
+        {
+            var id = args.GetProperty("id").GetString();
+            var state = await _call("list_state", null, token);
+            var control = state.GetProperty("uniforms").EnumerateArray().FirstOrDefault(u => u.GetProperty("id").GetString() == id);
+            if (control.ValueKind == JsonValueKind.Undefined || !control.TryGetProperty("uiType", out var uiType) || uiType.GetString() != "button" || control.GetProperty("type").GetString() != "bool") throw new ArgumentException("Not a boolean action button.");
+            try {
+                await _call("set_uniform", new { id, value = true }, token);
+                var before = (await _call("get_runtime_info", null, token)).GetProperty("frameCount").GetInt64();
+                for (var i = 0; i < 100; i++) {
+                    await Task.Delay(20, token);
+                    if ((await _call("get_runtime_info", null, token)).GetProperty("frameCount").GetInt64() > before) return Json(new { status = "applied" });
+                }
+                throw new TimeoutException("Renderer did not process the button action.");
+            } finally { await _call("set_uniform", new { id, value = false }, CancellationToken.None); }
+        }
+        if (method == "set_addon_imgui_value")
+        {
+            var id = args.GetProperty("id").GetString();
+            try {
+            await _call(method, args, token);
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                await Task.Delay(20, token);
+                var snapshot = await _call("list_addon_imgui_capture", null, token);
+                if (!snapshot.TryGetProperty("receipts", out var receipts)) throw new InvalidOperationException("Renderer does not support confirmed Add-on writes.");
+                foreach (var receipt in receipts.EnumerateArray())
+                {
+                    if (receipt.GetProperty("id").GetString() != id) continue;
+                    var status = receipt.GetProperty("status").GetString();
+                    if (status == "applied") return receipt.Clone();
+                    if (status is "expired" or "rejected") throw new InvalidOperationException("Add-on edit " + status + ". Refresh the controls and retry.");
+                }
+            }
+            throw new TimeoutException("Add-on edit was queued but application was not confirmed.");
+            } finally { await _call("cancel_addon_imgui_value", new { id }, CancellationToken.None); }
+        }
         if (method == "listen_input")
         {
             var input = NormalizeInput(args.Deserialize<RenderInput>(JsonOptions)!, requireFiles: false) with { WatchInput = true };

@@ -186,3 +186,12 @@
 - 18 个 FX 编译成功，列出 21 个 technique、199 个公开参数，8 类代表参数写入/读回/恢复通过；4 个 Add-on 均加载。但常用控件不能独立覆盖 Marty：未激活原生面板时仅捕获说明/许可证，离屏原生面板激活后才出现业务控件；ReLight、ReGrade+、Parallax DOF 均存在自绘回退。ReLight 的 3 类控件写回及恢复通过，LUT Manager 在提供测试 LUT 后选择与导出像素变化通过；这些结果不等于完整独立界面已通过。
 - 明确复现 ReLight 折叠分组后 6 个控件 ID 被其他参数复用，以及不存在的控件 ID 仍返回成功。另发现 ReGrade+ 的 `combo_begin` 无输入注入且被 WinUI 过滤，FX button/color 的控件语义不完整，兼容性状态没有体现 Parallax DOF 的 IGCS 外部依赖。实际 MCP 列出 33 个工具，尚无 Add-on 业务工具。
 - 建议先修稳定控件身份、写入确认和分层能力状态，再补 FX/通用控件语义，最后按受支持的业务接口建立独立 Add-on 适配并接入 MCP。现有 DLL 未提供通用业务参数的命名导出，不能承诺仅修改 WinUI 即可替代全部原生自绘界面。原始 53 个文件哈希不变，测试二进制与最新包一致。本轮仅检查和记录，既有 UI 修改保留；没有修复、重新构建或发布产品，也没有进行视觉验收或 IGCS 游戏会话测试。
+
+## Add-on 修复与跨设备交付（2026-11-03）
+
+- 先提交已验收的布局和自动尺寸修改，`f2a6e295` 已推送 `codex/first-architecture-refactor`。制作个人迁移包，包含应用、Marty 18 个 FX 及依赖、4 款 Add-on、原 Marty 预设/颜色专用预设/测试预设和 6 张示例 PNG（另含一份合成配对深度）。设置由解压目录重新生成；显式导入时备份目标设备原设置。本机原设置未改，迁移目录实测 4 个 Add-on 加载和 CLI 导出通过。
+- 第一阶段：ImGui 控件 ID 纳入会话和原生 ID 栈，校验目标、类型、数量、有限值、范围及禁用状态；回执区分 queued/applied/rejected/expired/cancelled。Core 等待读回并清理取消/超时的排队请求。Marty 实测确认原来的 6 个串位消失，隐藏/不存在 ID 被拒绝；Parallax DOF 显示 IGCS 依赖。
+- 第二阶段：FX 按钮改为瞬时动作，颜色参数增加颜色选择器并保留精确数值入口，传递提示/说明/单位；修复 BeginCombo 输入和解析、窗口分组、禁用状态及折叠头重复分支。ReGrade+ Scopes 已通过接口展开并列出选项。没有 computer use 或视觉验收。
+- 第三阶段：实现独立服务 ABI v1、WinUI 独立服务区，以及 MCP 的能力查询、独立参数写入、声明动作和 FX 按钮工具。测试 Add-on 没有 ImGui 界面，实际 MCP → 原生 → GPU 导出像素验证通过。Marty 的 LUT Manager/ReGrade+ 公开 companion FX 参数提供限定适配，写回与 FX 撤销通过；私有 LUT 选择、灯光对象、调色曲线仍需作者接口或独立实现，未宣称完成这些私有功能。契约见 [ADDON_SERVICES.md](ADDON_SERVICES.md)。
+- RPC/broker 升为 8，固定新的 SDK 头文件哈希；上游、驱动和依赖版本不变。全量发布回归 24 项通过：`build/addon-services-delivery/verification-20261103-231255.json`。其后仅修复派发时取消的清理边界，并让有原生服务的提供方优先于 companion 适配；核心测试（含派发取消）、实际独立服务/MCP/GPU 回归和 Marty 写回/撤销再次通过。
+- 最终程序包：`build/addon-services-handoff/OfflineReShade-0.8.3-win-x64-20261103-231615.zip`，SHA256 `d749c95cc627c16196ddc65afeb8d614616a77aefdfcb1cb12aa2ab08f38dbec`。MSVC 全量重编译曾遇 D8040，使用单编译进程后成功；后续 SkipBuild 只复用已编译且未再修改的 C++。一次构建因源码在验证期间变化被来源校验拒绝，稳定源码重跑后通过。所有失败记录保留，没有把失败构建作为交付结果。

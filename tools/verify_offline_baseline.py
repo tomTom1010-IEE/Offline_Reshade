@@ -16,7 +16,7 @@ def interface_snapshot(root=ROOT):
     baseline = json.loads((root / 'maintenance/baseline.json').read_text())
     # Lock public C++ layouts too: a method insertion changes the runtime vtable.
     headers = ['include/reshade.hpp', 'include/reshade_api.hpp', 'include/reshade_api_device.hpp',
-               'include/reshade_api_resource.hpp', 'include/reshade_api_pipeline.hpp', 'include/reshade_api_format.hpp', 'include/reshade_events.hpp']
+               'include/reshade_api_resource.hpp', 'include/reshade_api_pipeline.hpp', 'include/reshade_api_format.hpp', 'include/reshade_events.hpp', 'include/offline_addon_service.hpp']
     files = {name: hashlib.sha256((root / name).read_text(encoding='utf-8').encode()).hexdigest() for name in headers}
     bridge = (root / 'tools/offline_reshade_preview_bridge.cpp').read_text()
     exports = re.findall(r'extern "C" __declspec\(dllexport\) ([^{\n]+)', bridge)

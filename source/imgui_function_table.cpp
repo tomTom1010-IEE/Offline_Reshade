@@ -6,6 +6,9 @@
 #if defined(RESHADE_API_LIBRARY_EXPORT) && RESHADE_GUI && RESHADE_ADDON
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include "imgui_internal.h"
 #include <cstdarg>
 #include <cctype>
 #include <cstdio>
@@ -64,6 +67,7 @@ namespace reshade::imgui_capture
 		std::vector<std::string> items;
 		int components = 0;
 		bool changed = false;
+		bool enabled = true;
 	};
 
 	static std::mutex s_mutex;
@@ -72,6 +76,9 @@ namespace reshade::imgui_capture
 	static std::vector<widget> s_widgets;
 	static std::vector<uint32_t> s_requested_versions;
 	static std::vector<std::pair<std::string, std::string>> s_pending_inputs;
+	struct receipt { std::string id, status, value; int frame; };
+	static std::vector<receipt> s_receipts;
+	static const std::string s_session = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 
 	static thread_local bool s_active = false;
 	static thread_local std::string s_current_addon;
@@ -120,7 +127,7 @@ namespace reshade::imgui_capture
 
 	static std::string make_widget_id(const std::string &kind, const std::string &label)
 	{
-		const std::string base = s_current_addon + "|" + s_current_overlay + "|" + (s_window_stack.empty() ? s_current_overlay : s_window_stack.back()) + "|" + kind + "|" + label;
+		const std::string base = s_session + "|" + s_current_addon + "|" + s_current_overlay + "|" + (s_window_stack.empty() ? s_current_overlay : s_window_stack.back()) + "|" + kind + "|" + label + "|" + std::to_string(ImGui::GetID(label.c_str()));
 		for (auto &occurrence : s_widget_occurrences)
 		{
 			if (occurrence.first != base)
@@ -137,7 +144,7 @@ namespace reshade::imgui_capture
 	static std::string format_float(float value)
 	{
 		char buffer[64] = {};
-		std::snprintf(buffer, sizeof(buffer), "%.6g", value);
+		std::snprintf(buffer, sizeof(buffer), "%.9g", value);
 		return buffer;
 	}
 
@@ -256,6 +263,12 @@ namespace reshade::imgui_capture
 		{
 			s_frame = frame;
 			s_widgets.clear();
+			for (auto &entry : s_receipts)
+				if (entry.status == "queued" && frame > entry.frame + 2)
+				{
+					entry.status = "expired";
+					s_pending_inputs.erase(std::remove_if(s_pending_inputs.begin(), s_pending_inputs.end(), [&](const auto &p) { return p.first == entry.id; }), s_pending_inputs.end());
+				}
 		}
 	}
 
@@ -269,6 +282,10 @@ namespace reshade::imgui_capture
 
 			value = std::move(it->second);
 			s_pending_inputs.erase(it);
+			const bool enabled = !(ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled);
+			for (auto &entry : s_receipts)
+				if (entry.id == id) entry.status = enabled ? "consumed" : "rejected";
+			if (!enabled) return false;
 			return true;
 		}
 		return false;
@@ -298,6 +315,9 @@ namespace reshade::imgui_capture
 		item.items = std::move(items);
 		item.components = components;
 		item.changed = changed;
+		item.enabled = !(ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled);
+		for (auto &entry : s_receipts)
+			if (entry.id == item.id && entry.status == "consumed") { entry.status = "applied"; entry.value = item.value; }
 		s_widgets.push_back(std::move(item));
 		s_last_widget_id = s_widgets.back().id;
 	}
@@ -316,10 +336,48 @@ namespace reshade::imgui_capture
 
 	bool inject_value(const char *id, const char *value)
 	{
-		if (id == nullptr || *id == '\0' || value == nullptr)
+		if (id == nullptr || *id == '\0')
 			return false;
 
 		std::lock_guard<std::mutex> lock(s_mutex);
+		if (value == nullptr) {
+			s_pending_inputs.erase(std::remove_if(s_pending_inputs.begin(), s_pending_inputs.end(), [&](const auto &p) { return p.first == id; }), s_pending_inputs.end());
+			for (auto &r : s_receipts) if (r.id == id && r.status == "queued") r.status = "cancelled";
+			return true;
+		}
+		const auto target = std::find_if(s_widgets.begin(), s_widgets.end(), [&](const widget &w) { return w.id == id; });
+		if (!s_enabled || target == s_widgets.end() || !target->enabled || s_frame > target->frame + 2) return false;
+		const auto &kind = target->kind;
+		bool boolean = false;
+		if (kind == "checkbox" || kind == "collapsing_header" || kind == "tree_node" || kind == "tab_item_begin" || kind == "combo_begin" || kind == "popup_begin" || kind == "popup_modal_begin" || kind == "menu_begin") {
+			if (!parse_bool_value(value, boolean)) return false;
+		} else if (kind == "button" || kind == "selectable" || kind == "menu_item") {
+			if (std::strcmp(value, "click") != 0 && !parse_bool_value(value, boolean)) return false;
+		} else if (kind == "input_text" || kind == "input_text_multiline") {
+			if (std::strlen(value) > 65536) return false;
+		} else if (kind == "color" || kind == "combo" || kind == "list_box" || kind.find("float") != std::string::npos || kind.find("int") != std::string::npos) {
+			for (const char *cursor = value; *cursor;) {
+				while (*cursor && (std::isspace(static_cast<unsigned char>(*cursor)) || *cursor == ',')) ++cursor;
+				if (!*cursor) break;
+				char *end = nullptr; std::strtod(cursor, &end);
+				if (end == cursor || (*end && !std::isspace(static_cast<unsigned char>(*end)) && *end != ',')) return false;
+				cursor = end;
+			}
+			const auto numbers = parse_number_values(value);
+			if (numbers.size() != static_cast<size_t>(target->components)) return false;
+			for (double number : numbers) {
+				if (!std::isfinite(number) || std::abs(number) > 3.4e38) return false;
+				if (!target->minimum.empty() && !target->maximum.empty()) {
+					const double low = std::strtod(target->minimum.c_str(), nullptr), high = std::strtod(target->maximum.c_str(), nullptr);
+					if (high > low && (number < low || number > high)) return false;
+				}
+				if ((kind.find("int") != std::string::npos || kind == "combo" || kind == "list_box") && (std::floor(number) != number || number < -2147483648.0 || number > 2147483647.0)) return false;
+			}
+		} else return false;
+		if (s_pending_inputs.size() >= 128) return false;
+		s_receipts.erase(std::remove_if(s_receipts.begin(), s_receipts.end(), [&](const receipt &r) { return r.id == id; }), s_receipts.end());
+		if (s_receipts.size() >= 128) s_receipts.erase(s_receipts.begin());
+		s_receipts.push_back({ id, "queued", "", s_frame });
 		for (auto &pending : s_pending_inputs)
 		{
 			if (pending.first == id)
@@ -397,6 +455,12 @@ namespace reshade::imgui_capture
 				json += ',';
 			json += std::to_string(s_requested_versions[i]);
 		}
+		json += "],\"receipts\":[";
+		for (size_t i = 0; i < s_receipts.size(); ++i) {
+			if (i) json += ',';
+			const auto &r = s_receipts[i];
+			json += "{\"id\":" + json_string(r.id) + ",\"status\":" + json_string(r.status) + ",\"value\":" + json_string(r.value) + "}";
+		}
 		json += "],\"controls\":[";
 		for (size_t i = 0; i < s_widgets.size(); ++i)
 		{
@@ -423,6 +487,7 @@ namespace reshade::imgui_capture
 			json += "]";
 			json += ",\"components\":" + std::to_string(item.components);
 			json += ",\"changed\":" + std::string(item.changed ? "true" : "false");
+			json += ",\"enabled\":" + std::string(item.enabled ? "true" : "false");
 			json += "}";
 		}
 		json += "]}";
@@ -649,9 +714,18 @@ namespace reshade::imgui_capture
 
 	static bool capture_begin_combo(const char *label, const char *preview_value, ImGuiComboFlags flags)
 	{
+		const std::string id = make_widget_id("combo_begin", string_or_empty(label));
+		std::string injected; bool open = false;
+		if (consume_input(id, injected) && parse_bool_value(injected, open) && open)
+			ImGui::OpenPopupEx(ImHashStr("##ComboPopup", 0, ImGui::GetID(label)), ImGuiPopupFlags_None);
 		const bool result = g_imgui_function_table_19250.BeginCombo(label, preview_value, flags);
-		add_widget("combo_begin", string_or_empty(label), string_or_empty(preview_value), {}, {}, 1, result);
+		add_widget("combo_begin", string_or_empty(label), result ? "open" : "closed", {}, {}, 1, result, id);
 		return result;
+	}
+	static void capture_end_combo()
+	{
+		g_imgui_function_table_19250.EndCombo();
+		add_widget("combo_end", "");
 	}
 
 	static bool capture_combo(const char *label, int *current_item, const char *const items[], int items_count, int popup_max_height_in_items)
@@ -1322,6 +1396,7 @@ namespace reshade::imgui_capture
 			proxy.RadioButton = capture_radio_button;
 			proxy.RadioButton2 = capture_radio_button2;
 			proxy.BeginCombo = capture_begin_combo;
+			proxy.EndCombo = capture_end_combo;
 			proxy.Combo = capture_combo;
 			proxy.Combo2 = capture_combo2;
 			proxy.InputText = capture_input_text;
@@ -1402,6 +1477,7 @@ namespace reshade::imgui_capture
 		proxy.RadioButton = capture_radio_button;
 		proxy.RadioButton2 = capture_radio_button2;
 		proxy.BeginCombo = capture_begin_combo;
+		proxy.EndCombo = capture_end_combo;
 		proxy.Combo = capture_combo;
 		proxy.Combo2 = capture_combo2;
 		proxy.InputText = capture_input_text;

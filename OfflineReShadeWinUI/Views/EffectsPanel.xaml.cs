@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using OfflineReShade.Core;
 using OfflineReShade.WinUI.Controls;
 using OfflineReShade.WinUI.Services;
@@ -17,6 +18,38 @@ namespace OfflineReShade.WinUI.Views;
 
 public sealed partial class EffectsPanel : UserControl, IDisposable
 {
+    private async void OnRefreshServices(object sender, RoutedEventArgs e)
+    {
+        await RunUiCommandAsync(async () => {
+            var result = await ViewModel.ReadAddonServicesAsync();
+            AddonServicesPanel.Children.Clear();
+            foreach (var service in result.GetProperty("services").EnumerateArray()) {
+                var addon = service.GetProperty("addon").GetString()!;
+                var group = new StackPanel { Spacing = 8 };
+                group.Children.Add(new TextBlock { Text = addon, TextWrapping = TextWrapping.Wrap });
+                if (service.GetProperty("error").GetString() is { Length: > 0 } error) { group.Children.Add(new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap }); }
+                else {
+                    var schema = service.GetProperty("schema");
+                    if (schema.TryGetProperty("scope", out var scope) && scope.GetString() == "companion_fx") group.Children.Add(new TextBlock { Text = "Companion FX parameters only. Private Add-on controls require a supported business interface.", TextWrapping = TextWrapping.Wrap });
+                    foreach (var p in schema.GetProperty("parameters").EnumerateArray()) {
+                        var node = JsonNode.Parse(p.GetRawText())!.AsObject();
+                        node["addonService"] = addon; node["effectName"] = addon; node["name"] = node["id"]!.GetValue<string>();
+                        var uniform = JsonStateParser.ParseUniforms(AutomationEngine.Json(new { uniforms = new[] { node } }))[0];
+                        group.Children.Add(BuildUniformEditor(uniform));
+                    }
+                    if (schema.TryGetProperty("actions", out var actions)) foreach (var action in actions.EnumerateArray()) {
+                        var id = action.GetProperty("id").GetString()!;
+                        var button = new Button { Content = action.TryGetProperty("label", out var label) ? label.GetString() : id };
+                        AutomationProperties.SetAutomationId(button, "ServiceAction_" + MakeAutomationId(addon + id));
+                        button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.InvokeAddonActionAsync(addon, id));
+                        group.Children.Add(button);
+                    }
+                }
+                AddonServicesPanel.Children.Add(group);
+            }
+            if (AddonServicesPanel.Children.Count == 0) AddonServicesPanel.Children.Add(new TextBlock { Text = "No independent service available for the loaded Add-ons.", TextWrapping = TextWrapping.Wrap });
+        });
+    }
     private readonly HashSet<string> _expandedEffects = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Expander, (List<MappedSlider> Sliders, List<FrameworkElement> Indicators)> _effectEditors = new();
     private readonly DispatcherTimer _effectSearchTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
@@ -823,7 +856,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             if (stopKinds.Contains(control.Kind, StringComparer.Ordinal))
                 break;
 
-            if (control.IsTreeNode || control.IsCollapsingHeader)
+            if (control.IsTreeNode)
             {
                 ++index;
                 StackPanel childPanel;
@@ -885,7 +918,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             {
                 ++index;
                 var popupPanel = control.IsOpen
-                    ? BuildAddonControlSequence(controls, ref index, "popup_end")
+                    ? BuildAddonControlSequence(controls, ref index, control.Kind == "combo_begin" ? "combo_end" : "popup_end")
                     : new StackPanel { Spacing = 8 };
                 if (index < controls.Count && controls[index].IsPopupEnd)
                     ++index;
@@ -920,7 +953,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             if (control.IsTreeEnd || control.IsTabBarEnd || control.IsTabItemEnd || control.IsPopupEnd || control.IsMenuEnd)
                 break;
 
-            var editor = BuildAddonControlEditor(control);
+            var editor = new ContentControl { Content = BuildAddonControlEditor(control), IsEnabled = control.IsEnabled, HorizontalContentAlignment = HorizontalAlignment.Stretch };
             panel.Children.Add(editor);
             lastElement = editor;
             ++index;
@@ -1599,6 +1632,31 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private FrameworkElement BuildUniformEditor(UniformViewModel uniform)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
+        if (uniform.Tooltip.Length != 0) ToolTipService.SetToolTip(panel, uniform.Tooltip);
+        if (uniform.Description.Length != 0) panel.Children.Add(new TextBlock { Text = uniform.Description, TextWrapping = TextWrapping.Wrap });
+        if (uniform.Units.Length != 0) panel.Children.Add(new TextBlock { Text = "Units: " + uniform.Units });
+        if (uniform.AddonService.Length == 0 && !uniform.IsReadOnly && uniform.UiType == "button" && uniform.Type == "bool")
+        {
+            var button = new Button { Content = uniform.Label.Trim() };
+            AutomationProperties.SetName(button, uniform.Label.Trim());
+            AutomationProperties.SetAutomationId(button, "UniformButton_" + MakeAutomationId(uniform.Id));
+            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.PressUniformAsync(uniform));
+            panel.Children.Add(button);
+            return panel;
+        }
+        if (!uniform.IsReadOnly && uniform.UiType == "color" && uniform.Values.Length is 3 or 4)
+        {
+            // Keep the precise numeric fields below for HDR/out-of-gamut values.
+            byte Channel(int i) => (byte)Math.Round(Math.Clamp(ToDouble(uniform.Values[i]), 0, 1) * 255);
+            var picker = new ColorPicker { Color = Windows.UI.Color.FromArgb(uniform.Values.Length == 4 ? Channel(3) : (byte)255, Channel(0), Channel(1), Channel(2)), IsAlphaEnabled = uniform.Values.Length == 4, IsMoreButtonVisible = true };
+            AutomationProperties.SetName(picker, uniform.Label);
+            AutomationProperties.SetAutomationId(picker, "UniformColor_" + MakeAutomationId(uniform.Id));
+            picker.ColorChanged += (_, args) => {
+                var c = args.NewColor;
+                QueueUniformUpdate(uniform, uniform.Values.Length == 4 ? new[] { c.R / 255.0, c.G / 255.0, c.B / 255.0, c.A / 255.0 } : new[] { c.R / 255.0, c.G / 255.0, c.B / 255.0 });
+            };
+            panel.Children.Add(picker);
+        }
         var hasChoiceEditor = (uniform.UiType == "combo" || uniform.UiType == "list" || uniform.UiType == "radio") && uniform.Items.Length != 0;
         var hasNumericSlider = !hasChoiceEditor && uniform.Type != "bool";
         panel.Children.Add(hasNumericSlider
@@ -1615,7 +1673,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         AutomationProperties.SetName(reset, "Reset " + uniform.Label + " to shader default");
         ToolTipService.SetToolTip(reset, "Restore the shader default (can be undone)");
         reset.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.ResetUniformAsync(uniform));
-        panel.Children.Add(reset);
+        if (uniform.AddonService.Length == 0) panel.Children.Add(reset);
 
         if (hasChoiceEditor)
         {
@@ -1696,8 +1754,10 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             slider.SetInteractionMode(ViewModel.Settings.SliderDragSensitivity, ViewModel.Settings.SliderSymLog);
             slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
             _fxMappedSliders.Add(slider);
-            slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
-            slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            if (uniform.AddonService.Length == 0) {
+                slider.DragStarted += (_, _) => ViewModel.BeginUniformGesture();
+                slider.DragCompleted += async (_, _) => await RunUiCommandAsync(ViewModel.FinishUniformGestureAsync);
+            }
             var textBox = new TextBox { Text = numericValues[i].ToString(uniform.Type == "float" ? "G9" : "0", CultureInfo.InvariantCulture), HorizontalAlignment = HorizontalAlignment.Stretch };
             AutomationProperties.SetName(textBox, uniform.Label + " component " + (i + 1));
             AutomationProperties.SetAutomationId(textBox, "UniformNumber_" + MakeAutomationId(uniform.Id) + "_" + i);

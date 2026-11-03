@@ -368,3 +368,6 @@ outside this guarantee, as with normal preset loading and session reconstruction
 Outputs are rendered to temporary files and verified again before publication;
 changed inputs/dependencies cannot overwrite a previous artwork and be reported
 as success. Legal black images remain successful exports with a warning.
+# Independent Add-on interfaces (RPC 8)
+
+`list_addons`, `list_addon_services`, `set_addon_parameter`, and `invoke_addon_action` expose declared business capabilities without opening native UI. `press_parameter` invokes momentary FX buttons. See [Add-on service contracts, supported Marty scope and tests](ADDON_SERVICES.md). Existing Marty DLLs do not implement the new service ABI; host adapters currently expose only LUT Manager and ReGrade+ public companion-FX parameters. Private lights, LUT selection and curves are not advertised as independently supported.

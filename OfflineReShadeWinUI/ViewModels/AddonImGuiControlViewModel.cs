@@ -42,7 +42,8 @@ public sealed class AddonImGuiControlViewModel
     public IReadOnlyList<string> Items { get; }
     public int Components { get; }
 
-    public string GroupKey => string.IsNullOrWhiteSpace(Overlay) ? Addon : Addon + " / " + Overlay;
+    public bool IsEnabled { get; init; } = true;
+    public string GroupKey => Addon + " / " + Overlay + " / " + Window;
     public bool IsButton => Kind == "button";
     public bool IsCheckbox => Kind == "checkbox";
     public bool IsCombo => Kind == "combo" || Kind == "list_box";
@@ -58,8 +59,8 @@ public sealed class AddonImGuiControlViewModel
     public bool IsTabItemBegin => Kind == "tab_item_begin";
     public bool IsTabItemEnd => Kind == "tab_item_end";
     public bool IsTooltip => Kind == "tooltip";
-    public bool IsPopupBegin => Kind == "popup_begin" || Kind == "popup_modal_begin";
-    public bool IsPopupEnd => Kind == "popup_end";
+    public bool IsPopupBegin => Kind == "popup_begin" || Kind == "popup_modal_begin" || Kind == "combo_begin";
+    public bool IsPopupEnd => Kind == "popup_end" || Kind == "combo_end";
     public bool IsMenuBegin => Kind == "menu_begin";
     public bool IsMenuEnd => Kind == "menu_end";
     public bool IsMenuItem => Kind == "menu_item" || Kind == "selectable";

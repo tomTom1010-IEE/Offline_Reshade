@@ -68,7 +68,14 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled">
                   <StackPanel Padding="12"
                               Spacing="10">
-                    <Expander Header="WinUI Add-on Controls"
+                    <Expander Header="Independent Add-on services" IsExpanded="True" AutomationProperties.AutomationId="IndependentAddonServices">
+                      <StackPanel Spacing="8">
+                        <TextBlock Text="These controls use a declared business interface. Refresh to read current values. Private Add-on state is not covered by FX undo." TextWrapping="Wrap" />
+                        <Button Content="Refresh services" Click="OnRefreshServices" AutomationProperties.AutomationId="RefreshAddonServices" />
+                        <StackPanel x:Name="AddonServicesPanel" Spacing="8" />
+                      </StackPanel>
+                    </Expander>
+                    <Expander Header="ImGui compatibility controls"
                               IsExpanded="True" AutomationProperties.AutomationId="EffectsPanelControl12">
                       <StackPanel x:Name="AddonControlsPanel"
                                   Spacing="10" />

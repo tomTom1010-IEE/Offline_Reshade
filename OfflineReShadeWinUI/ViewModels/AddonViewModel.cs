@@ -42,8 +42,10 @@ public sealed class AddonViewModel
 
     public string SourceText => string.IsNullOrWhiteSpace(File) ? "Built-in" : File;
     public string StatusText => IsLoaded ? "Loaded" : "Disabled or failed";
-    public string CompatibilityText => OfflineCompatibility == "runtime_compatible"
-        ? "Offline runtime compatible"
+    public string CompatibilityText => OfflineCompatibility == "requires_game_camera"
+        ? "Requires IGCS camera jitter and multi-frame game input; static images do not provide these dependencies."
+        : OfflineCompatibility is "runtime_compatible" or "events_supported"
+        ? "Registered events supported. Full rendering, independent controls and private-state history are not verified."
         : "Partial compatibility: this add-on requests events that need a live game render stream or the native ReShade overlay";
     public string OverlayText
     {

@@ -75,6 +75,7 @@ try {
     foreach ($name in @('README.md', 'README.zh-CN.md', 'LICENSE.md', 'CHANGELOG.md', 'offlineReshadelogo.png')) { Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $stage }
     New-Item -ItemType Directory -Path (Join-Path $stage 'docs') | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'docs\MCP.md') -Destination (Join-Path $stage 'docs')
+    Copy-Item -LiteralPath (Join-Path $repo 'docs\ADDON_SERVICES.md') -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath (Join-Path $repo 'docs\STABILITY_PLAN.md') -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath (Join-Path $repo 'docs\MAINTENANCE.md') -Destination (Join-Path $stage 'docs')
     New-Item -ItemType Directory -Path (Join-Path $stage 'maintenance') | Out-Null
@@ -105,6 +106,8 @@ try {
     $forbidden = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -match '(?i)\.(fx|fxh|addon64|pdb|lib|exp|log)$|settings.*\.json$' }
     if ($forbidden) { throw "Unexpected file in package: $($forbidden[0].FullName)" }
     if ($RunIntegrationTests) {
+        Invoke-Checked $msbuild @('tests\OfflineReShade.AddonService.Tests.vcxproj', '/p:Configuration=Release', '/p:Platform=x64', '/v:minimal', '/nologo')
+        Invoke-Checked 'python' @('tests\run_addon_services.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "addon-services-$stamp"), '--addon', (Join-Path $repo 'build\addon-service-fixture\ServiceFixture.addon64'))
         Invoke-Checked 'python' @('tools\check_workflows.py')
         Invoke-Checked 'python' @('-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_maintenance.py', '-v')
         Invoke-Checked $msbuild @('tests\OfflineReShade.Graphics.Tests.vcxproj', '/p:Configuration=Release', '/p:Platform=x64', '/m', '/v:minimal', '/nologo')
