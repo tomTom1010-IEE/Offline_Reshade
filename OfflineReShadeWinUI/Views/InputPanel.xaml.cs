@@ -18,6 +18,7 @@ namespace OfflineReShade.WinUI.Views;
 public sealed partial class InputPanel : UserControl, IDisposable
 {
     public MainWindowViewModel ViewModel { get; }
+    public static Visibility TextVisibility(string text) => string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
     public InputPanel(MainWindowViewModel vm)
     {
         ViewModel = vm; InitializeComponent();

@@ -4,20 +4,20 @@
  xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
  xmlns:views="using:OfflineReShade.WinUI.Views">
   <ScrollViewer x:Name="InputPanelScroll" MaxHeight="280" HorizontalScrollBarVisibility="Disabled">
-    <Border Margin="14,0,14,8" Padding="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+    <Border Margin="12,0,12,0">
       <StackPanel Spacing="8">
+        <Expander ToolTipService.ToolTip="{x:Bind ViewModel.InputSummary, Mode=OneWay}" IsExpanded="{x:Bind ViewModel.IsInputPanelOpen, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChooseSource, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="InputPanelControl1">
+          <Expander.Header><TextBlock Text="{x:Bind ViewModel.InputSummary, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" /></Expander.Header>
+          <StackPanel Spacing="12">
         <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
-        <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
         <TextBlock Text="{x:Bind ViewModel.InputSourceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.AutomationId="InputSourceStatus" />
         <TextBlock Text="{x:Bind ViewModel.PresetEditStatus, Mode=OneWay}" AutomationProperties.AutomationId="PresetEditStatus" AutomationProperties.LiveSetting="Polite" />
-        <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
         <Grid ColumnSpacing="16">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
           <StackPanel><TextBlock Text="Current image" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.AutomationId="CurrentInputPath" /></StackPanel>
           <StackPanel Grid.Column="1"><TextBlock Text="Depth association" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
           <StackPanel Grid.Column="2"><TextBlock Text="Current preset" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
         </Grid>
-        <Expander Header="Input, depth and preset" IsExpanded="{x:Bind ViewModel.IsInputPanelOpen, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChooseSource, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="InputPanelControl1">
           <Grid>
             <StackPanel Spacing="8">
               <TextBlock Text="{x:Bind ViewModel.InputSelectionMessage, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
@@ -105,7 +105,10 @@
               <Button Content="Use color only (clear depth)" Command="{x:Bind ViewModel.ClearDepthCommand}" AutomationProperties.AutomationId="ClearInputDepth"  />
             </StackPanel>
           </Grid>
+          </StackPanel>
         </Expander>
+        <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.HistoryWarning), Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+        <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.FpsText), Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
       </StackPanel>
     </Border>
 

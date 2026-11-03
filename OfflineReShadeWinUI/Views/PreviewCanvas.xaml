@@ -9,7 +9,7 @@
               <RowDefinition Height="Auto" />
               <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <StackPanel Grid.Row="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <StackPanel x:Name="PreviewTools" Grid.Row="0" Visibility="Collapsed" Background="{ThemeResource LayerFillColorDefaultBrush}">
               <CommandBar DefaultLabelPosition="Right" Background="Transparent" AutomationProperties.Name="Canvas commands">
                 <AppBarButton Label="Fit" Click="OnFit" AutomationProperties.AutomationId="PreviewFit" ToolTipService.ToolTip="Fit image to canvas (Ctrl+0)"  />
                 <AppBarButton Label="100%" Click="OnActualPixels" AutomationProperties.AutomationId="PreviewActualPixels" ToolTipService.ToolTip="One rendered pixel per physical display pixel (Ctrl+1)"  />
@@ -36,9 +36,6 @@
                 <StackPanel Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420">
                   <TextBlock Text="{x:Bind ViewModel.EmptyTitle, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
                   <TextBlock Text="{x:Bind ViewModel.EmptyMessage, Mode=OneWay}" TextWrapping="Wrap" />
-                  <Button Content="Open image" AutomationProperties.AutomationId="EmptyOpenInput" Command="{x:Bind ViewModel.OpenImageCommand}"  />
-                  <Button Content="Listen for game output" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="EmptyListenInput"  />
-                  <Button Content="Cancel operation" AutomationProperties.AutomationId="EmptyCancelOperation" Command="{x:Bind ViewModel.CancelOperationCommand}"  />
                 </StackPanel>
               </Border>
             </Grid>

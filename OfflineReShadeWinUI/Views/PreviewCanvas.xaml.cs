@@ -25,6 +25,7 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
     private DateTimeOffset _retryAt;
     public MainWindowViewModel ViewModel { get; }
     private double Dpi => XamlRoot?.RasterizationScale ?? 1;
+    private bool HasPreview => ViewModel.IsPreviewRunning && !ViewModel.ShowEmptyCanvas && ViewModel.RenderWidth > 0 && ViewModel.RenderHeight > 0;
     public PreviewCanvas(MainWindowViewModel vm)
     {
         ViewModel = vm; InitializeComponent();
@@ -66,7 +67,7 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
             PreviewImage.Source = null; _cpuWidth = _cpuHeight = 0;
         }
         if (args.PropertyName is nameof(MainWindowViewModel.IsPreviewRunning) or nameof(MainWindowViewModel.IsGpuPreviewActive) or nameof(MainWindowViewModel.IsSettingsOpen)) UpdateTransport();
-        if (args.PropertyName is nameof(MainWindowViewModel.RenderWidth) or nameof(MainWindowViewModel.RenderHeight) or nameof(MainWindowViewModel.SharedPreviewWidth) or nameof(MainWindowViewModel.SharedPreviewHeight) or nameof(MainWindowViewModel.PreviewOriginal)) UpdateGeometry();
+        if (args.PropertyName is nameof(MainWindowViewModel.ShowEmptyCanvas) or nameof(MainWindowViewModel.RenderWidth) or nameof(MainWindowViewModel.RenderHeight) or nameof(MainWindowViewModel.SharedPreviewWidth) or nameof(MainWindowViewModel.SharedPreviewHeight) or nameof(MainWindowViewModel.PreviewOriginal)) UpdateGeometry();
     }
     private void UpdateTransport()
     {
@@ -82,6 +83,12 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
     private void UpdateGeometry()
     {
         if (_disposed) return;
+        PreviewTools.Visibility = HasPreview ? Visibility.Visible : Visibility.Collapsed;
+        if (!HasPreview)
+        {
+            ZoomStatus.Text = ResolutionStatus.Text = "";
+            return;
+        }
         var w = PreviewSurface.ActualWidth; var h = PreviewSurface.ActualHeight;
         PreviewSurface.Clip = new RectangleGeometry { Rect = new(0, 0, Math.Max(0, w), Math.Max(0, h)) };
         var layout = Layout();
@@ -119,10 +126,11 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
             if (_failures >= 3) _ = ViewModel.FallBackToCpuPreviewAsync("GPU preview could not recover.");
         }
     }
-    public void Fit() { _viewport.Fit(); UpdateGeometry(); }
-    public void ActualPixels() { _viewport.ActualPixels(); UpdateGeometry(); }
+    public void Fit() { if (!HasPreview) return; _viewport.Fit(); UpdateGeometry(); }
+    public void ActualPixels() { if (!HasPreview) return; _viewport.ActualPixels(); UpdateGeometry(); }
     private void Zoom(double factor, Point? point = null)
     {
+        if (!HasPreview) return;
         var at = point ?? new Point(PreviewSurface.ActualWidth / 2, PreviewSurface.ActualHeight / 2);
         _viewport.ZoomAt(factor, at.X, at.Y, PreviewSurface.ActualWidth, PreviewSurface.ActualHeight,
             Math.Max(1u, ViewModel.RenderWidth), Math.Max(1u, ViewModel.RenderHeight), Dpi);
@@ -150,6 +158,7 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
     }
     private void OnPressed(object sender, PointerRoutedEventArgs args)
     {
+        if (!HasPreview) return;
         var point = args.GetCurrentPoint(PreviewSurface);
         if (point.Properties.IsMiddleButtonPressed) { Fit(); args.Handled = true; return; }
         if (!point.Properties.IsLeftButtonPressed) return;

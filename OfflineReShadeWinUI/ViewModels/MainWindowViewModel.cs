@@ -156,6 +156,10 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public string CurrentInputText => _runtimeInput?.ColorPath ?? "No image has been applied";
     public string CurrentDepthText => _runtimeInput is not { } input ? "No depth associated" : input.DepthPath.Length == 0 ? "Color only — no depth associated" : $"{input.DepthPath} ({input.DepthFormat}, {input.DepthProfile.ToUpperInvariant()})";
     public string CurrentPresetText => _runtimeInput is { PresetPath.Length: > 0 } input ? input.PresetPath : "Working preset — no source preset selected";
+    public string InputSummary => _runtimeInput is not { } input ? "Input, depth and preset" :
+        $"{Path.GetFileName(input.ColorPath)} · {(input.DepthPath.Length == 0 ? "Color only" : "Depth linked")} · {(input.PresetPath.Length == 0 ? "Working preset" : Path.GetFileName(input.PresetPath))}" +
+        (IsListening ? " · Listening" : "") + (_automation.History.IsModified ? " · Unsaved FX changes" : "") +
+        (HasPendingConfiguration ? " · Input changes pending" : "");
     public string InputSourceText => Activity.Runtime.WaitingForInput ? $"Waiting for game output: {Activity.Runtime.InputPath}"
         : IsListening ? "Game output — automatic updates are enabled" : "Files — changes are applied manually";
 
@@ -274,7 +278,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public string StatusText => Activity.StatusText;
     public bool ShowEmptyCanvas => Activity.ShowEmpty;
     public string EmptyTitle => Activity.EmptyTitle;
-    public string EmptyMessage => Activity.EmptyMessage;
+    public string EmptyMessage => Activity.Runtime.InputPath.Length == 0 && !IsOperationRunning && Activity.Runtime.Error == null
+        ? "Use Open image or Listen for game output in the toolbar above." : Activity.EmptyMessage;
     public bool HasBatchTask => _automation.Job != null;
     public bool IsOperationRunning => _automation.IsBusy;
     public bool FeedbackOpen { get => Activity.Notice != null || Activity.Runtime.Error != null || Activity.Runtime.PreviewWarning != null; set { if (!value) _automation.Activity.Dismiss(); } }
@@ -735,7 +740,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             IsBatchApplying = _automation.Job?.State == "running";
             UpdateBatchPresentation();
             foreach (var property in new[] { nameof(CanChooseSource), nameof(IsListening), nameof(InputSourceText), nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
-                nameof(StatusText), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
+                nameof(StatusText), nameof(InputSummary), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
                 nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
             OpenImageCommand.RaiseCanExecuteChanged(); StartListeningCommand.RaiseCanExecuteChanged(); StopListeningCommand.RaiseCanExecuteChanged();
             PickWatchFolderCommand.RaiseCanExecuteChanged(); PickColorCommand.RaiseCanExecuteChanged(); PickDepthCommand.RaiseCanExecuteChanged(); PickPresetCommand.RaiseCanExecuteChanged();
@@ -1030,6 +1035,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         NotifyExportState();
         OnPropertyChanged(nameof(CurrentInputText)); OnPropertyChanged(nameof(CurrentDepthText)); OnPropertyChanged(nameof(CurrentPresetText));
+        OnPropertyChanged(nameof(InputSummary));
         OnPropertyChanged(nameof(InputSourceText)); OnPropertyChanged(nameof(IsListening));
         OnPropertyChanged(nameof(HasPendingConfiguration));
         OnPropertyChanged(nameof(ConfigurationStatusText));
