@@ -46,7 +46,9 @@ public sealed partial class MainWindow : Window
         ViewModel.Settings.PropertyChanged += OnSettingsChanged;
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
         RootGrid.SizeChanged += (_, _) => ArrangeWorkspace();
-        RootGrid.ActualThemeChanged += (_, _) => UpdateCaptionButtons();
+        RootGrid.ActualThemeChanged += (_, _) => QueueCaptionButtonUpdate();
+        AppTitleBar.Loaded += (_, _) => QueueCaptionButtonUpdate();
+        Activated += (_, _) => QueueCaptionButtonUpdate();
         _sliderModeOverlayTimer.Tick += (_, _) => { _sliderModeOverlayTimer.Stop(); SliderModeOverlay.Visibility = Visibility.Collapsed; };
         AppWindow.Closing += async (_, args) =>
         {
@@ -111,10 +113,20 @@ public sealed partial class MainWindow : Window
         ThemeBox.SelectedIndex = ViewModel.Settings.Theme switch { "Light" => 1, "Dark" => 2, _ => 0 };
         UpdateCaptionButtons();
     }
-    // Caption buttons are drawn by the system, so they need the window's theme explicitly when it differs from Windows.
+    // Caption buttons are drawn by the system. TitleBar sets their colours from the Windows theme on load and
+    // activation, so re-apply ours afterwards whenever the app theme differs from Windows.
+    private void QueueCaptionButtonUpdate() =>
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, UpdateCaptionButtons);
     private void UpdateCaptionButtons()
     {
-        var dark = RootGrid.ActualTheme == ElementTheme.Dark;
+        if (_isClosing) return;
+        // ActualTheme is not settled while the window is being built, so derive the theme from the request.
+        var dark = RootGrid.RequestedTheme switch
+        {
+            ElementTheme.Dark => true,
+            ElementTheme.Light => false,
+            _ => Application.Current.RequestedTheme == ApplicationTheme.Dark
+        };
         var bar = AppWindow.TitleBar;
         var foreground = dark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
         bar.ButtonBackgroundColor = bar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;

@@ -1,3 +1,4 @@
+using System.Security.Principal;
 using Microsoft.UI.Xaml;
 using WinRT.Interop;
 using Windows.Storage.Pickers;
@@ -6,6 +7,8 @@ namespace OfflineReShade.WinUI.Services;
 
 public sealed class SettingsPickerService
 {
+    // With UAC the elevated token is the only one in the Administrators role.
+    private static readonly bool IsElevated = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
     private readonly Func<IntPtr> _windowHandleProvider;
 
     public SettingsPickerService(Func<IntPtr> windowHandleProvider)
@@ -13,67 +16,71 @@ public sealed class SettingsPickerService
         _windowHandleProvider = windowHandleProvider;
     }
 
-    public async Task<string?> PickPngAsync()
+    public Task<string?> PickPngAsync() => PickAsync(new("PNG image", [".png"]));
+
+    public Task<string?> PickDepthAsync() => PickAsync(new("Depth file", [".rfloat", ".png"]));
+
+    public Task<string?> PickIniAsync() => PickAsync(new("ReShade preset", [".ini"]));
+
+    public Task<string?> PickBatchTaskAsync() => PickAsync(new("Batch task", [".json"]));
+
+    public Task<string?> PickOutputPngAsync() => PickAsync(new("PNG image", [".png"], Save: true, SuggestedName: "reshadeoutput.png"));
+
+    public Task<string?> PickPresetSaveAsync() => PickAsync(new("ReShade preset", [".ini"], Save: true, SuggestedName: "Preset.ini"));
+
+    public Task<string?> PickFolderAsync() => PickAsync(new("Folder", [], Folder: true));
+
+    private sealed record PickerRequest(string FilterName, string[] Extensions, bool Save = false, bool Folder = false, string? SuggestedName = null);
+
+    // The WinRT pickers are brokered through PickerHost.exe, which refuses elevated callers (E_FAIL),
+    // so elevated sessions use the in-process dialog; it also covers an unexpected broker failure.
+    private async Task<string?> PickAsync(PickerRequest request)
     {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeFilter.Add(".png");
-        var file = await picker.PickSingleFileAsync();
-        return file?.Path;
+        if (IsElevated) return ShowInProcess(request);
+        try
+        {
+            return await ShowBrokeredAsync(request);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            try
+            {
+                return ShowInProcess(request);
+            }
+            catch (Exception fallbackError)
+            {
+                throw new InvalidOperationException($"The Windows file picker could not open ({error.GetType().Name} 0x{error.HResult:X8}). Nothing was changed; try again.",
+                    new AggregateException(error, fallbackError));
+            }
+        }
     }
 
-    public async Task<string?> PickDepthAsync()
-    {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeFilter.Add(".rfloat");
-        picker.FileTypeFilter.Add(".png");
-        var file = await picker.PickSingleFileAsync();
-        return file?.Path;
-    }
+    private string? ShowInProcess(PickerRequest request) =>
+        Win32FileDialog.Show(_windowHandleProvider(), request.Save, request.Folder, request.FilterName, request.Extensions, request.SuggestedName);
 
-    public async Task<string?> PickIniAsync()
+    private async Task<string?> ShowBrokeredAsync(PickerRequest request)
     {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeFilter.Add(".ini");
-        var file = await picker.PickSingleFileAsync();
-        return file?.Path;
-    }
-    public async Task<string?> PickBatchTaskAsync()
-    {
-        var picker = new FileOpenPicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeFilter.Add(".json");
-        return (await picker.PickSingleFileAsync())?.Path;
-    }
+        if (request.Folder)
+        {
+            var folderPicker = new FolderPicker();
+            InitializeWithWindow.Initialize(folderPicker, _windowHandleProvider());
+            folderPicker.FileTypeFilter.Add("*");
+            return (await folderPicker.PickSingleFolderAsync())?.Path;
+        }
 
-    public async Task<string?> PickOutputPngAsync()
-    {
-        var picker = new FileSavePicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeChoices.Add("PNG", new List<string> { ".png" });
-        picker.SuggestedFileName = "reshadeoutput.png";
-        var file = await picker.PickSaveFileAsync();
-        return file?.Path;
-    }
+        if (request.Save)
+        {
+            var savePicker = new FileSavePicker();
+            InitializeWithWindow.Initialize(savePicker, _windowHandleProvider());
+            savePicker.FileTypeChoices.Add(request.FilterName, request.Extensions.ToList());
+            if (request.SuggestedName != null) savePicker.SuggestedFileName = request.SuggestedName;
+            return (await savePicker.PickSaveFileAsync())?.Path;
+        }
 
-    public async Task<string?> PickPresetSaveAsync()
-    {
-        var picker = new FileSavePicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeChoices.Add("ReShade preset", new List<string> { ".ini" });
-        picker.SuggestedFileName = "Preset.ini";
-        var file = await picker.PickSaveFileAsync();
-        return file?.Path;
-    }
-
-    public async Task<string?> PickFolderAsync()
-    {
-        var picker = new FolderPicker();
-        InitializeWithWindow.Initialize(picker, _windowHandleProvider());
-        picker.FileTypeFilter.Add("*");
-        var folder = await picker.PickSingleFolderAsync();
-        return folder?.Path;
+        var openPicker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(openPicker, _windowHandleProvider());
+        foreach (var extension in request.Extensions)
+            openPicker.FileTypeFilter.Add(extension);
+        return (await openPicker.PickSingleFileAsync())?.Path;
     }
 }

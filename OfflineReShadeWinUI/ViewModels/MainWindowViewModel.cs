@@ -111,7 +111,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         LocateExportedImageCommand = CreateCommand(() => OpenExportedAsync(true), () => HasExportedImage);
         ReloadCommand = CreateCommand(ReloadAsync, () => _session.IsConnected && CanEditSession);
         SavePresetCommand = CreateCommand(SavePresetAsync, () => _session.IsConnected && CanEditSession);
-        SavePresetAsCommand = CreateCommand(SavePresetAsAsync, () => _session.IsConnected && CanEditSession);
+        SavePresetAsCommand = CreateCommand(SavePresetAsAsync, () => _session.IsConnected && CanEditSession, "choose_save_location");
         UndoCommand = CreateCommand(() => MoveHistoryAsync(false), () => _session.IsConnected && CanEditSession && _automation.History.CanUndo);
         RedoCommand = CreateCommand(() => MoveHistoryAsync(true), () => _session.IsConnected && CanEditSession && _automation.History.CanRedo);
         RestoreControlsCommand = CreateCommand(RestoreControlsAsync, () => _session.IsConnected && CanEditSession);
@@ -120,7 +120,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         RefreshGalleryCommand = new RelayCommand(RefreshGalleryItems, () => CanEditSession);
         InitializeBatchCommands();
         ToggleSettingsCommand = new RelayCommand(() => IsSettingsOpen = !IsSettingsOpen);
-        OpenImageCommand = CreateCommand(OpenImageAsync, () => CanChooseSource);
+        OpenImageCommand = CreateCommand(OpenImageAsync, () => CanChooseSource, "choose_image");
         ConfigureListenerCommand = new RelayCommand(() => { IsSettingsOpen = false; IsInputPanelOpen = true; InputSelectionMessage = "Choose the game export folder, then start listening. Files may arrive later."; });
         StartListeningCommand = CreateCommand(StartListeningAsync, () => CanChooseSource);
         StopListeningCommand = CreateCommand(async () => await ExecuteOperationAsync("stop_listening"), () => CanChooseSource && IsListening);
@@ -130,7 +130,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         PickColorCommand = CreateCommand(PickInputColorAsync, () => CanChooseSource);
         PickDepthCommand = CreateCommand(PickInputDepthAsync, () => CanChooseSource);
         PickEffectDirCommand = CreateCommand(async () => await PickPathAsync(path => Settings.EffectDir = path, picker => picker.PickFolderAsync()));
-        PickPresetCommand = CreateCommand(LoadPresetAsync, () => CanEditSession);
+        PickPresetCommand = CreateCommand(LoadPresetAsync, () => CanEditSession, "choose_preset");
         PickGalleryInputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryInputFolder = path, picker => picker.PickFolderAsync()));
         PickGalleryOutputFolderCommand = CreateCommand(async () => await PickPathAsync(path => Settings.GalleryOutputFolder = path, picker => picker.PickFolderAsync()));
 
@@ -314,10 +314,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand CancelOperationCommand { get; }
     public AsyncRelayCommand RetryOperationCommand { get; }
     public AsyncRelayCommand LocateFeedbackCommand { get; }
-    private AsyncRelayCommand CreateCommand(Func<Task> action, Func<bool>? canExecute = null) => new(action, error => ReportUiError(error), canExecute);
+    private AsyncRelayCommand CreateCommand(Func<Task> action, Func<bool>? canExecute = null, string operation = "edit") => new(action, error => ReportUiError(error, operation), canExecute);
     public void ReportUiError(Exception error, string operation = "edit")
     {
         AppendLog(error.ToString());
+        // Some COM/WinRT failures carry no text; keep the type and HRESULT visible instead of an empty notice.
+        if (string.IsNullOrWhiteSpace(error.Message))
+            error = new InvalidOperationException($"{error.GetType().Name} (0x{error.HResult:X8}) without a description. See Details for the full log.", error);
         _automation.Activity.Report(error, operation, _session.Current);
     }
     private async Task<JsonElement> ExecuteOperationAsync(string method, object? args = null, CancellationToken token = default)
