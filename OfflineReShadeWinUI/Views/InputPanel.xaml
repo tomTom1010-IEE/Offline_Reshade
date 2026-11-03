@@ -1,23 +1,20 @@
-<UserControl x:Class="OfflineReShade.WinUI.Views.InputPanel"
+﻿<UserControl x:Class="OfflineReShade.WinUI.Views.InputPanel"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
  xmlns:views="using:OfflineReShade.WinUI.Views">
-  <ScrollViewer x:Name="InputPanelScroll" MaxHeight="280" HorizontalScrollBarVisibility="Disabled">
+  <ScrollViewer x:Name="InputPanelScroll" HorizontalScrollBarVisibility="Disabled">
     <Border Margin="12,0,12,0">
       <StackPanel Spacing="8">
-        <Expander ToolTipService.ToolTip="{x:Bind ViewModel.InputSummary, Mode=OneWay}" IsExpanded="{x:Bind ViewModel.IsInputPanelOpen, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChooseSource, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.AutomationId="InputPanelControl1">
-          <Expander.Header><TextBlock Text="{x:Bind ViewModel.InputSummary, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" /></Expander.Header>
           <StackPanel Spacing="12">
         <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
         <TextBlock Text="{x:Bind ViewModel.InputSourceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.AutomationId="InputSourceStatus" />
         <TextBlock Text="{x:Bind ViewModel.PresetEditStatus, Mode=OneWay}" AutomationProperties.AutomationId="PresetEditStatus" AutomationProperties.LiveSetting="Polite" />
-        <Grid ColumnSpacing="16">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <StackPanel Spacing="8">
           <StackPanel><TextBlock Text="Current image" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.AutomationId="CurrentInputPath" /></StackPanel>
-          <StackPanel Grid.Column="1"><TextBlock Text="Depth association" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
-          <StackPanel Grid.Column="2"><TextBlock Text="Current preset" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
-        </Grid>
+          <StackPanel><TextBlock Text="Depth association" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
+          <StackPanel><TextBlock Text="Current preset" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
+        </StackPanel>
           <Grid>
             <StackPanel Spacing="8">
               <TextBlock Text="{x:Bind ViewModel.InputSelectionMessage, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
@@ -83,22 +80,23 @@
             </Grid>
 
             <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
-            <TextBlock Text="Leave blank to use the color PNG size." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock Text="Follow the color image size, or choose custom output dimensions. Changes apply with the other input settings." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
             <TextBlock Text="{x:Bind ViewModel.ConfigurationStatusText, Mode=OneWay}"
                        AutomationProperties.AutomationId="ConfigurationStatus"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-            <Grid ColumnSpacing="10">
+            <ToggleSwitch x:Name="SourceSizeToggle" Header="Output size" OnContent="Follow color image" OffContent="Custom size" Toggled="OnSourceSizeToggled" AutomationProperties.AutomationId="SourceSizeMode" />
+            <Grid x:Name="CustomSizeFields" ColumnSpacing="10">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="*" />
               </Grid.ColumnDefinitions>
               <StackPanel Spacing="4">
                 <TextBlock Text="Width" />
-                <TextBox Text="{x:Bind ViewModel.Settings.RenderWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl15" AutomationProperties.Name="Render width in pixels" />
+                <TextBox x:Name="WidthEditor" Text="{x:Bind ViewModel.Settings.RenderWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl15" AutomationProperties.Name="Render width in pixels" />
               </StackPanel>
               <StackPanel Grid.Column="1" Spacing="4">
                 <TextBlock Text="Height" />
-                <TextBox Text="{x:Bind ViewModel.Settings.RenderHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl16" AutomationProperties.Name="Render height in pixels" />
+                <TextBox x:Name="HeightEditor" Text="{x:Bind ViewModel.Settings.RenderHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl16" AutomationProperties.Name="Render height in pixels" />
               </StackPanel>
             </Grid>
 
@@ -106,9 +104,9 @@
             </StackPanel>
           </Grid>
           </StackPanel>
-        </Expander>
+
         <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.HistoryWarning), Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-        <TextBlock Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.FpsText), Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" />
+
       </StackPanel>
     </Border>
 

@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -103,6 +103,8 @@ public sealed partial class PreviewCanvas : UserControl, IDisposable
         ResolutionStatus.Text = !ViewModel.IsPreviewRunning ? "Open an image to preview" :
             $"Render {ViewModel.RenderWidth} × {ViewModel.RenderHeight} · Preview {pw} × {ph}" +
             (pw > 0 && (pw < ViewModel.RenderWidth || ph < ViewModel.RenderHeight) ? " (downsampled; 100% uses render pixels)" : "");
+        ToolTipService.SetToolTip(ZoomStatus, ZoomStatus.Text);
+        ToolTipService.SetToolTip(ResolutionStatus, ResolutionStatus.Text);
         Render();
     }
     private void Render()

@@ -29,7 +29,7 @@ public sealed partial class MainWindowViewModel
     }
     private void NotifyHistoryState()
     {
-        OnPropertyChanged(nameof(PresetEditStatus)); OnPropertyChanged(nameof(HistoryWarning));
+        OnPropertyChanged(nameof(FooterEditStatus)); OnPropertyChanged(nameof(PresetEditStatus)); OnPropertyChanged(nameof(HistoryWarning));
         OnPropertyChanged(nameof(InputSummary));
         UndoCommand?.RaiseCanExecuteChanged(); RedoCommand?.RaiseCanExecuteChanged(); SavePresetAsCommand?.RaiseCanExecuteChanged();
     }

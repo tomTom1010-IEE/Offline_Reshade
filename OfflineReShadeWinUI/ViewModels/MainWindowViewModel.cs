@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using OfflineReShade.Core;
 using System.ComponentModel;
 using System.Globalization;
@@ -160,6 +160,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         $"{Path.GetFileName(input.ColorPath)} · {(input.DepthPath.Length == 0 ? "Color only" : "Depth linked")} · {(input.PresetPath.Length == 0 ? "Working preset" : Path.GetFileName(input.PresetPath))}" +
         (IsListening ? " · Listening" : "") + (_automation.History.IsModified ? " · Unsaved FX changes" : "") +
         (HasPendingConfiguration ? " · Input changes pending" : "");
+    public string DocumentSummary => _runtimeInput is not { } input ? "Input settings — open an image to begin" :
+        $"{Path.GetFileName(input.ColorPath)} · {(input.DepthPath.Length == 0 ? "Color only" : "Depth linked")} · {(input.PresetPath.Length == 0 ? "Working preset" : Path.GetFileName(input.PresetPath))}";
+    public string FooterEditStatus => string.Join(" · ", new[] {
+        _automation.History.IsModified ? "Unsaved FX changes" : "",
+        HasPendingConfiguration ? "Input changes pending" : "" }.Where(x => x.Length > 0));
     public string InputSourceText => Activity.Runtime.WaitingForInput ? $"Waiting for game output: {Activity.Runtime.InputPath}"
         : IsListening ? "Game output — automatic updates are enabled" : "Files — changes are applied manually";
 
@@ -740,7 +745,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             IsBatchApplying = _automation.Job?.State == "running";
             UpdateBatchPresentation();
             foreach (var property in new[] { nameof(CanChooseSource), nameof(IsListening), nameof(InputSourceText), nameof(CanEditSession), nameof(BatchProgress), nameof(BatchMaximum), nameof(BatchStatusText), nameof(HasBatchTask),
-                nameof(StatusText), nameof(InputSummary), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
+                nameof(StatusText), nameof(InputSummary), nameof(DocumentSummary), nameof(FooterEditStatus), nameof(IsOperationRunning), nameof(ShowEmptyCanvas), nameof(EmptyTitle), nameof(EmptyMessage), nameof(FeedbackOpen), nameof(FeedbackTitle), nameof(FeedbackMessage),
                 nameof(FeedbackStatus), nameof(FeedbackDetails), nameof(CanRetryOperation), nameof(FeedbackPath) }) OnPropertyChanged(property);
             OpenImageCommand.RaiseCanExecuteChanged(); StartListeningCommand.RaiseCanExecuteChanged(); StopListeningCommand.RaiseCanExecuteChanged();
             PickWatchFolderCommand.RaiseCanExecuteChanged(); PickColorCommand.RaiseCanExecuteChanged(); PickDepthCommand.RaiseCanExecuteChanged(); PickPresetCommand.RaiseCanExecuteChanged();
@@ -1035,7 +1040,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         NotifyExportState();
         OnPropertyChanged(nameof(CurrentInputText)); OnPropertyChanged(nameof(CurrentDepthText)); OnPropertyChanged(nameof(CurrentPresetText));
-        OnPropertyChanged(nameof(InputSummary));
+        OnPropertyChanged(nameof(InputSummary)); OnPropertyChanged(nameof(DocumentSummary)); OnPropertyChanged(nameof(FooterEditStatus));
         OnPropertyChanged(nameof(InputSourceText)); OnPropertyChanged(nameof(IsListening));
         OnPropertyChanged(nameof(HasPendingConfiguration));
         OnPropertyChanged(nameof(ConfigurationStatusText));

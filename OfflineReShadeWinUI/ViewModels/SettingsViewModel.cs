@@ -1,4 +1,4 @@
-using OfflineReShade.Core;
+﻿using OfflineReShade.Core;
 using OfflineReShade.WinUI.Mvvm;
 using OfflineReShade.WinUI.Services;
 using System.Runtime.CompilerServices;
@@ -25,6 +25,11 @@ public sealed class SettingsViewModel : ObservableObject
     {
         if (next == Preferences) return;
         Preferences = next; OnPropertyChanged(name);
+    }
+    public void SetRenderSize(string width, string height)
+    {
+        Edit(Editor with { RenderWidth = width, RenderHeight = height }, nameof(RenderWidth));
+        OnPropertyChanged(nameof(RenderHeight));
     }
     public string ColorPath { get => Editor.ColorPath; set => Edit(Editor with { ColorPath = value }); }
     public string DepthPath { get => Editor.DepthPath; set => Edit(Editor with { DepthPath = value }); }

@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -18,22 +18,51 @@ namespace OfflineReShade.WinUI.Views;
 public sealed partial class InputPanel : UserControl, IDisposable
 {
     public MainWindowViewModel ViewModel { get; }
+    private bool _refreshingSize;
+    private string _customWidth = "", _customHeight = "";
     public static Visibility TextVisibility(string text) => string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
     public InputPanel(MainWindowViewModel vm)
     {
         ViewModel = vm; InitializeComponent();
         ViewModel.Settings.PropertyChanged += OnSettingsChanged;
-        RefreshSelections();
+        RefreshSelections(); RefreshSizeMode();
     }
     private void OnSettingsChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
     {
+        if (args.PropertyName is nameof(SettingsViewModel.RenderWidth) or nameof(SettingsViewModel.RenderHeight)) RefreshSizeMode();
         if (args.PropertyName is nameof(SettingsViewModel.DepthFormat) or nameof(SettingsViewModel.DepthProfile) or nameof(SettingsViewModel.DepthDownsample)) RefreshSelections();
     }
     private void RefreshSelections()
     {
         UpdateDepthProfileSelection(); UpdateDepthFormatSelection(); UpdateDepthDownsampleSelection();
     }
-    public void SetAvailableHeight(double height) => InputPanelScroll.MaxHeight = Math.Clamp(height * .4, 180, 340);
+    private static bool IsAutomaticDimension(string value) => string.IsNullOrWhiteSpace(value) || value.Trim() == "0";
+    private void RefreshSizeMode()
+    {
+        if (_refreshingSize) return;
+        _refreshingSize = true;
+        SourceSizeToggle.IsOn = IsAutomaticDimension(ViewModel.Settings.RenderWidth) && IsAutomaticDimension(ViewModel.Settings.RenderHeight);
+        WidthEditor.IsEnabled = HeightEditor.IsEnabled = !SourceSizeToggle.IsOn;
+        _refreshingSize = false;
+    }
+    private void OnSourceSizeToggled(object sender, RoutedEventArgs args)
+    {
+        if (_refreshingSize || ViewModel == null || WidthEditor == null || HeightEditor == null) return;
+        _refreshingSize = true;
+        if (SourceSizeToggle.IsOn)
+        {
+            _customWidth = ViewModel.Settings.RenderWidth; _customHeight = ViewModel.Settings.RenderHeight;
+            ViewModel.Settings.SetRenderSize("", "");
+        }
+        else
+        {
+            var width = IsAutomaticDimension(_customWidth) ? (ViewModel.RenderWidth > 0 ? ViewModel.RenderWidth.ToString(CultureInfo.InvariantCulture) : "") : _customWidth;
+            var height = IsAutomaticDimension(_customHeight) ? (ViewModel.RenderHeight > 0 ? ViewModel.RenderHeight.ToString(CultureInfo.InvariantCulture) : "") : _customHeight;
+            ViewModel.Settings.SetRenderSize(width, height);
+        }
+        WidthEditor.IsEnabled = HeightEditor.IsEnabled = !SourceSizeToggle.IsOn;
+        _refreshingSize = false;
+    }
     public void Dispose() => ViewModel.Settings.PropertyChanged -= OnSettingsChanged;
     private void OnDepthFormatSelectionChanged(object sender, SelectionChangedEventArgs args)
     {

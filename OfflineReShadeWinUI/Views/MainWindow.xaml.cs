@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -41,7 +41,7 @@ public sealed partial class MainWindow : Window
         ViewModel.PropertyChanged += OnViewModelChanged;
         ViewModel.Settings.PropertyChanged += OnSettingsChanged;
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnRootKeyDown), true);
-        RootGrid.SizeChanged += (_, _) => _input.SetAvailableHeight(RootGrid.ActualHeight);
+        RootGrid.SizeChanged += (_, _) => ArrangeWorkspace();
         _sliderModeOverlayTimer.Tick += (_, _) => { _sliderModeOverlayTimer.Stop(); SliderModeOverlay.Visibility = Visibility.Collapsed; };
         AppWindow.Closing += async (_, args) =>
         {
@@ -114,11 +114,14 @@ public sealed partial class MainWindow : Window
         MainContent.Visibility = ViewModel.IsSettingsOpen ? Visibility.Collapsed : Visibility.Visible;
         SettingsContent.Visibility = ViewModel.IsSettingsOpen ? Visibility.Visible : Visibility.Collapsed;
     }
+    private void OnCloseInput(object sender, RoutedEventArgs args) => ViewModel.IsInputPanelOpen = false;
     private void OnWorkspaceSizeChanged(object sender, SizeChangedEventArgs args) => ArrangeWorkspace();
     private void OnToggleEffects(object sender, RoutedEventArgs args) => ViewModel.Settings.EffectsPaneOpen = !ViewModel.Settings.EffectsPaneOpen;
     private void ArrangeWorkspace()
     {
         if (ViewModel == null || _effects == null) return;
+        InputSplit.OpenPaneLength = Math.Min(440, Math.Max(0, RootGrid.ActualWidth));
+        ToolbarFps.Visibility = RootGrid.ActualWidth >= 1100 ? Visibility.Visible : Visibility.Collapsed;
         var layout = WorkspaceLayout.Arrange(Math.Max(0, MainContent.ActualWidth - 24), ViewModel.Settings.EffectsPaneWidth, ViewModel.IsGalleryPanelOpen);
         EffectsSplit.OpenPaneLength = layout.EffectsWidth;
         EffectsSplit.DisplayMode = layout.EffectsInline ? SplitViewDisplayMode.Inline : SplitViewDisplayMode.Overlay;
