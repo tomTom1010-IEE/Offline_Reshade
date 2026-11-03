@@ -1,0 +1,398 @@
+﻿<Window
+    x:Class="OfflineReShade.WinUI.Views.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
+    xmlns:views="using:OfflineReShade.WinUI.Views"
+    mc:Ignorable="d"
+    Title="Offline ReShade">
+
+  <Grid x:Name="RootGrid">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <!-- The title bar doubles as the command bar: what is open on the left, actions on the right. -->
+    <TitleBar x:Name="AppTitleBar" Title="Offline ReShade" IsBackButtonVisible="False" IsPaneToggleButtonVisible="False">
+      <TitleBar.IconSource>
+        <FontIconSource Glyph="&#xE790;" />
+      </TitleBar.IconSource>
+      <TitleBar.Content>
+        <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0">
+          <DropDownButton x:Name="SourceMenuButton" Padding="10,4,8,4" MaxWidth="320"
+                          ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}"
+                          AutomationProperties.Name="Image" AutomationProperties.AutomationId="SourceMenu">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <FontIcon Glyph="&#xEB9F;" FontSize="14" />
+              <TextBlock Text="{x:Bind ViewModel.SourceTitle, Mode=OneWay}" TextTrimming="CharacterEllipsis" MaxWidth="220" />
+              <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="3" Padding="5,0" VerticalAlignment="Center"
+                      Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsListening), Mode=OneWay}">
+                <TextBlock Text="LIVE" FontSize="10" FontWeight="SemiBold" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+              </Border>
+            </StackPanel>
+            <DropDownButton.Flyout>
+              <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                <MenuFlyoutItem Text="Open image…" KeyboardAcceleratorTextOverride="Ctrl+O" Command="{x:Bind ViewModel.OpenImageCommand}" AutomationProperties.AutomationId="OpenImage">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8E5;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Listen for game output…" Command="{x:Bind ViewModel.ConfigureListenerCommand}" AutomationProperties.AutomationId="ConfigureInputListener">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE768;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Stop listening" Command="{x:Bind ViewModel.StopListeningCommand}" AutomationProperties.AutomationId="MainStopListening" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Text="Input, depth and size…" Command="{x:Bind ViewModel.OpenInputPanelCommand}" AutomationProperties.AutomationId="OpenInputPanel">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE713;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <ToggleMenuFlyoutItem Text="Gallery" IsChecked="{x:Bind ViewModel.IsGalleryPanelOpen, Mode=TwoWay}" AutomationProperties.AutomationId="ToggleGallery" />
+              </MenuFlyout>
+            </DropDownButton.Flyout>
+          </DropDownButton>
+          <DropDownButton x:Name="PresetMenuButton" Padding="10,4,8,4" MaxWidth="280"
+                          ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}"
+                          AutomationProperties.Name="Preset" AutomationProperties.AutomationId="PresetMenu">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <FontIcon Glyph="&#xE9E9;" FontSize="14" />
+              <TextBlock Text="{x:Bind ViewModel.PresetTitle, Mode=OneWay}" TextTrimming="CharacterEllipsis" MaxWidth="180" />
+              <Ellipse Width="7" Height="7" Fill="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center"
+                       Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsPresetModified), Mode=OneWay}"
+                       ToolTipService.ToolTip="Unsaved changes" AutomationProperties.Name="Unsaved changes" />
+            </StackPanel>
+            <DropDownButton.Flyout>
+              <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                <MenuFlyoutItem Text="Load preset…" Command="{x:Bind ViewModel.PickPresetCommand}" AutomationProperties.AutomationId="LoadPresetMenu">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8E5;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Save preset" KeyboardAcceleratorTextOverride="Ctrl+S" Command="{x:Bind ViewModel.SavePresetCommand}" AutomationProperties.AutomationId="SavePreset">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74E;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Save preset as…" Command="{x:Bind ViewModel.SavePresetAsCommand}" AutomationProperties.AutomationId="SavePresetAs">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE792;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Text="Reload effects" Command="{x:Bind ViewModel.ReloadCommand}" AutomationProperties.AutomationId="ReloadEffects">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE72C;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Restore controls from renderer" Command="{x:Bind ViewModel.RestoreControlsCommand}"
+                                ToolTipService.ToolTip="Discard failed pending control edits and show the renderer's actual values" AutomationProperties.AutomationId="RestoreControls" />
+              </MenuFlyout>
+            </DropDownButton.Flyout>
+          </DropDownButton>
+        </StackPanel>
+      </TitleBar.Content>
+      <TitleBar.RightHeader>
+        <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" Margin="0,0,8,0">
+          <Button Width="36" Height="32" Style="{StaticResource SubtleIconButtonStyle}" Command="{x:Bind ViewModel.UndoCommand}"
+                  ToolTipService.ToolTip="Undo (Ctrl+Z)" AutomationProperties.Name="Undo" AutomationProperties.AutomationId="UndoEdit">
+            <FontIcon Glyph="&#xE7A7;" FontSize="16" />
+          </Button>
+          <Button Width="36" Height="32" Style="{StaticResource SubtleIconButtonStyle}" Command="{x:Bind ViewModel.RedoCommand}"
+                  ToolTipService.ToolTip="Redo (Ctrl+Y)" AutomationProperties.Name="Redo" AutomationProperties.AutomationId="RedoEdit">
+            <FontIcon Glyph="&#xE7A6;" FontSize="16" />
+          </Button>
+          <Button Style="{StaticResource AccentButtonStyle}" Margin="6,0,2,0" Padding="12,5" Command="{x:Bind ViewModel.OpenExportCommand}"
+                  ToolTipService.ToolTip="Export image (Ctrl+E)" AutomationProperties.Name="Export image" AutomationProperties.AutomationId="ExportImage">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <FontIcon Glyph="&#xEDE1;" FontSize="14" />
+              <TextBlock Text="Export" />
+            </StackPanel>
+          </Button>
+          <Button Width="36" Height="32" Style="{StaticResource SubtleIconButtonStyle}" ToolTipService.ToolTip="More"
+                  AutomationProperties.Name="More options" AutomationProperties.AutomationId="MainMore">
+            <FontIcon Glyph="&#xE712;" FontSize="16" />
+            <Button.Flyout>
+              <MenuFlyout Placement="BottomEdgeAlignedRight">
+                <ToggleMenuFlyoutItem Text="Effects panel" IsChecked="{x:Bind ViewModel.Settings.EffectsPaneOpen, Mode=TwoWay}" AutomationProperties.AutomationId="ToggleEffects" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Text="Batch export…" Command="{x:Bind ViewModel.OpenBatchCommand}" AutomationProperties.AutomationId="MainBatchExport">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8B9;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Resume saved batch…" Command="{x:Bind ViewModel.ResumeSavedBatchCommand}" AutomationProperties.AutomationId="MainResumeBatch" />
+                <MenuFlyoutItem Text="Batch results" Command="{x:Bind ViewModel.ShowBatchResultsCommand}" AutomationProperties.AutomationId="MainBatchResults" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Text="Stop renderer" Command="{x:Bind ViewModel.StopPreviewCommand}" AutomationProperties.AutomationId="StopRenderer" />
+                <MenuFlyoutItem Text="Keyboard shortcuts" Click="OnShowShortcuts" AutomationProperties.AutomationId="KeyboardShortcuts">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE765;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Settings" Command="{x:Bind ViewModel.ToggleSettingsCommand}" AutomationProperties.AutomationId="OpenSettings">
+                  <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE713;" /></MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+        </StackPanel>
+      </TitleBar.RightHeader>
+    </TitleBar>
+
+    <InfoBar Grid.Row="1" Margin="8,0,8,8"
+             IsOpen="{x:Bind ViewModel.FeedbackOpen, Mode=TwoWay}"
+             Severity="{x:Bind views:MainWindow.NoticeSeverity(ViewModel.FeedbackStatus), Mode=OneWay}"
+             Title="{x:Bind ViewModel.FeedbackTitle, Mode=OneWay}" Message="{x:Bind ViewModel.FeedbackMessage, Mode=OneWay}"
+             AutomationProperties.AutomationId="OperationFeedback" AutomationProperties.LiveSetting="Polite">
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Content="Retry" AutomationProperties.AutomationId="RetryOperation" Command="{x:Bind ViewModel.RetryOperationCommand}" Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.CanRetryOperation), Mode=OneWay}" />
+        <Button Content="Locate files" AutomationProperties.AutomationId="LocateOperationFiles" Command="{x:Bind ViewModel.LocateFeedbackCommand}" />
+        <Button Content="Details" AutomationProperties.AutomationId="OperationDetails">
+          <Button.Flyout>
+            <Flyout>
+              <ScrollViewer MaxHeight="360" MaxWidth="640">
+                <TextBox Header="Operation details" AutomationProperties.AutomationId="OperationDetailsText" Text="{x:Bind ViewModel.FeedbackDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinWidth="300" />
+              </ScrollViewer>
+            </Flyout>
+          </Button.Flyout>
+        </Button>
+      </StackPanel>
+    </InfoBar>
+
+    <SplitView x:Name="InputSplit" Grid.Row="2" PanePlacement="Right" DisplayMode="Overlay"
+               OpenPaneLength="440" IsPaneOpen="{x:Bind ViewModel.IsInputPanelOpen, Mode=TwoWay}">
+      <SplitView.Pane>
+        <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <Grid Padding="16,8" ColumnSpacing="12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock Text="Input and preset" Style="{StaticResource SubtitleTextBlockStyle}" VerticalAlignment="Center" />
+            <Button Grid.Column="1" Content="Close" Click="OnCloseInput" AutomationProperties.AutomationId="CloseInputPanel" />
+          </Grid>
+          <ContentControl IsEnabled="{x:Bind ViewModel.CanChooseSource, Mode=OneWay}" x:Name="InputHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        </Grid>
+      </SplitView.Pane>
+    <Grid>
+      <ScrollViewer x:Name="SettingsContent" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
+                    Visibility="Collapsed"
+                    Padding="18"
+                    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Border MaxWidth="760"
+                HorizontalAlignment="Left"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                Padding="18">
+          <StackPanel Spacing="12">
+            <Button Content="Back to workspace" Command="{x:Bind ViewModel.ToggleSettingsCommand}" AutomationProperties.AutomationId="BackToWorkspace" />
+            <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
+            <TextBox Header="MCP session ID" Text="{x:Bind ViewModel.AutomationSessionId, Mode=OneWay}" IsReadOnly="True"
+                     AutomationProperties.AutomationId="AutomationSessionId"  />
+
+            <TextBlock Text="Effect Folder" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.EffectDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl23" AutomationProperties.Name="Effects folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickEffectDirCommand}"  AutomationProperties.AutomationId="MainWindowControl24" AutomationProperties.Name="Choose effects folder" />
+            </Grid>
+
+            <TextBlock Text="Gallery" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
+            <TextBlock Text="Gallery Input Folder" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryInputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl25" AutomationProperties.Name="Gallery input folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryInputFolderCommand}"  AutomationProperties.AutomationId="MainWindowControl26" AutomationProperties.Name="Choose gallery input folder" />
+            </Grid>
+
+            <TextBlock Text="Gallery Output Folder" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.GalleryOutputFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="MainWindowControl27" AutomationProperties.Name="Gallery output folder" />
+              <Button Grid.Column="1" Content="..." Command="{x:Bind ViewModel.PickGalleryOutputFolderCommand}"  AutomationProperties.AutomationId="MainWindowControl28" AutomationProperties.Name="Choose gallery output folder" />
+            </Grid>
+
+            <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}" />
+            <ComboBox x:Name="ThemeBox" Header="Theme" SelectionChanged="OnThemeSelectionChanged" AutomationProperties.AutomationId="ThemePreference">
+              <ComboBoxItem Content="Use Windows setting" Tag="System" />
+              <ComboBoxItem Content="Light" Tag="Light" /><ComboBoxItem Content="Dark" Tag="Dark" />
+            </ComboBox>
+            <TextBlock Text="Preview Transport" />
+            <ComboBox x:Name="PreviewTransportBox"
+                      MinWidth="180"
+                      SelectionChanged="OnPreviewTransportSelectionChanged" AutomationProperties.AutomationId="MainWindowControl30">
+              <ComboBoxItem Content="GPU" Tag="GPU" />
+              <ComboBoxItem Content="CPU" Tag="CPU" />
+            </ComboBox>
+            <ToggleSwitch Header="Show FPS"
+                          IsOn="{x:Bind ViewModel.Settings.ShowFps, Mode=TwoWay}"  AutomationProperties.AutomationId="MainWindowControl31" />
+          </StackPanel>
+        </Border>
+      </ScrollViewer>
+
+      <Grid x:Name="MainContent" Padding="8,0,8,8" SizeChanged="OnWorkspaceSizeChanged">
+        <SplitView x:Name="GallerySplit" PanePlacement="Right" DisplayMode="Overlay" OpenPaneLength="280" IsPaneOpen="{x:Bind ViewModel.IsGalleryPanelOpen, Mode=TwoWay}">
+          <SplitView.Pane>
+        <Border x:Name="GalleryPanel"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid Padding="12,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock x:Name="GalleryTitle" Text="Gallery" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <Button Grid.Column="1"
+                      MinWidth="34"
+                      Padding="8,4"
+                      AutomationProperties.Name="Hide gallery" AutomationProperties.AutomationId="HideGallery"
+                      Content="&#xE70D;"
+                      FontFamily="Segoe MDL2 Assets"
+                      Command="{x:Bind ViewModel.ToggleGalleryPanelCommand}"  />
+            </Grid>
+
+            <Grid x:Name="GalleryExpandedContent" Grid.Row="1" RowSpacing="10" Padding="10">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+              </Grid.RowDefinitions>
+              <Button Content="Refresh" HorizontalAlignment="Stretch" Command="{x:Bind ViewModel.RefreshGalleryCommand}"  AutomationProperties.AutomationId="MainWindowControl33" />
+              <StackPanel Grid.Row="1" Spacing="8">
+                <Button Content="Batch export…" Command="{x:Bind ViewModel.OpenBatchCommand}" AutomationProperties.AutomationId="BatchExport" />
+                <Button Content="Resume saved task…" Command="{x:Bind ViewModel.ResumeSavedBatchCommand}" AutomationProperties.AutomationId="ResumeSavedBatch" />
+              </StackPanel>
+              <ListView x:Name="GalleryList" IsEnabled="{x:Bind ViewModel.CanEditSession, Mode=OneWay}"
+                        Grid.Row="2"
+                        ItemsSource="{x:Bind ViewModel.GalleryItems, Mode=OneWay}"
+                        SelectionChanged="OnGallerySelectionChanged"
+                        HorizontalContentAlignment="Stretch"
+                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                        ScrollViewer.VerticalScrollMode="Enabled"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                        ScrollViewer.HorizontalScrollMode="Disabled" AutomationProperties.AutomationId="MainWindowControl37">
+                <ListView.ItemTemplate>
+                  <DataTemplate x:DataType="vm:GalleryItemViewModel">
+                    <Grid ColumnSpacing="10" Padding="4">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="96" />
+                        <ColumnDefinition Width="*" />
+                      </Grid.ColumnDefinitions>
+                      <Border Width="96" Height="54" Background="Black">
+                        <Image Source="{x:Bind Thumbnail}" Stretch="UniformToFill" />
+                      </Border>
+                      <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind BaseName}" TextWrapping="WrapWholeWords" FontWeight="SemiBold" />
+                        <TextBlock Text="{x:Bind StatusText}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                      </StackPanel>
+                    </Grid>
+                  </DataTemplate>
+                </ListView.ItemTemplate>
+              </ListView>
+            </Grid>
+          </Grid>
+        </Border>
+          </SplitView.Pane>
+          <SplitView x:Name="EffectsSplit" DisplayMode="Inline" OpenPaneLength="400" IsPaneOpen="{x:Bind ViewModel.Settings.EffectsPaneOpen, Mode=TwoWay}">
+            <SplitView.Pane><ContentControl x:Name="EffectsHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" /></SplitView.Pane>
+            <ContentControl x:Name="CanvasHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+          </SplitView>
+        </SplitView>
+      </Grid>
+    </Grid>
+
+    </SplitView>
+
+    <!-- Overlays the content edge so showing it never shifts the layout. -->
+    <ProgressBar Grid.Row="2" VerticalAlignment="Top" Margin="8,0" Canvas.ZIndex="10"
+                 IsIndeterminate="{x:Bind ViewModel.IsEffectsLoading, Mode=OneWay}"
+                 Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsEffectsLoading), Mode=OneWay}"
+                 AutomationProperties.Name="ReShade effect compilation progress" />
+
+    <!-- One line for everything that describes state rather than offering an action. -->
+    <Grid x:Name="StatusBar" Grid.Row="3" MinHeight="30" Padding="12,0,8,0" ColumnSpacing="12"
+          BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+        <!-- One dot per state so each fill is a theme resource of this window. -->
+        <Grid Width="8" Height="8" VerticalAlignment="Center">
+          <Ellipse Fill="{ThemeResource SystemFillColorSuccessBrush}" Visibility="{x:Bind views:MainWindow.ToneVisibility(ViewModel.StatusTone, 'ready'), Mode=OneWay}" />
+          <Ellipse Fill="{ThemeResource SystemFillColorAttentionBrush}" Visibility="{x:Bind views:MainWindow.ToneVisibility(ViewModel.StatusTone, 'busy'), Mode=OneWay}" />
+          <Ellipse Fill="{ThemeResource SystemFillColorCautionBrush}" Visibility="{x:Bind views:MainWindow.ToneVisibility(ViewModel.StatusTone, 'warning'), Mode=OneWay}" />
+          <Ellipse Fill="{ThemeResource SystemFillColorCriticalBrush}" Visibility="{x:Bind views:MainWindow.ToneVisibility(ViewModel.StatusTone, 'error'), Mode=OneWay}" />
+          <Ellipse Fill="{ThemeResource TextFillColorTertiaryBrush}" Visibility="{x:Bind views:MainWindow.ToneVisibility(ViewModel.StatusTone, 'idle'), Mode=OneWay}" />
+        </Grid>
+        <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
+                   AutomationProperties.LiveSetting="Polite" AutomationProperties.AutomationId="StatusText" />
+      </StackPanel>
+      <Button Grid.Column="1" HorizontalAlignment="Left" Padding="6,3" Style="{StaticResource SubtleIconButtonStyle}"
+              Command="{x:Bind ViewModel.OpenInputPanelCommand}" ToolTipService.ToolTip="{x:Bind ViewModel.InputSummary, Mode=OneWay}"
+              AutomationProperties.Name="Input settings" AutomationProperties.AutomationId="InputSummaryButton">
+        <TextBlock Text="{x:Bind ViewModel.StatusSourceText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+      </Button>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center"
+                  Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.HasBatchTask), Mode=OneWay}">
+        <ProgressBar Width="96" VerticalAlignment="Center" Value="{x:Bind ViewModel.BatchProgress, Mode=OneWay}" Maximum="{x:Bind ViewModel.BatchMaximum, Mode=OneWay}"
+                     Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsBatchApplying), Mode=OneWay}" AutomationProperties.Name="Batch export progress" />
+        <Button Padding="6,3" Style="{StaticResource SubtleIconButtonStyle}" Command="{x:Bind ViewModel.ShowBatchResultsCommand}"
+                ToolTipService.ToolTip="{x:Bind ViewModel.BatchStatusText, Mode=OneWay}" AutomationProperties.AutomationId="FooterBatchResults">
+          <TextBlock Text="Batch results" Style="{StaticResource CaptionTextBlockStyle}" />
+        </Button>
+        <Button Padding="6,3" Style="{StaticResource SubtleIconButtonStyle}" Command="{x:Bind ViewModel.CancelBatchCommand}"
+                Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsBatchApplying), Mode=OneWay}" AutomationProperties.AutomationId="CancelBatch">
+          <TextBlock Text="Cancel batch" Style="{StaticResource CaptionTextBlockStyle}" />
+        </Button>
+      </StackPanel>
+      <Button Grid.Column="3" Padding="6,3" Style="{StaticResource SubtleIconButtonStyle}" Command="{x:Bind ViewModel.CancelOperationCommand}"
+              Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.IsExclusiveOperationRunning), Mode=OneWay}" AutomationProperties.AutomationId="CancelOperation">
+        <TextBlock Text="Cancel" Style="{StaticResource CaptionTextBlockStyle}" />
+      </Button>
+      <TextBlock Grid.Column="4" Text="{x:Bind ViewModel.FooterEditStatus, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
+                 AutomationProperties.LiveSetting="Polite" />
+      <Button Grid.Column="5" Padding="6,3" Style="{StaticResource SubtleIconButtonStyle}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.HistoryWarning), Mode=OneWay}"
+              AutomationProperties.Name="History warning" AutomationProperties.AutomationId="FooterHistoryWarning">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <FontIcon Glyph="&#xE7BA;" FontSize="12" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+          <TextBlock Text="History" Style="{StaticResource CaptionTextBlockStyle}" />
+        </StackPanel>
+        <Button.Flyout><Flyout><TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" TextWrapping="Wrap" MaxWidth="360" /></Flyout></Button.Flyout>
+      </Button>
+      <TextBlock Grid.Column="6" Text="{x:Bind ViewModel.FpsText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
+                 Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+    </Grid>
+
+    <Grid x:Name="SliderModeOverlay"
+          Grid.RowSpan="4"
+          Canvas.ZIndex="1000"
+          Visibility="Collapsed"
+          IsHitTestVisible="False"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center">
+      <Border Padding="22,12"
+              MinWidth="116"
+              HorizontalAlignment="Center"
+              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="1"
+              CornerRadius="6">
+        <TextBlock x:Name="SliderModeOverlayText"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   FontSize="26"
+                   FontWeight="SemiBold" />
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

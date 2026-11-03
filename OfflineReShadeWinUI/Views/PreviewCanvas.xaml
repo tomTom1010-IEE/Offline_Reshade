@@ -1,0 +1,51 @@
+﻿<UserControl x:Class="OfflineReShade.WinUI.Views.PreviewCanvas"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
+ xmlns:views="using:OfflineReShade.WinUI.Views">
+        <Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid x:Name="PreviewTools" Grid.Row="0" Visibility="Collapsed" Background="{ThemeResource LayerFillColorDefaultBrush}">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+              <Grid ColumnSpacing="12" Margin="12,0" VerticalAlignment="Center">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <TextBlock x:Name="ZoomStatus" TextTrimming="CharacterEllipsis" MaxWidth="220" Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.AutomationId="PreviewZoomStatus" />
+                <TextBlock Grid.Column="1" x:Name="ResolutionStatus" TextTrimming="CharacterEllipsis" MaxWidth="260" Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.AutomationId="PreviewResolutionStatus" />
+              </Grid>
+              <CommandBar Grid.Column="1" DefaultLabelPosition="Right" Background="Transparent" AutomationProperties.Name="Canvas commands">
+                <AppBarButton Label="Fit" Click="OnFit" AutomationProperties.AutomationId="PreviewFit" ToolTipService.ToolTip="Fit image to canvas (Ctrl+0)"  />
+                <AppBarButton Label="100%" Click="OnActualPixels" AutomationProperties.AutomationId="PreviewActualPixels" ToolTipService.ToolTip="One rendered pixel per physical display pixel (Ctrl+1)"  />
+                <AppBarToggleButton x:Name="CompareButton" Label="Original" IsChecked="{x:Bind ViewModel.PreviewOriginal, Mode=OneWay}" Click="OnCompare" IsEnabled="{x:Bind ViewModel.IsPreviewRunning, Mode=OneWay}" ToolTipService.ToolTip="Compare original input; exports keep effects (Ctrl+B)" AutomationProperties.AutomationId="PreviewCompare"  />
+                <CommandBar.SecondaryCommands>
+                  <AppBarButton Label="Zoom in" Click="OnZoomIn"  AutomationProperties.AutomationId="PreviewCanvasControl4" />
+                  <AppBarButton Label="Zoom out" Click="OnZoomOut"  AutomationProperties.AutomationId="PreviewCanvasControl5" />
+                </CommandBar.SecondaryCommands>
+              </CommandBar>
+            </Grid>
+            <ContentControl x:Name="CanvasFocusTarget" Grid.Row="1" IsTabStop="True" KeyDown="OnCanvasKeyDown" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+                            AutomationProperties.AutomationId="PreviewCanvas" AutomationProperties.Name="Image canvas. Arrow keys pan; Ctrl+0 fits; Ctrl+1 shows actual pixels.">
+            <Grid x:Name="PreviewSurface" Background="{ThemeResource CanvasBackgroundBrush}">
+              <SwapChainPanel x:Name="PreviewSwapChainPanel" Visibility="Collapsed" />
+              <Image x:Name="PreviewImage" Stretch="Uniform">
+                <Image.RenderTransform>
+                  <CompositeTransform x:Name="PreviewTransform" />
+                </Image.RenderTransform>
+              </Image>
+              <Border Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="24"
+                      Visibility="{x:Bind views:MainWindow.BoolVisibility(ViewModel.ShowEmptyCanvas), Mode=OneWay}">
+                <StackPanel Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420">
+                  <TextBlock Text="{x:Bind ViewModel.EmptyTitle, Mode=OneWay}" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                  <TextBlock Text="{x:Bind ViewModel.EmptyMessage, Mode=OneWay}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+            </Grid>
+            </ContentControl>
+          </Grid>
+        </Border>
+
+
+</UserControl>

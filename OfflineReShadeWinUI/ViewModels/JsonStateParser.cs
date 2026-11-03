@@ -1,0 +1,443 @@
+using System.Text;
+using System.Text.Json;
+using System.Globalization;
+
+namespace OfflineReShade.WinUI.ViewModels;
+
+public static class JsonStateParser
+{
+    public static IReadOnlyList<TechniqueViewModel> ParseTechniques(JsonElement state)
+    {
+        var result = new List<TechniqueViewModel>();
+        if (!state.TryGetProperty("techniques", out var techniques) || techniques.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var item in techniques.EnumerateArray())
+        {
+            result.Add(new TechniqueViewModel(
+                GetString(item, "id"),
+                GetString(item, "effectName"),
+                GetString(item, "name"),
+                GetBool(item, "enabled")));
+        }
+
+        return result;
+    }
+
+    public static IReadOnlyList<UniformViewModel> ParseUniforms(JsonElement state)
+    {
+        var result = new List<UniformViewModel>();
+        if (!state.TryGetProperty("uniforms", out var uniforms) || uniforms.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var item in uniforms.EnumerateArray())
+        {
+            var name = GetString(item, "name");
+            var label = GetString(item, "label");
+            result.Add(new UniformViewModel(
+                GetString(item, "id"),
+                GetString(item, "effectName"),
+                name,
+                string.IsNullOrWhiteSpace(label) ? name : label,
+                GetString(item, "type"),
+                GetString(item, "uiType"),
+                GetString(item, "category"),
+                GetArrayValues(item, "value"),
+                GetStringArray(item, "items"),
+                GetNullableDouble(item, "min"),
+                GetNullableDouble(item, "max"),
+                GetNullableDouble(item, "step"), item.TryGetProperty("readOnly", out var readOnly) && readOnly.ValueKind == JsonValueKind.True)
+                { Tooltip = GetString(item, "ui_tooltip"), Description = GetString(item, "ui_text"), Units = GetString(item, "ui_units"), AddonService = GetString(item, "addonService") });
+        }
+
+        return result;
+    }
+
+    public static IReadOnlyList<PreprocessorDefinitionViewModel> ParsePreprocessorDefinitions(JsonElement state)
+    {
+        var result = new List<PreprocessorDefinitionViewModel>();
+        if (!state.TryGetProperty("preprocessorDefinitions", out var definitions) || definitions.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var item in definitions.EnumerateArray())
+        {
+            result.Add(new PreprocessorDefinitionViewModel(
+                GetString(item, "id"),
+                GetString(item, "effectName"),
+                GetString(item, "name"),
+                GetString(item, "defaultValue"),
+                GetString(item, "value")));
+        }
+
+        return result;
+    }
+
+    public static IReadOnlyList<AddonViewModel> ParseAddons(JsonElement state)
+    {
+        var result = new List<AddonViewModel>();
+        if (!TryGetAddonState(state, out var addonState))
+            return result;
+        if (!addonState.TryGetProperty("addons", out var addons) || addons.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var item in addons.EnumerateArray())
+        {
+            var name = GetString(item, "name");
+            if (string.IsNullOrWhiteSpace(name))
+                name = GetString(item, "file");
+
+            result.Add(new AddonViewModel(
+                name,
+                GetString(item, "description"),
+                GetString(item, "file"),
+                GetString(item, "author"),
+                GetBool(item, "loaded"),
+                GetBool(item, "external"),
+                GetBool(item, "hasSettingsOverlay"),
+                GetBool(item, "hasEventOverlay"),
+                GetStringArray(item, "overlays"),
+                GetString(item, "offlineCompatibility"),
+                ParseAddonEvents(item)));
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<AddonEventViewModel> ParseAddonEvents(JsonElement addon)
+    {
+        if (!addon.TryGetProperty("events", out var events) || events.ValueKind != JsonValueKind.Array)
+            return Array.Empty<AddonEventViewModel>();
+
+        return events.EnumerateArray()
+            .Select(static item => new AddonEventViewModel(GetString(item, "name"), GetString(item, "support")))
+            .ToArray();
+    }
+
+    public static IReadOnlyList<AddonDiagnosticViewModel> ParseAddonDiagnostics(JsonElement state)
+    {
+        var result = new List<AddonDiagnosticViewModel>();
+        if (!TryGetAddonState(state, out var addonState) ||
+            !addonState.TryGetProperty("diagnostics", out var diagnostics) ||
+            diagnostics.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (var item in diagnostics.EnumerateArray())
+        {
+            result.Add(new AddonDiagnosticViewModel(
+                GetString(item, "file"),
+                GetString(item, "path"),
+                GetString(item, "status"),
+                GetString(item, "stage"),
+                GetString(item, "message"),
+                GetUInt32(item, "errorCode"),
+                GetBool(item, "dependencyFailure")));
+        }
+
+        return result;
+    }
+
+    public static IReadOnlyList<string> ParseAddonLogErrors(JsonElement state)
+    {
+        return TryGetAddonState(state, out var addonState)
+            ? GetStringArray(addonState, "logErrors")
+            : Array.Empty<string>();
+    }
+
+    public static string ParseAddonSearchPath(JsonElement state) =>
+        TryGetAddonState(state, out var addonState) ? GetString(addonState, "searchPath") : string.Empty;
+
+    public static string ParseAddonLogPath(JsonElement state) =>
+        TryGetAddonState(state, out var addonState) ? GetString(addonState, "logPath") : string.Empty;
+
+    public static bool ParseAllAddonsLoaded(JsonElement state) =>
+        !TryGetAddonState(state, out var addonState) || GetBool(addonState, "allLoaded");
+
+    private static bool TryGetAddonState(JsonElement state, out JsonElement addonState)
+    {
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addons", out var nested) &&
+            nested.ValueKind == JsonValueKind.Object)
+        {
+            addonState = nested;
+            return true;
+        }
+
+        if (state.ValueKind == JsonValueKind.Object && state.TryGetProperty("available", out _))
+        {
+            addonState = state;
+            return true;
+        }
+
+        addonState = default;
+        return false;
+    }
+
+    public static bool ParseEffectsEnabled(JsonElement state)
+    {
+        return !state.TryGetProperty("runtime", out var runtime) || !runtime.TryGetProperty("effectsEnabled", out var enabled) || enabled.GetBoolean();
+    }
+
+    public static string ParseAddonUiDebugText(JsonElement state)
+    {
+        var capture = state;
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addonUi", out var addonUi) &&
+            addonUi.ValueKind == JsonValueKind.Object)
+        {
+            capture = addonUi;
+        }
+
+        if (capture.ValueKind != JsonValueKind.Object)
+            return "No ImGui controls captured yet.";
+
+        var builder = new StringBuilder();
+        var enabled = capture.TryGetProperty("enabled", out var enabledValue) && enabledValue.ValueKind == JsonValueKind.True;
+        var frame = capture.TryGetProperty("frame", out var frameValue) && frameValue.ValueKind == JsonValueKind.Number ? frameValue.GetInt32() : -1;
+        builder.Append("Capture: ").Append(enabled ? "enabled" : "disabled").Append(", frame ").Append(frame).AppendLine();
+
+        if (capture.TryGetProperty("requestedVersions", out var versions) && versions.ValueKind == JsonValueKind.Array)
+        {
+            var versionText = string.Join(", ", versions.EnumerateArray()
+                .Where(static item => item.ValueKind == JsonValueKind.Number)
+                .Select(static item => item.GetUInt32().ToString(CultureInfo.InvariantCulture)));
+            builder.Append("ImGui table versions: ").Append(string.IsNullOrWhiteSpace(versionText) ? "(none)" : versionText).AppendLine();
+        }
+
+        if (!capture.TryGetProperty("controls", out var controls) || controls.ValueKind != JsonValueKind.Array || controls.GetArrayLength() == 0)
+        {
+            builder.AppendLine("No standard ImGui widgets captured yet.");
+            return builder.ToString();
+        }
+
+        string currentGroup = string.Empty;
+        foreach (var control in controls.EnumerateArray())
+        {
+            var addon = GetString(control, "addon");
+            var overlay = GetString(control, "overlay");
+            var group = addon + " / " + overlay;
+            if (!string.Equals(group, currentGroup, StringComparison.Ordinal))
+            {
+                if (builder.Length != 0)
+                    builder.AppendLine();
+                builder.AppendLine(group);
+                currentGroup = group;
+            }
+
+            var kind = GetString(control, "kind");
+            var label = GetString(control, "label");
+            var value = GetString(control, "value");
+            var minimum = GetString(control, "min");
+            var maximum = GetString(control, "max");
+            var changed = GetBool(control, "changed");
+
+            builder.Append("  - ").Append(kind);
+            if (!string.IsNullOrWhiteSpace(label))
+                builder.Append(": ").Append(label);
+            if (!string.IsNullOrWhiteSpace(value))
+                builder.Append(" = ").Append(value);
+            if (!string.IsNullOrWhiteSpace(minimum) || !string.IsNullOrWhiteSpace(maximum))
+                builder.Append(" [").Append(minimum).Append("..").Append(maximum).Append(']');
+            if (changed)
+                builder.Append(" *changed*");
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
+    public static IReadOnlyList<AddonImGuiControlViewModel> ParseAddonImGuiControls(JsonElement state)
+    {
+        var capture = state;
+        if (state.ValueKind == JsonValueKind.Object &&
+            state.TryGetProperty("addonUi", out var addonUi) &&
+            addonUi.ValueKind == JsonValueKind.Object)
+        {
+            capture = addonUi;
+        }
+
+        if (capture.ValueKind != JsonValueKind.Object ||
+            !capture.TryGetProperty("controls", out var controls) ||
+            controls.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<AddonImGuiControlViewModel>();
+        }
+
+        var result = new List<AddonImGuiControlViewModel>();
+        foreach (var control in controls.EnumerateArray())
+        {
+            var kind = GetString(control, "kind");
+            if (!IsRedrawableAddonControl(kind))
+                continue;
+
+            var id = GetString(control, "id");
+            if (string.IsNullOrWhiteSpace(id))
+                continue;
+
+            result.Add(new AddonImGuiControlViewModel(
+                id,
+                GetString(control, "addon"),
+                GetString(control, "overlay"),
+                GetString(control, "window"),
+                kind,
+                GetString(control, "label"),
+                GetString(control, "value"),
+                GetString(control, "min"),
+                GetString(control, "max"),
+                GetStringArray(control, "items"),
+                GetInt(control, "components")) { IsEnabled = !control.TryGetProperty("enabled", out var enabled) || enabled.ValueKind != JsonValueKind.False });
+        }
+
+        return result;
+    }
+
+    private static bool IsRedrawableAddonControl(string kind)
+    {
+        return kind == "button" ||
+            kind == "combo_begin" || kind == "combo_end" ||
+            kind == "checkbox" ||
+            kind == "combo" ||
+            kind == "list_box" ||
+            kind == "slider_float" ||
+            kind == "slider_int" ||
+            kind == "drag_float" ||
+            kind == "drag_int" ||
+            kind == "input_float" ||
+            kind == "input_int" ||
+            kind == "input_text" ||
+            kind == "input_text_multiline" ||
+            kind == "color" ||
+            kind == "text" ||
+            kind == "tree_node" ||
+            kind == "tree_end" ||
+            kind == "collapsing_header" ||
+            kind == "tab_bar_begin" ||
+            kind == "tab_bar_end" ||
+            kind == "tab_item_begin" ||
+            kind == "tab_item_end" ||
+            kind == "tooltip" ||
+            kind == "menu_begin" ||
+            kind == "menu_end" ||
+            kind == "menu_item" ||
+            kind == "selectable" ||
+            kind == "popup_begin" ||
+            kind == "popup_modal_begin" ||
+            kind == "popup_end" ||
+            kind == "native_fallback";
+    }
+
+    public static IReadOnlyList<EffectControlViewModel> BuildEffects(IReadOnlyList<TechniqueViewModel> techniques, IReadOnlyList<UniformViewModel> uniforms, IReadOnlyList<PreprocessorDefinitionViewModel> definitions)
+    {
+        var enabledEffectNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+
+        foreach (var technique in techniques.Where(static technique => technique.IsEnabled))
+        {
+            if (enabledEffectNames.Add(technique.EffectName))
+            {
+                order.Add(technique.EffectName);
+                aliases[NormalizeEffectName(technique.EffectName)] = technique.EffectName;
+            }
+        }
+
+        var effects = order.ToDictionary(static name => name, static name => new EffectControlViewModel(name), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var uniform in uniforms)
+        {
+            var effectName = ResolveEnabledEffectName(uniform.EffectName, enabledEffectNames, aliases);
+            if (effectName != null && effects.TryGetValue(effectName, out var effect))
+                effect.Uniforms.Add(uniform);
+        }
+
+        foreach (var definition in definitions)
+        {
+            var effectName = ResolveEnabledEffectName(definition.EffectName, enabledEffectNames, aliases);
+            if (effectName != null && effects.TryGetValue(effectName, out var effect))
+                effect.PreprocessorDefinitions.Add(definition);
+        }
+
+        return order.Select(name => effects[name])
+            .Where(static effect => effect.Uniforms.Count != 0 || effect.PreprocessorDefinitions.Count != 0)
+            .ToArray();
+    }
+
+    private static string? ResolveEnabledEffectName(string effectName, HashSet<string> enabledEffectNames, Dictionary<string, string> aliases)
+    {
+        if (enabledEffectNames.Contains(effectName))
+            return effectName;
+        return aliases.TryGetValue(NormalizeEffectName(effectName), out var enabledEffectName) ? enabledEffectName : null;
+    }
+
+    private static string NormalizeEffectName(string effectName)
+    {
+        var builder = new StringBuilder(effectName.Length);
+        foreach (var ch in effectName)
+        {
+            if (char.IsLetterOrDigit(ch))
+                builder.Append(char.ToLowerInvariant(ch));
+        }
+
+        return builder.ToString();
+    }
+
+    private static string GetString(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : string.Empty;
+    }
+
+    private static bool GetBool(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+    }
+
+    private static uint GetUInt32(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetUInt32(out var result)
+            ? result
+            : 0;
+    }
+
+    private static int GetInt(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetInt32() : 0;
+    }
+
+    private static double? GetNullableDouble(JsonElement item, string name)
+    {
+        return item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetDouble() : null;
+    }
+
+    private static IReadOnlyList<string> GetStringArray(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array)
+            return Array.Empty<string>();
+
+        return array.EnumerateArray()
+            .Where(static value => value.ValueKind == JsonValueKind.String)
+            .Select(static value => value.GetString() ?? string.Empty)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<object?> GetArrayValues(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array)
+            return Array.Empty<object?>();
+
+        var result = new List<object?>();
+        foreach (var value in array.EnumerateArray())
+        {
+            result.Add(value.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number => value.GetDouble(),
+                JsonValueKind.String => value.GetString(),
+                _ => null
+            });
+        }
+
+        return result;
+    }
+}

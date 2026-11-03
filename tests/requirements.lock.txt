@@ -1,0 +1,4 @@
+# Windows x64 / CPython 3.12 build generator and integration tests. Update deliberately.
+pillow==10.3.0 --hash=sha256:412444afb8c4c7a6cc11a47dade32982439925537e483be7c0ae0cf96c4f6a0b
+Jinja2==3.1.4 --hash=sha256:bc5dd2abb727a5319567b7a813e6a2e7318c39f4f487cfe6c89c6f9c7d25197d
+MarkupSafe==2.1.3 --hash=sha256:1b8dd8c3fd14349433c79fa8abeb573a55fc0fdd769133baac1f5e07abf54aeb

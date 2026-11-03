@@ -1,0 +1,3316 @@
+/*
+ * Offline ReShade prototype
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+#include <Windows.h>
+#include <d3d11.h>
+#include <dxgi1_4.h>
+#include <timeapi.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+
+#include "reshade_api.hpp"
+#include "offline_render_limits.hpp"
+#include "../include/offline_contract.hpp"
+
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <cctype>
+#include <cmath>
+#include <charconv>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <iterator>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <limits>
+#include <regex>
+#include <set>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+
+using Microsoft::WRL::ComPtr;
+
+namespace
+{
+	struct image_rgba
+	{
+		int width = 0;
+		int height = 0;
+		std::vector<uint8_t> pixels;
+	};
+
+	struct options
+	{
+		std::filesystem::path color_path;
+		std::filesystem::path depth_path;
+		std::string depth_format = "raw";
+		std::string depth_profile = "kks";
+		std::string depth_downsample = "max2x2";
+		std::filesystem::path effect_dir;
+		std::filesystem::path preset_path;
+		std::filesystem::path output_path;
+		std::filesystem::path work_dir;
+		uint32_t warmup_frames = 120;
+		uint32_t timeout_seconds = 600;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		uintptr_t parent_hwnd = 0;
+		uintptr_t overlay_hwnd = 0;
+		bool addon_overlay_shared = false;
+		uint32_t addon_overlay_width = 640;
+		uint32_t addon_overlay_height = 360;
+		std::string control_pipe;
+		std::string preview_pipe;
+		bool preview_shared = false;
+		uint32_t preview_width = 0;
+		uint32_t preview_height = 0;
+		bool interactive = false;
+		bool disable_input_watch = false;
+	};
+
+	struct reshade_exports
+	{
+		HMODULE module = nullptr;
+		bool (*create_runtime)(reshade::api::device_api, void *, void *, void *, const char *, reshade::api::effect_runtime **) = nullptr;
+		void (*destroy_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*update_and_present_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*begin_present_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*finish_present_runtime)(reshade::api::effect_runtime *) = nullptr;
+		void (*set_external_overlay_target)(reshade::api::effect_runtime *, void *, uint32_t, uint32_t) = nullptr;
+		void (*set_external_addon_overlay)(reshade::api::effect_runtime *, const char *, const char *, bool) = nullptr;
+		void (*add_external_overlay_input_event)(reshade::api::effect_runtime *, uint32_t, uintptr_t, intptr_t) = nullptr;
+		void (*notify_offline_input_changed)(reshade::api::effect_runtime *, const char *, const char *, uint32_t, uint32_t, uint64_t) = nullptr;
+		bool (*is_runtime_loading)(reshade::api::effect_runtime *) = nullptr;
+        bool (*export_error)(reshade::api::effect_runtime *, char *, size_t *) = nullptr;
+        bool (*dependencies)(reshade::api::effect_runtime *, char *, size_t *) = nullptr;
+		bool (*get_addon_overlay_state_json)(char *, size_t *) = nullptr;
+		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
+		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
+		bool (*inject_addon_imgui_value)(const char *, const char *) = nullptr;
+        const char *(*call_addon_service)(reshade::api::effect_runtime *, const char *, const char *, const char *) = nullptr;
+	};
+
+	struct shared_preview_state
+	{
+		ComPtr<ID3D11Texture2D> texture;
+		ComPtr<IDXGIKeyedMutex> keyed_mutex;
+		HANDLE handle = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
+	struct shared_addon_overlay_state
+	{
+		ComPtr<ID3D11Texture2D> texture;
+		ComPtr<ID3D11RenderTargetView> render_target;
+		ComPtr<IDXGIKeyedMutex> keyed_mutex;
+		ComPtr<ID3D11Texture2D> scratch_texture;
+		ComPtr<ID3D11RenderTargetView> scratch_render_target;
+		HANDLE handle = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
+	void print_usage()
+	{
+		std::cout <<
+			"usage: OfflineReShadePrototype --color <png> [--depth <png|rfloat>] [--depth-format <raw|rgba>] [--depth-profile <kks|kk>] [--depth-downsample <max2x2|box>] [--effect-dir <dir>] [--preset <ini>] [--output <png>] [--work-dir <dir>] [--warmup-frames <count>] [--timeout-seconds <seconds>] [--width <w> --height <h>] [--parent-hwnd <hwnd>] [--overlay-hwnd <hwnd>] [--addon-overlay-shared] [--addon-overlay-width <w> --addon-overlay-height <h>] [--control-pipe <name>] [--preview-pipe <name>] [--preview-shared] [--preview-width <w> --preview-height <h>] [--interactive] [--disable-input-watch]\n";
+	}
+
+	std::wstring widen_utf8(const std::string &value)
+	{
+		if (value.empty())
+			return {};
+
+		const int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
+		std::wstring result(required, L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), required);
+		return result;
+	}
+
+	std::string narrow_utf8(const std::wstring &value)
+	{
+		if (value.empty())
+			return {};
+
+		const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+		std::string result(required, '\0');
+		WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), required, nullptr, nullptr);
+		return result;
+	}
+
+	std::string path_utf8(const std::filesystem::path &path)
+	{
+		return narrow_utf8(path.wstring());
+	}
+
+	bool parse_uint(const wchar_t *text, uint32_t &value)
+	{
+		wchar_t *end = nullptr;
+		const unsigned long result = std::wcstoul(text, &end, 10);
+		if (end == text || *end != L'\0' || result == 0 || result > UINT32_MAX)
+			return false;
+
+		value = static_cast<uint32_t>(result);
+		return true;
+	}
+
+	bool parse_hwnd_value(const wchar_t *text, uintptr_t &value)
+	{
+		wchar_t *end = nullptr;
+		const unsigned long long result = std::wcstoull(text, &end, 0);
+		if (end == text || *end != L'\0')
+			return false;
+
+		value = static_cast<uintptr_t>(result);
+		return value != 0;
+	}
+
+	bool parse_options(int argc, wchar_t **argv, options &opts)
+	{
+		for (int i = 1; i < argc; ++i)
+		{
+			const std::wstring_view arg = argv[i];
+			const auto require_value = [&](std::filesystem::path &out) {
+				if (++i >= argc)
+					return false;
+				out = std::filesystem::absolute(argv[i]);
+				return true;
+			};
+
+			if (arg == L"--color")
+			{
+				if (!require_value(opts.color_path))
+					return false;
+			}
+			else if (arg == L"--work-dir")
+			{
+				if (!require_value(opts.work_dir)) return false;
+			}
+			else if (arg == L"--warmup-frames" || arg == L"--timeout-seconds")
+			{
+				uint32_t value = 0;
+				if (++i >= argc || !parse_uint(argv[i], value) || value > 360000) return false;
+				if (arg == L"--warmup-frames") opts.warmup_frames = value;
+				else opts.timeout_seconds = std::max(1u, value);
+			}
+			else if (arg == L"--depth")
+			{
+				if (!require_value(opts.depth_path))
+					return false;
+			}
+			else if (arg == L"--depth-format")
+			{
+				if (++i >= argc)
+					return false;
+				opts.depth_format = narrow_utf8(argv[i]);
+				std::transform(opts.depth_format.begin(), opts.depth_format.end(), opts.depth_format.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (opts.depth_format != "raw" && opts.depth_format != "rgba")
+					return false;
+			}
+			else if (arg == L"--depth-profile")
+			{
+				if (++i >= argc)
+					return false;
+				opts.depth_profile = narrow_utf8(argv[i]);
+				std::transform(opts.depth_profile.begin(), opts.depth_profile.end(), opts.depth_profile.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (opts.depth_profile != "kks" && opts.depth_profile != "kk")
+					return false;
+			}
+			else if (arg == L"--depth-downsample")
+			{
+				if (++i >= argc)
+					return false;
+				opts.depth_downsample = narrow_utf8(argv[i]);
+				std::transform(opts.depth_downsample.begin(), opts.depth_downsample.end(), opts.depth_downsample.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (opts.depth_downsample != "max2x2" && opts.depth_downsample != "box")
+					return false;
+			}
+			else if (arg == L"--effect-dir")
+			{
+				if (!require_value(opts.effect_dir))
+					return false;
+			}
+			else if (arg == L"--preset")
+			{
+				if (!require_value(opts.preset_path))
+					return false;
+			}
+			else if (arg == L"--output")
+			{
+				if (!require_value(opts.output_path))
+					return false;
+			}
+			else if (arg == L"--width")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.width))
+					return false;
+			}
+			else if (arg == L"--height")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.height))
+					return false;
+			}
+			else if (arg == L"--parent-hwnd")
+			{
+				if (++i >= argc || !parse_hwnd_value(argv[i], opts.parent_hwnd))
+					return false;
+			}
+			else if (arg == L"--overlay-hwnd")
+			{
+				if (++i >= argc || !parse_hwnd_value(argv[i], opts.overlay_hwnd))
+					return false;
+			}
+			else if (arg == L"--addon-overlay-shared")
+			{
+				opts.addon_overlay_shared = true;
+			}
+			else if (arg == L"--addon-overlay-width")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.addon_overlay_width))
+					return false;
+			}
+			else if (arg == L"--addon-overlay-height")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.addon_overlay_height))
+					return false;
+			}
+			else if (arg == L"--control-pipe")
+			{
+				if (++i >= argc)
+					return false;
+				opts.control_pipe = narrow_utf8(argv[i]);
+			}
+			else if (arg == L"--preview-pipe")
+			{
+				if (++i >= argc)
+					return false;
+				opts.preview_pipe = narrow_utf8(argv[i]);
+			}
+			else if (arg == L"--preview-shared")
+			{
+				opts.preview_shared = true;
+			}
+			else if (arg == L"--preview-width")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.preview_width))
+					return false;
+			}
+			else if (arg == L"--preview-height")
+			{
+				if (++i >= argc || !parse_uint(argv[i], opts.preview_height))
+					return false;
+			}
+			else if (arg == L"--interactive")
+			{
+				opts.interactive = true;
+			}
+			else if (arg == L"--disable-input-watch")
+			{
+				opts.disable_input_watch = true;
+			}
+			else if (arg == L"--help" || arg == L"-h")
+			{
+				print_usage();
+				std::exit(0);
+			}
+			else
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	FILE *open_file(const std::filesystem::path &path, const wchar_t *mode)
+	{
+		FILE *file = nullptr;
+		_wfopen_s(&file, path.c_str(), mode);
+		return file;
+	}
+
+	bool load_png_rgba(IWICImagingFactory *wic_factory, const std::filesystem::path &path, image_rgba &image)
+	{
+		ComPtr<IWICBitmapDecoder> decoder;
+		if (FAILED(wic_factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)))
+			return false;
+
+		ComPtr<IWICBitmapFrameDecode> frame;
+		if (FAILED(decoder->GetFrame(0, &frame)))
+			return false;
+
+		UINT width = 0, height = 0;
+		if (FAILED(frame->GetSize(&width, &height)) || !offline_limits::image_size(width, height))
+		{
+			std::cerr << "Image dimensions exceed limits (16384 per axis, 64 megapixels).\n";
+			return false;
+		}
+		MEMORYSTATUSEX memory = { sizeof(MEMORYSTATUSEX) };
+		if (GlobalMemoryStatusEx(&memory) && static_cast<uint64_t>(width) * height * 8 > std::min(memory.ullAvailPhys, memory.ullAvailPageFile) / 2) {
+			std::cerr << "Image decode exceeds available system memory budget.\n"; return false;
+		}
+
+		ComPtr<IWICFormatConverter> converter;
+		if (FAILED(wic_factory->CreateFormatConverter(&converter)))
+			return false;
+		if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+			return false;
+
+		image.width = static_cast<int>(width);
+		image.height = static_cast<int>(height);
+		image.pixels.resize(static_cast<size_t>(width) * height * 4);
+
+		return SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(image.pixels.size()), image.pixels.data()));
+	}
+	image_rgba resize_rgba(const image_rgba &source, uint32_t width, uint32_t height)
+	{
+		if (source.width == static_cast<int>(width) && source.height == static_cast<int>(height))
+			return source;
+
+		image_rgba result;
+		result.width = static_cast<int>(width);
+		result.height = static_cast<int>(height);
+		result.pixels.resize(static_cast<size_t>(width) * height * 4);
+
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			const uint32_t source_y = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(y) * source.height) / height), source.height - 1);
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const uint32_t source_x = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(x) * source.width) / width), source.width - 1);
+				const uint8_t *src = source.pixels.data() + (static_cast<size_t>(source_y) * source.width + source_x) * 4;
+				uint8_t *dst = result.pixels.data() + (static_cast<size_t>(y) * width + x) * 4;
+				std::copy_n(src, 4, dst);
+			}
+		}
+
+		return result;
+	}
+
+	std::vector<float> make_default_depth_data(uint32_t width, uint32_t height)
+	{
+		return std::vector<float>(static_cast<size_t>(width) * height, 1.0f);
+	}
+
+	std::vector<float> make_depth_data_from_rgba(const image_rgba *depth_image, uint32_t width, uint32_t height)
+	{
+		std::vector<float> result(static_cast<size_t>(width) * height, 1.0f);
+		if (depth_image == nullptr)
+			return result;
+
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			const uint32_t source_y = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(y) * depth_image->height) / height), depth_image->height - 1);
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const uint32_t source_x = std::min<uint32_t>(static_cast<uint32_t>((static_cast<uint64_t>(x) * depth_image->width) / width), depth_image->width - 1);
+				const uint8_t *src = depth_image->pixels.data() + (static_cast<size_t>(source_y) * depth_image->width + source_x) * 4;
+				const uint32_t packed =
+					static_cast<uint32_t>(src[0]) |
+					(static_cast<uint32_t>(src[1]) << 8) |
+					(static_cast<uint32_t>(src[2]) << 16) |
+					(static_cast<uint32_t>(src[3]) << 24);
+				result[static_cast<size_t>(y) * width + x] = static_cast<float>(packed / 4294967295.0);
+			}
+		}
+
+		return result;
+	}
+
+	std::filesystem::file_time_type file_write_time_or_min(const std::filesystem::path &path)
+	{
+		std::error_code ec;
+		const std::filesystem::file_time_type time = std::filesystem::last_write_time(path, ec);
+		return ec ? std::filesystem::file_time_type::min() : time;
+	}
+
+	bool save_png_rgba(IWICImagingFactory *wic_factory, const std::filesystem::path &path, uint32_t width, uint32_t height, const std::vector<uint8_t> &pixels)
+	{
+		if (path.has_parent_path())
+			std::filesystem::create_directories(path.parent_path());
+
+		ComPtr<IWICStream> stream;
+		if (FAILED(wic_factory->CreateStream(&stream)))
+			return false;
+		if (FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)))
+			return false;
+
+		ComPtr<IWICBitmapEncoder> encoder;
+		if (FAILED(wic_factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)))
+			return false;
+		if (FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)))
+			return false;
+
+		ComPtr<IWICBitmapFrameEncode> frame;
+		ComPtr<IPropertyBag2> property_bag;
+		if (FAILED(encoder->CreateNewFrame(&frame, &property_bag)))
+			return false;
+		if (FAILED(frame->Initialize(property_bag.Get())))
+			return false;
+		if (FAILED(frame->SetSize(width, height)))
+			return false;
+
+		WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+		if (FAILED(frame->SetPixelFormat(&format)) || format != GUID_WICPixelFormat32bppBGRA)
+			return false;
+
+		std::vector<uint8_t> bgra(pixels.size());
+		for (size_t i = 0; i + 3 < pixels.size(); i += 4)
+		{
+			bgra[i + 0] = pixels[i + 2];
+			bgra[i + 1] = pixels[i + 1];
+			bgra[i + 2] = pixels[i + 0];
+			bgra[i + 3] = 0xFF;
+		}
+
+		if (FAILED(frame->WritePixels(height, width * 4, static_cast<UINT>(bgra.size()), bgra.data())))
+			return false;
+
+		return SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+	}
+	std::filesystem::path executable_directory()
+	{
+		wchar_t path[MAX_PATH] = {};
+		GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+		return std::filesystem::path(path).parent_path();
+	}
+
+	std::filesystem::path prototype_directory()
+	{
+		const std::filesystem::path dir = executable_directory() / L"OfflinePrototype";
+		std::filesystem::create_directories(dir);
+		return dir;
+	}
+
+	std::vector<std::pair<std::string, std::string>> scan_techniques(const std::filesystem::path &effect_dir)
+	{
+		std::vector<std::pair<std::string, std::string>> result;
+		const std::regex technique_regex(R"(^\s*technique\s+([A-Za-z_][A-Za-z0-9_]*))");
+
+		std::error_code ec;
+		for (const std::filesystem::directory_entry &entry : std::filesystem::recursive_directory_iterator(effect_dir, std::filesystem::directory_options::skip_permission_denied, ec))
+		{
+			if (entry.is_directory(ec) || (entry.path().extension() != L".fx" && entry.path().extension() != L".addonfx"))
+				continue;
+
+			std::ifstream stream(entry.path());
+			if (!stream)
+				continue;
+
+			std::string line;
+			while (std::getline(stream, line))
+			{
+				std::smatch match;
+				if (std::regex_search(line, match, technique_regex))
+					result.emplace_back(match[1].str(), path_utf8(entry.path().filename()));
+			}
+		}
+
+		return result;
+	}
+
+	std::filesystem::path make_preset(const options &opts, const std::filesystem::path &work_dir)
+	{
+		if (!opts.preset_path.empty())
+			return opts.preset_path;
+
+		const std::filesystem::path preset_path = work_dir / L"OfflinePreset.ini";
+		if (std::filesystem::exists(preset_path))
+			return preset_path;
+
+		std::ofstream preset(preset_path, std::ios::binary | std::ios::trunc);
+		preset << "Techniques=\n";
+		preset << "TechniqueSorting=\n";
+		return preset_path;
+	}
+
+	std::filesystem::path existing_directory(const std::filesystem::path &path)
+	{
+		std::error_code ec;
+		if (!std::filesystem::exists(path, ec) || !std::filesystem::is_directory(path, ec))
+			return {};
+
+		auto normalized = std::filesystem::weakly_canonical(path, ec);
+		return ec ? path.lexically_normal() : normalized;
+	}
+
+	void add_unique_directory(std::vector<std::filesystem::path> &paths, const std::filesystem::path &path)
+	{
+		auto existing = existing_directory(path);
+		if (existing.empty())
+			return;
+
+		const std::wstring value = existing.native();
+		for (const auto &candidate : paths)
+			if (_wcsicmp(candidate.native().c_str(), value.c_str()) == 0)
+				return;
+
+		paths.push_back(std::move(existing));
+	}
+
+	std::string join_search_paths(const std::vector<std::filesystem::path> &paths, bool recursive)
+	{
+		std::string result;
+		for (const auto &path : paths)
+		{
+			if (!result.empty())
+				result += ',';
+			result += path_utf8(path);
+			if (recursive)
+				result += "\\**";
+		}
+		return result;
+	}
+
+	std::filesystem::path make_config(const options &opts, const std::filesystem::path &work_dir, const std::filesystem::path &preset_path, uint32_t width, uint32_t height)
+	{
+		const std::filesystem::path config_path = work_dir / L"ReShade.ini";
+		const std::filesystem::path program_dir = executable_directory();
+		const std::filesystem::path screenshot_dir = work_dir / L"ReShadeShotTemp";
+		std::filesystem::create_directories(screenshot_dir);
+
+		std::vector<std::filesystem::path> texture_dirs;
+		add_unique_directory(texture_dirs, opts.effect_dir / L"Textures");
+		add_unique_directory(texture_dirs, opts.effect_dir.parent_path() / L"Textures");
+		add_unique_directory(texture_dirs, program_dir / L"Textures");
+		if (texture_dirs.empty())
+			add_unique_directory(texture_dirs, opts.effect_dir);
+
+		std::filesystem::path addon_dir = existing_directory(opts.effect_dir / L"Addons");
+		if (addon_dir.empty())
+			addon_dir = existing_directory(program_dir / L"Addons");
+		if (addon_dir.empty())
+			addon_dir = (opts.effect_dir / L"Addons").lexically_normal();
+
+		std::ofstream config(config_path, std::ios::binary);
+		config << "[GENERAL]\n";
+		config << "NoDebugInfo=1\n";
+		config << "NoEffectCache=1\n";
+		config << "NoReloadOnInit=0\n";
+		config << "PerformanceMode=0\n";
+		config << "SkipLoadingDisabledEffects=0\n";
+		config << "EffectSearchPaths=" << path_utf8(opts.effect_dir) << "\\**\n";
+		config << "TextureSearchPaths=" << join_search_paths(texture_dirs, true) << "\n";
+		config << "PresetPath=" << path_utf8(preset_path) << "\n";
+		config << "PreprocessorDefinitions=OFFLINE_RESHADE=1\n";
+		config << "\n[ADDON]\n";
+		config << "AddonPath=" << path_utf8(addon_dir) << "\n";
+		config << "DisabledAddons=Generic Depth\n";
+		config << "\n[OFFLINE]\n";
+		config << "Enabled=1\n";
+		config << "ColorPath=" << path_utf8(opts.color_path) << "\n";
+		config << "DepthPath=" << path_utf8(opts.depth_path) << "\n";
+		config << "InputWidth=" << width << "\n";
+		config << "InputHeight=" << height << "\n";
+		config << "InputGeneration=1\n";
+		config << "\n[INPUT]\n";
+		config << "KeyEffects=0,0,0,0\n";
+		config << "KeyOverlay=" << (opts.interactive ? "36,0,0,0" : "0,0,0,0") << "\n";
+		config << "KeyReload=0,0,0,0\n";
+		config << "KeyScreenshot=" << (opts.interactive ? "44,0,0,0" : "0,0,0,0") << "\n";
+		config << "\n[SCREENSHOT]\n";
+		config << "SavePath=" << path_utf8(screenshot_dir) << "\n";
+		config << "FileNaming=ReShadeShot_%Date%_%Time%_%Count%\n";
+		config << "FileFormat=1\n";
+		config << "ClearAlpha=1\n";
+		config << "SaveOverlayShot=0\n";
+		config << "\n[OVERLAY]\n";
+		config << "TutorialProgress=4\n";
+		config << "ShowScreenshotMessage=0\n";
+		return config_path;
+	}
+
+	reshade_exports load_reshade(const std::filesystem::path &base_path)
+	{
+		reshade_exports result;
+		const std::filesystem::path dll_path = executable_directory() / L"ReShade64.dll";
+
+		SetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", L"1");
+		SetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", base_path.c_str());
+		result.module = LoadLibraryW(dll_path.c_str());
+		if (result.module == nullptr)
+			return result;
+
+        // Validate before calling any custom entry point or using the C++ runtime ABI.
+        const auto api_version = reinterpret_cast<uint32_t (*)()>(GetProcAddress(result.module, "ReShadeGetOfflineApiVersion"));
+        const auto upstream = reinterpret_cast<const char *(*)()>(GetProcAddress(result.module, "ReShadeGetOfflineUpstreamCommit"));
+        if (!api_version || api_version() != offline_contract::OfflineApi || !upstream ||
+            !upstream() || std::string_view(upstream()) != offline_contract::UpstreamCommit) {
+            FreeLibrary(result.module);
+            throw std::runtime_error("Incompatible ReShade64.dll: offline API or upstream commit mismatch. Install all components from the same Offline ReShade package.");
+        }
+
+		result.create_runtime = reinterpret_cast<decltype(result.create_runtime)>(GetProcAddress(result.module, "ReShadeCreateEffectRuntime"));
+		result.destroy_runtime = reinterpret_cast<decltype(result.destroy_runtime)>(GetProcAddress(result.module, "ReShadeDestroyEffectRuntime"));
+		result.update_and_present_runtime = reinterpret_cast<decltype(result.update_and_present_runtime)>(GetProcAddress(result.module, "ReShadeUpdateAndPresentEffectRuntime"));
+		result.begin_present_runtime = reinterpret_cast<decltype(result.begin_present_runtime)>(GetProcAddress(result.module, "ReShadeBeginPresentEffectRuntime"));
+		result.finish_present_runtime = reinterpret_cast<decltype(result.finish_present_runtime)>(GetProcAddress(result.module, "ReShadeFinishPresentEffectRuntime"));
+		result.set_external_overlay_target = reinterpret_cast<decltype(result.set_external_overlay_target)>(GetProcAddress(result.module, "ReShadeSetExternalOverlayTarget"));
+		result.set_external_addon_overlay = reinterpret_cast<decltype(result.set_external_addon_overlay)>(GetProcAddress(result.module, "ReShadeSetExternalAddonOverlay"));
+		result.add_external_overlay_input_event = reinterpret_cast<decltype(result.add_external_overlay_input_event)>(GetProcAddress(result.module, "ReShadeAddExternalOverlayInputEvent"));
+		result.notify_offline_input_changed = reinterpret_cast<decltype(result.notify_offline_input_changed)>(GetProcAddress(result.module, "ReShadeNotifyOfflineInputChanged"));
+		result.export_error = reinterpret_cast<decltype(result.export_error)>(GetProcAddress(result.module, "ReShadeGetOfflineExportError"));
+        result.dependencies = reinterpret_cast<decltype(result.dependencies)>(GetProcAddress(result.module, "ReShadeGetOfflineDependencies"));
+        result.is_runtime_loading = reinterpret_cast<decltype(result.is_runtime_loading)>(GetProcAddress(result.module, "ReShadeIsEffectRuntimeLoading"));
+		result.get_addon_overlay_state_json = reinterpret_cast<decltype(result.get_addon_overlay_state_json)>(GetProcAddress(result.module, "ReShadeGetAddonOverlayStateJson"));
+		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
+		result.get_addon_imgui_capture_json = reinterpret_cast<decltype(result.get_addon_imgui_capture_json)>(GetProcAddress(result.module, "ReShadeGetAddonImGuiCaptureJson"));
+		result.inject_addon_imgui_value = reinterpret_cast<decltype(result.inject_addon_imgui_value)>(GetProcAddress(result.module, "ReShadeInjectAddonImGuiValue"));
+        result.call_addon_service = reinterpret_cast<decltype(result.call_addon_service)>(GetProcAddress(result.module, "ReShadeCallAddonService"));
+		return result;
+	}
+
+	LRESULT CALLBACK hidden_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+	{
+		return DefWindowProcW(hwnd, msg, wparam, lparam);
+	}
+
+	HWND create_render_window(uint32_t width, uint32_t height, HWND parent_hwnd)
+	{
+		const wchar_t *class_name = L"OfflineReShadePrototypeWindow";
+
+		WNDCLASSEXW wc = {};
+		wc.cbSize = sizeof(wc);
+		wc.lpfnWndProc = hidden_window_proc;
+		wc.hInstance = GetModuleHandleW(nullptr);
+		wc.lpszClassName = class_name;
+		RegisterClassExW(&wc);
+
+		const DWORD style = parent_hwnd != nullptr ? (WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN) : WS_OVERLAPPEDWINDOW;
+		const DWORD ex_style = parent_hwnd != nullptr ? WS_EX_TOOLWINDOW : 0;
+		return CreateWindowExW(ex_style, class_name, L"Offline ReShade Prototype", style,
+			0, 0, static_cast<int>(width), static_cast<int>(height),
+			nullptr, nullptr, wc.hInstance, nullptr);
+	}
+
+	bool create_device_and_swapchain(HWND hwnd, uint32_t width, uint32_t height, ComPtr<ID3D11Device> &device, ComPtr<ID3D11DeviceContext> &context, ComPtr<IDXGISwapChain> &swapchain)
+	{
+		DXGI_SWAP_CHAIN_DESC swapchain_desc = {};
+		swapchain_desc.BufferDesc.Width = width;
+		swapchain_desc.BufferDesc.Height = height;
+		swapchain_desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		swapchain_desc.BufferDesc.RefreshRate.Numerator = 60;
+		swapchain_desc.BufferDesc.RefreshRate.Denominator = 1;
+		swapchain_desc.SampleDesc.Count = 1;
+		swapchain_desc.SampleDesc.Quality = 0;
+		swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
+		swapchain_desc.BufferCount = 1;
+		swapchain_desc.OutputWindow = hwnd;
+		swapchain_desc.Windowed = TRUE;
+		swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+		D3D_FEATURE_LEVEL feature_levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+		D3D_FEATURE_LEVEL created_level = D3D_FEATURE_LEVEL_11_0;
+		UINT flags = 0;
+#if defined(_DEBUG)
+		flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
+		HRESULT hr = D3D11CreateDevice(
+			nullptr,
+			D3D_DRIVER_TYPE_HARDWARE,
+			nullptr,
+			flags,
+			feature_levels,
+			static_cast<UINT>(std::size(feature_levels)),
+			D3D11_SDK_VERSION,
+			&device,
+			&created_level,
+			&context);
+
+#if defined(_DEBUG)
+		if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING)
+		{
+			flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+			hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, feature_levels, static_cast<UINT>(std::size(feature_levels)), D3D11_SDK_VERSION, &device, &created_level, &context);
+		}
+#endif
+
+		if (FAILED(hr)) {
+			swapchain.Reset(); context.Reset(); device.Reset();
+			hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, feature_levels, static_cast<UINT>(std::size(feature_levels)), D3D11_SDK_VERSION, &device, &created_level, &context);
+			if (SUCCEEDED(hr)) std::cerr << "Using D3D11 WARP software rendering.\n";
+		}
+		if (FAILED(hr)) return false;
+		ComPtr<IDXGIDevice> dxgi_device;
+		ComPtr<IDXGIAdapter> adapter;
+		ComPtr<IDXGIFactory> factory;
+		if (FAILED(device.As(&dxgi_device)) || FAILED(dxgi_device->GetAdapter(&adapter)) || FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) return false;
+		ComPtr<IDXGIAdapter3> adapter3;
+		DXGI_QUERY_VIDEO_MEMORY_INFO memory = {};
+		// Base resources plus headroom for FX; effect-specific allocations are still validated at export.
+		const uint64_t required = static_cast<uint64_t>(width) * height * 64 + (128ull << 20);
+		if (SUCCEEDED(adapter.As(&adapter3)) && SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory)) && memory.Budget > 0 &&
+			required > (memory.Budget > memory.CurrentUsage ? memory.Budget - memory.CurrentUsage : 0) * 4 / 5) {
+			std::cerr << "Render exceeds available GPU memory budget; lower the output dimensions or free GPU memory. Estimated base bytes=" << required << '\n';
+			return false;
+		}
+		return SUCCEEDED(factory->CreateSwapChain(device.Get(), &swapchain_desc, &swapchain));
+	}
+
+	bool client_size(HWND hwnd, uint32_t &width, uint32_t &height)
+	{
+		RECT rect = {};
+		if (!GetClientRect(hwnd, &rect))
+			return false;
+
+		width = static_cast<uint32_t>(std::max<LONG>(1, rect.right - rect.left));
+		height = static_cast<uint32_t>(std::max<LONG>(1, rect.bottom - rect.top));
+		return true;
+	}
+
+	bool create_overlay_swapchain(ID3D11Device *device, HWND hwnd, uint32_t width, uint32_t height, ComPtr<IDXGISwapChain> &swapchain)
+	{
+		ComPtr<IDXGIDevice> dxgi_device;
+		ComPtr<IDXGIAdapter> adapter;
+		ComPtr<IDXGIFactory> factory;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device))) ||
+			FAILED(dxgi_device->GetAdapter(&adapter)) ||
+			FAILED(adapter->GetParent(IID_PPV_ARGS(&factory))))
+			return false;
+
+		DXGI_SWAP_CHAIN_DESC desc = {};
+		desc.BufferDesc.Width = width;
+		desc.BufferDesc.Height = height;
+		desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.BufferDesc.RefreshRate.Numerator = 60;
+		desc.BufferDesc.RefreshRate.Denominator = 1;
+		desc.SampleDesc.Count = 1;
+		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		desc.BufferCount = 1;
+		desc.OutputWindow = hwnd;
+		desc.Windowed = TRUE;
+		desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+		return SUCCEEDED(factory->CreateSwapChain(device, &desc, &swapchain));
+	}
+
+	bool create_backbuffer_rtv(ID3D11Device *device, IDXGISwapChain *swapchain, ComPtr<ID3D11RenderTargetView> &rtv)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return false;
+		return SUCCEEDED(device->CreateRenderTargetView(backbuffer.Get(), nullptr, &rtv));
+	}
+
+	bool ensure_overlay_target(ID3D11Device *device, ID3D11DeviceContext *context, HWND hwnd, ComPtr<IDXGISwapChain> &swapchain, ComPtr<ID3D11RenderTargetView> &rtv, uint32_t &width, uint32_t &height)
+	{
+		if (hwnd == nullptr || !IsWindow(hwnd))
+			return false;
+
+		uint32_t new_width = 0, new_height = 0;
+		if (!client_size(hwnd, new_width, new_height))
+			return false;
+
+		if (swapchain == nullptr)
+		{
+			width = new_width;
+			height = new_height;
+			if (!create_overlay_swapchain(device, hwnd, width, height, swapchain))
+				return false;
+			return create_backbuffer_rtv(device, swapchain.Get(), rtv);
+		}
+
+		if (new_width != width || new_height != height || rtv == nullptr)
+		{
+			rtv.Reset();
+			context->OMSetRenderTargets(0, nullptr, nullptr);
+			if (FAILED(swapchain->ResizeBuffers(0, new_width, new_height, DXGI_FORMAT_UNKNOWN, 0)))
+				return false;
+			width = new_width;
+			height = new_height;
+			return create_backbuffer_rtv(device, swapchain.Get(), rtv);
+		}
+
+		return true;
+	}
+	bool create_shader_resource(ID3D11Device *device, DXGI_FORMAT format, uint32_t width, uint32_t height, const void *data, uint32_t row_pitch, ComPtr<ID3D11Texture2D> &texture, ComPtr<ID3D11ShaderResourceView> &srv)
+	{
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = width;
+		desc.Height = height;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = format;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+		D3D11_SUBRESOURCE_DATA initial_data = {};
+		initial_data.pSysMem = data;
+		initial_data.SysMemPitch = row_pitch;
+
+		if (FAILED(device->CreateTexture2D(&desc, &initial_data, &texture)))
+			return false;
+		if (FAILED(device->CreateShaderResourceView(texture.Get(), nullptr, &srv)))
+			return false;
+
+		return true;
+	}
+
+	bool create_shared_preview_texture(ID3D11Device *device, uint32_t width, uint32_t height, shared_preview_state &preview)
+	{
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = width;
+		desc.Height = height;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+		ComPtr<ID3D11Texture2D> texture;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture)))
+			return false;
+
+		ComPtr<IDXGIResource> resource;
+		HANDLE handle = nullptr;
+		if (FAILED(texture.As(&resource)) || FAILED(resource->GetSharedHandle(&handle)) || handle == nullptr)
+			return false;
+
+		preview.texture = std::move(texture);
+		if (FAILED(preview.texture.As(&preview.keyed_mutex))) return false;
+		preview.handle = handle;
+		preview.width = width;
+		preview.height = height;
+		return true;
+	}
+
+	bool create_shared_addon_overlay_texture(ID3D11Device *device, uint32_t width, uint32_t height, shared_addon_overlay_state &overlay)
+	{
+		if (!offline_limits::preview_size(width, height)) return false;
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = width;
+		desc.Height = height;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+		ComPtr<ID3D11Texture2D> texture;
+		ComPtr<ID3D11RenderTargetView> render_target;
+		ComPtr<IDXGIKeyedMutex> keyed_mutex;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture)) ||
+			FAILED(device->CreateRenderTargetView(texture.Get(), nullptr, &render_target)) ||
+			FAILED(texture.As(&keyed_mutex)))
+			return false;
+
+		desc.MiscFlags = 0;
+		ComPtr<ID3D11Texture2D> scratch_texture;
+		ComPtr<ID3D11RenderTargetView> scratch_render_target;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &scratch_texture)) ||
+			FAILED(device->CreateRenderTargetView(scratch_texture.Get(), nullptr, &scratch_render_target)))
+			return false;
+
+		ComPtr<IDXGIResource> resource;
+		HANDLE handle = nullptr;
+		if (FAILED(texture.As(&resource)) || FAILED(resource->GetSharedHandle(&handle)) || handle == nullptr)
+			return false;
+
+		overlay.texture = std::move(texture);
+		overlay.render_target = std::move(render_target);
+		overlay.keyed_mutex = std::move(keyed_mutex);
+		overlay.scratch_texture = std::move(scratch_texture);
+		overlay.scratch_render_target = std::move(scratch_render_target);
+		overlay.handle = handle;
+		overlay.width = width;
+		overlay.height = height;
+		return true;
+	}
+
+	bool copy_backbuffer_to_texture(ID3D11DeviceContext *context, IDXGISwapChain *swapchain, ID3D11Texture2D *target)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (target == nullptr || FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return false;
+
+		context->CopyResource(target, backbuffer.Get());
+		return true;
+	}
+
+	bool ensure_private_capture_texture(ID3D11Device *device, IDXGISwapChain *swapchain, ComPtr<ID3D11Texture2D> &texture, uint32_t &capture_width, uint32_t &capture_height)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (device == nullptr || swapchain == nullptr || FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return false;
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		backbuffer->GetDesc(&desc);
+		capture_width = desc.Width;
+		capture_height = desc.Height;
+
+		if (texture != nullptr)
+		{
+			D3D11_TEXTURE2D_DESC existing = {};
+			texture->GetDesc(&existing);
+			if (existing.Width == desc.Width &&
+				existing.Height == desc.Height &&
+				existing.Format == desc.Format &&
+				existing.SampleDesc.Count == desc.SampleDesc.Count &&
+				existing.SampleDesc.Quality == desc.SampleDesc.Quality)
+				return true;
+		}
+
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = 0;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = 0;
+
+		texture.Reset();
+		return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture));
+	}
+
+	bool copy_rgba_to_backbuffer(ID3D11DeviceContext *context, IDXGISwapChain *swapchain, uint32_t width, uint32_t height, const std::vector<uint8_t> &pixels)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return false;
+
+		context->UpdateSubresource(backbuffer.Get(), 0, nullptr, pixels.data(), width * 4, width * height * 4);
+		return true;
+	}
+
+	std::vector<uint8_t> read_texture_rgba(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11Texture2D *texture, uint32_t width, uint32_t height)
+	{
+		if (texture == nullptr)
+			return {};
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		texture->GetDesc(&desc);
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.BindFlags = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		desc.MiscFlags = 0;
+
+		ComPtr<ID3D11Texture2D> staging;
+		if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging)))
+			return {};
+
+		context->CopyResource(staging.Get(), texture);
+		context->Flush();
+
+		D3D11_MAPPED_SUBRESOURCE mapped = {};
+		if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+			return {};
+
+		width = std::min(width, desc.Width);
+		height = std::min(height, desc.Height);
+		std::vector<uint8_t> result(static_cast<size_t>(width) * height * 4);
+		for (uint32_t y = 0; y < height; ++y)
+			std::copy_n(static_cast<const uint8_t *>(mapped.pData) + static_cast<size_t>(mapped.RowPitch) * y, width * 4, result.data() + static_cast<size_t>(width) * y * 4);
+
+		context->Unmap(staging.Get(), 0);
+		return result;
+	}
+
+	std::vector<uint8_t> read_backbuffer(ID3D11Device *device, ID3D11DeviceContext *context, IDXGISwapChain *swapchain, uint32_t width, uint32_t height)
+	{
+		ComPtr<ID3D11Texture2D> backbuffer;
+		if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+			return {};
+
+		return read_texture_rgba(device, context, backbuffer.Get(), width, height);
+	}
+
+	bool is_screenshot_file(const std::filesystem::path &path)
+	{
+		const std::wstring ext = path.extension().wstring();
+		return _wcsicmp(ext.c_str(), L".png") == 0 ||
+			_wcsicmp(ext.c_str(), L".bmp") == 0 ||
+			_wcsicmp(ext.c_str(), L".jpg") == 0 ||
+			_wcsicmp(ext.c_str(), L".jpeg") == 0 ||
+			_wcsicmp(ext.c_str(), L".jxl") == 0;
+	}
+
+	void clear_screenshot_temp_dir(const std::filesystem::path &dir)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(dir, ec))
+		{
+			if (!entry.is_regular_file(ec) || !is_screenshot_file(entry.path()))
+				continue;
+			std::filesystem::remove(entry.path(), ec);
+		}
+	}
+
+	std::filesystem::path newest_screenshot_file(const std::filesystem::path &dir)
+	{
+		std::filesystem::path newest;
+		std::filesystem::file_time_type newest_time = std::filesystem::file_time_type::min();
+		std::error_code ec;
+		for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(dir, ec))
+		{
+			if (!entry.is_regular_file(ec) || !is_screenshot_file(entry.path()))
+				continue;
+
+			const std::filesystem::file_time_type write_time = entry.last_write_time(ec);
+			if (!ec && (newest.empty() || write_time > newest_time))
+			{
+				newest = entry.path();
+				newest_time = write_time;
+			}
+		}
+		return newest;
+	}
+
+	std::filesystem::path wait_for_screenshot_file(const std::filesystem::path &dir, std::chrono::milliseconds timeout)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + timeout;
+		std::filesystem::path candidate;
+		uintmax_t last_size = std::numeric_limits<uintmax_t>::max();
+		int stable_count = 0;
+		std::error_code ec;
+
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			const std::filesystem::path newest = newest_screenshot_file(dir);
+			if (!newest.empty())
+			{
+				const uintmax_t size = std::filesystem::file_size(newest, ec);
+				if (!ec && size > 0)
+				{
+					if (newest == candidate && size == last_size)
+					{
+						if (++stable_count >= 2) {
+							// Deny write sharing: an encoder that still has the file open cannot
+							// be mistaken for a completed image after a temporary size plateau.
+							HANDLE complete = CreateFileW(newest.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+							if (complete != INVALID_HANDLE_VALUE) { CloseHandle(complete); return newest; }
+						}
+					}
+					else
+					{
+						candidate = newest;
+						last_size = size;
+						stable_count = 0;
+					}
+				}
+			}
+			Sleep(50);
+		}
+
+		return {};
+	}
+
+	class async_backbuffer_reader
+	{
+	public:
+		bool initialize(ID3D11Device *device, IDXGISwapChain *swapchain, uint32_t width, uint32_t height, uint32_t slot_count = 4)
+		{
+			_width = width;
+			_height = height;
+			_slots.clear();
+			_next_copy_slot = 0;
+
+			ComPtr<ID3D11Texture2D> backbuffer;
+			if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+				return false;
+
+			D3D11_TEXTURE2D_DESC desc = {};
+			backbuffer->GetDesc(&desc);
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.BindFlags = 0;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			desc.MiscFlags = 0;
+
+			_slots.resize(std::max(2u, slot_count));
+			for (slot &entry : _slots)
+			{
+				if (FAILED(device->CreateTexture2D(&desc, nullptr, &entry.texture)))
+				{
+					_slots.clear();
+					return false;
+				}
+			}
+
+			return true;
+		}
+
+		std::vector<uint8_t> submit_and_try_read(ID3D11DeviceContext *context, IDXGISwapChain *swapchain)
+		{
+			std::vector<uint8_t> result = try_read_ready_frame(context);
+			submit_copy(context, swapchain);
+			return result;
+		}
+
+	private:
+		struct slot
+		{
+			ComPtr<ID3D11Texture2D> texture;
+			bool pending = false;
+		};
+
+		std::vector<uint8_t> try_read_ready_frame(ID3D11DeviceContext *context)
+		{
+			for (slot &entry : _slots)
+			{
+				if (!entry.pending)
+					continue;
+
+				D3D11_MAPPED_SUBRESOURCE mapped = {};
+				const HRESULT hr = context->Map(entry.texture.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+				if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+					continue;
+				if (FAILED(hr))
+				{
+					entry.pending = false;
+					continue;
+				}
+
+				std::vector<uint8_t> result(static_cast<size_t>(_width) * _height * 4);
+				for (uint32_t y = 0; y < _height; ++y)
+					std::copy_n(static_cast<const uint8_t *>(mapped.pData) + static_cast<size_t>(mapped.RowPitch) * y, _width * 4, result.data() + static_cast<size_t>(_width) * y * 4);
+
+				context->Unmap(entry.texture.Get(), 0);
+				entry.pending = false;
+				return result;
+			}
+
+			return {};
+		}
+
+		void submit_copy(ID3D11DeviceContext *context, IDXGISwapChain *swapchain)
+		{
+			if (_slots.empty())
+				return;
+
+			for (size_t attempt = 0; attempt < _slots.size(); ++attempt)
+			{
+				const size_t index = (_next_copy_slot + attempt) % _slots.size();
+				slot &entry = _slots[index];
+				if (entry.pending)
+					continue;
+
+				ComPtr<ID3D11Texture2D> backbuffer;
+				if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+					return;
+
+				context->CopyResource(entry.texture.Get(), backbuffer.Get());
+				entry.pending = true;
+				_next_copy_slot = (index + 1) % _slots.size();
+				return;
+			}
+		}
+
+		uint32_t _width = 0;
+		uint32_t _height = 0;
+		size_t _next_copy_slot = 0;
+		std::vector<slot> _slots;
+	};
+
+	std::vector<uint8_t> scale_rgba_to_bgra_nearest(const std::vector<uint8_t> &source, uint32_t source_width, uint32_t source_height, uint32_t target_width, uint32_t target_height)
+	{
+		std::vector<uint8_t> result(static_cast<size_t>(target_width) * target_height * 4);
+		if (source.empty() || source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0)
+			return result;
+
+		for (uint32_t y = 0; y < target_height; ++y)
+		{
+			const uint32_t source_y = std::min(source_height - 1, static_cast<uint32_t>((static_cast<uint64_t>(y) * source_height) / target_height));
+			for (uint32_t x = 0; x < target_width; ++x)
+			{
+				const uint32_t source_x = std::min(source_width - 1, static_cast<uint32_t>((static_cast<uint64_t>(x) * source_width) / target_width));
+				const size_t source_index = (static_cast<size_t>(source_y) * source_width + source_x) * 4;
+				const size_t target_index = (static_cast<size_t>(y) * target_width + x) * 4;
+				result[target_index + 0] = source[source_index + 2];
+				result[target_index + 1] = source[source_index + 1];
+				result[target_index + 2] = source[source_index + 0];
+				result[target_index + 3] = source[source_index + 3];
+			}
+		}
+
+		return result;
+	}
+
+	struct depth_load_status
+	{
+		bool fallback_to_kks = false;
+		std::string warning;
+	};
+
+	bool load_rfloat_depth_exact(const std::filesystem::path &path, uint32_t width, uint32_t height, std::vector<float> &result)
+	{
+		const uint64_t expected_size = static_cast<uint64_t>(width) * height * sizeof(float);
+		std::error_code ec;
+		const uint64_t actual_size = std::filesystem::file_size(path, ec);
+		if (ec || actual_size != expected_size || expected_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+			return false;
+
+		std::ifstream stream(path, std::ios::binary);
+		if (!stream)
+			return false;
+
+		std::vector<float> bottom_to_top(static_cast<size_t>(width) * height);
+		stream.read(reinterpret_cast<char *>(bottom_to_top.data()), static_cast<std::streamsize>(expected_size));
+		if (stream.gcount() != static_cast<std::streamsize>(expected_size) ||
+            std::any_of(bottom_to_top.begin(), bottom_to_top.end(), [](float v) { return !std::isfinite(v) || v < 0.0f || v > 1.0f; }))
+			return false;
+
+		result.resize(static_cast<size_t>(width) * height);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			const float *src = bottom_to_top.data() + static_cast<size_t>(height - 1 - y) * width;
+			float *dst = result.data() + static_cast<size_t>(y) * width;
+			std::copy_n(src, width, dst);
+		}
+		return true;
+	}
+
+	std::vector<float> downsample_depth_2x(const std::vector<float> &source, uint32_t width, uint32_t height, const std::string &filter)
+	{
+		const uint32_t source_width = width * 2;
+		const uint32_t source_height = height * 2;
+		std::vector<float> result(static_cast<size_t>(width) * height, 1.0f);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const int sx = static_cast<int>(x * 2);
+				const int sy = static_cast<int>(y * 2);
+				const float a = source[static_cast<size_t>(sy) * source_width + sx];
+				const float b = source[static_cast<size_t>(sy) * source_width + sx + 1];
+				const float c = source[static_cast<size_t>(sy + 1) * source_width + sx];
+				const float d = source[static_cast<size_t>(sy + 1) * source_width + sx + 1];
+
+				float value = 1.0f;
+				if (filter == "box")
+				{
+					value = (a + b + c + d) * 0.25f;
+				}
+				else
+				{
+					value = std::max(std::max(a, b), std::max(c, d));
+				}
+
+				result[static_cast<size_t>(y) * width + x] = value;
+			}
+		}
+		return result;
+	}
+
+	bool load_depth_data(IWICImagingFactory *wic_factory, const options &opts, uint32_t width, uint32_t height, std::vector<float> &result, depth_load_status *status = nullptr, uint32_t source_width = 0, uint32_t source_height = 0)
+	{
+		if (source_width == 0) source_width = width;
+		if (source_height == 0) source_height = height;
+		if (opts.depth_path.empty())
+		{
+			result = make_default_depth_data(width, height);
+			return true;
+		}
+
+		if (opts.depth_format == "raw")
+		{
+			const uint64_t one_x_size = static_cast<uint64_t>(source_width) * source_height * sizeof(float);
+			const uint64_t two_x_size = one_x_size * 4;
+			std::error_code ec;
+			const uint64_t actual_size = std::filesystem::file_size(opts.depth_path, ec);
+			if (ec)
+				return false;
+
+			std::vector<float> source;
+			if (actual_size == one_x_size)
+			{
+				if (!load_rfloat_depth_exact(opts.depth_path, source_width, source_height, source)) return false;
+			}
+			else if (opts.depth_profile == "kk" && actual_size == two_x_size)
+			{
+				std::vector<float> high_res;
+				if (!load_rfloat_depth_exact(opts.depth_path, source_width * 2, source_height * 2, high_res)) return false;
+				source = downsample_depth_2x(high_res, source_width, source_height, opts.depth_downsample);
+			}
+			else return false;
+			result.resize(static_cast<size_t>(width) * height);
+			for (uint32_t y = 0; y < height; ++y)
+				for (uint32_t x = 0; x < width; ++x)
+					result[static_cast<size_t>(y) * width + x] = source[static_cast<size_t>(static_cast<uint64_t>(y) * source_height / height) * source_width + static_cast<uint64_t>(x) * source_width / width];
+			return true;
+		}
+
+		if (opts.depth_profile == "kk" && status != nullptr)
+		{
+			status->fallback_to_kks = true;
+			status->warning = "KK depth profile only supports raw .rfloat depth. Falling back to KKS profile for RGBA depth.";
+		}
+
+		image_rgba depth_image;
+		if (!load_png_rgba(wic_factory, opts.depth_path, depth_image))
+			return false;
+		result = make_depth_data_from_rgba(&depth_image, width, height);
+		return true;
+	}
+
+	std::vector<uint8_t> convert_rgba_to_bgra(const std::vector<uint8_t> &source)
+	{
+		std::vector<uint8_t> result(source.size());
+		for (size_t i = 0; i + 3 < source.size(); i += 4)
+		{
+			result[i + 0] = source[i + 2];
+			result[i + 1] = source[i + 1];
+			result[i + 2] = source[i + 0];
+			result[i + 3] = source[i + 3];
+		}
+		return result;
+	}
+
+	std::vector<uint8_t> make_preview_frame_bgra(const std::vector<uint8_t> &source, uint32_t source_width, uint32_t source_height, uint32_t target_width, uint32_t target_height)
+	{
+		if (source_width == target_width && source_height == target_height)
+			return convert_rgba_to_bgra(source);
+		return scale_rgba_to_bgra_nearest(source, source_width, source_height, target_width, target_height);
+	}
+
+	struct frame_rate_stats
+	{
+		uint64_t frame_count = 0;
+		uint64_t input_generation = 1;
+        bool restart_required = false;
+        std::string input_error, output_warning;
+        uint64_t adapter_luid = 0;
+        std::string adapter_name, device_error, preview_error;
+        bool cpu_preview = false;
+        bool preview_original = false; // Presentation only; never changes the runtime or captures.
+        void mark_render_frame()
+		{
+			++frame_count;
+			mark_frame(_render_count, _render_start, _render_fps);
+		}
+
+		void mark_preview_frame()
+		{
+			mark_frame(_preview_count, _preview_start, _preview_fps);
+		}
+
+		double render_fps() const
+		{
+			return _render_fps.load(std::memory_order_relaxed);
+		}
+
+		double preview_fps() const
+		{
+			return _preview_fps.load(std::memory_order_relaxed);
+		}
+
+	private:
+		static void mark_frame(uint32_t &count, std::chrono::steady_clock::time_point &start, std::atomic<double> &fps)
+		{
+			if (count++ == 0)
+			{
+				start = std::chrono::steady_clock::now();
+				return;
+			}
+
+			const auto now = std::chrono::steady_clock::now();
+			const auto elapsed = std::chrono::duration<double>(now - start).count();
+			if (elapsed >= 1.0)
+			{
+				fps.store(static_cast<double>(count) / elapsed, std::memory_order_relaxed);
+				count = 0;
+				start = now;
+			}
+		}
+
+		uint32_t _render_count = 0;
+		uint32_t _preview_count = 0;
+		std::chrono::steady_clock::time_point _render_start = std::chrono::steady_clock::now();
+		std::chrono::steady_clock::time_point _preview_start = std::chrono::steady_clock::now();
+		std::atomic<double> _render_fps = 0.0;
+		std::atomic<double> _preview_fps = 0.0;
+	};
+
+	class timer_resolution_scope
+	{
+	public:
+		timer_resolution_scope()
+		{
+			_enabled = timeBeginPeriod(1) == TIMERR_NOERROR;
+		}
+
+		~timer_resolution_scope()
+		{
+			if (_enabled)
+				timeEndPeriod(1);
+		}
+
+	private:
+		bool _enabled = false;
+	};
+
+	class preview_stream_server
+	{
+	public:
+		explicit preview_stream_server(std::string pipe_name) : _pipe_name(std::move(pipe_name)) {}
+
+		~preview_stream_server()
+		{
+			stop();
+		}
+
+		void start()
+		{
+			_running = true;
+			_thread = std::thread([this]() { pipe_thread(); });
+			std::cout << "PREVIEW_PIPE=" << _pipe_name << std::endl;
+		}
+
+		void stop()
+		{
+			if (!_running.exchange(false))
+				return;
+			_cv.notify_all();
+			if (_pipe != INVALID_HANDLE_VALUE)
+			{
+				CancelIoEx(_pipe, nullptr);
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+			if (_thread.joinable())
+				_thread.join();
+		}
+
+		void publish(uint32_t width, uint32_t height, std::vector<uint8_t> pixels)
+		{
+			if (!_running)
+				return;
+
+			std::lock_guard<std::mutex> lock(_mutex);
+			_width = width;
+			_height = height;
+			_pixels = std::move(pixels);
+			_has_frame = true;
+			++_frame_id;
+			_cv.notify_one();
+		}
+
+	private:
+		void pipe_thread()
+		{
+			const std::wstring pipe_path = L"\\\\.\\pipe\\" + widen_utf8(_pipe_name);
+			while (_running)
+			{
+				_pipe = CreateNamedPipeW(pipe_path.c_str(), PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 16 << 20, 16 << 20, 0, nullptr);
+				if (_pipe == INVALID_HANDLE_VALUE)
+					return;
+
+				const BOOL connected = ConnectNamedPipe(_pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+				if (connected)
+					serve_client(_pipe);
+
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+		}
+
+		void serve_client(HANDLE pipe)
+		{
+			uint64_t last_frame = 0;
+			while (_running)
+			{
+				uint32_t width = 0;
+				uint32_t height = 0;
+				std::vector<uint8_t> pixels;
+				{
+					std::unique_lock<std::mutex> lock(_mutex);
+					_cv.wait(lock, [&]() { return !_running || (_has_frame && _frame_id != last_frame); });
+					if (!_running)
+						break;
+					last_frame = _frame_id;
+					width = _width;
+					height = _height;
+					pixels = _pixels;
+				}
+
+				const uint32_t magic = 0x4650524f; // ORPF
+				const uint32_t byte_count = static_cast<uint32_t>(pixels.size());
+				const uint32_t header[4] = { magic, width, height, byte_count };
+				DWORD written = 0;
+				if (!WriteFile(pipe, header, sizeof(header), &written, nullptr) || written != sizeof(header))
+					break;
+				if (byte_count != 0 && (!WriteFile(pipe, pixels.data(), byte_count, &written, nullptr) || written != byte_count))
+					break;
+			}
+		}
+
+		std::string _pipe_name;
+		std::atomic_bool _running = false;
+		std::thread _thread;
+		std::mutex _mutex;
+		std::condition_variable _cv;
+		HANDLE _pipe = INVALID_HANDLE_VALUE;
+		std::vector<uint8_t> _pixels;
+		uint32_t _width = 0;
+		uint32_t _height = 0;
+		uint64_t _frame_id = 0;
+		bool _has_frame = false;
+	};
+
+	std::string json_escape(const std::string &value)
+	{
+		std::string result;
+		result.reserve(value.size() + 8);
+		for (const char c : value)
+		{
+			switch (c)
+			{
+			case '\\': result += "\\\\"; break;
+			case '"': result += "\\\""; break;
+			case '\n': result += "\\n"; break;
+			case '\r': result += "\\r"; break;
+			case '\t': result += "\\t"; break;
+			default:
+				if (static_cast<unsigned char>(c) < 0x20)
+					result += ' ';
+				else
+					result += c;
+				break;
+			}
+		}
+		return result;
+	}
+
+	std::string json_string(const std::string &value)
+	{
+		return "\"" + json_escape(value) + "\"";
+	}
+
+	std::string json_string_array_from_nul_list(const std::string &value)
+	{
+		std::string result = "[";
+		bool first = true;
+		size_t start = 0;
+		while (start < value.size())
+		{
+			size_t end = value.find('\0', start);
+			if (end == std::string::npos)
+				end = value.size();
+			std::string item = value.substr(start, end - start);
+			if (!item.empty() && item.front() == '\\')
+				item.erase(item.begin());
+			if (!item.empty())
+			{
+				if (!first)
+					result += ',';
+				first = false;
+				result += json_string(item);
+			}
+			start = end + 1;
+		}
+		result += "]";
+		return result;
+	}
+
+	bool uniform_annotation_number(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name, double &value)
+	{
+		float float_value = 0.0f;
+		if (runtime->get_annotation_float_from_uniform_variable(variable, name, &float_value, 1))
+		{
+			value = float_value;
+			return true;
+		}
+		int32_t int_value = 0;
+		if (runtime->get_annotation_int_from_uniform_variable(variable, name, &int_value, 1))
+		{
+			value = int_value;
+			return true;
+		}
+		uint32_t uint_value = 0;
+		if (runtime->get_annotation_uint_from_uniform_variable(variable, name, &uint_value, 1))
+		{
+			value = uint_value;
+			return true;
+		}
+		return false;
+	}
+	bool json_get_raw_string(const std::string &json, const std::string &key, std::string &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+
+		value.clear();
+		const std::string raw = match[1].str();
+		const auto hex_value = [](char ch) -> int {
+			if (ch >= '0' && ch <= '9') return ch - '0';
+			if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+			if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+			return -1;
+		};
+		const auto parse_hex4 = [&](size_t offset, uint32_t &codepoint) -> bool {
+			if (offset + 4 > raw.size())
+				return false;
+			codepoint = 0;
+			for (size_t digit = 0; digit < 4; ++digit)
+			{
+				const int nibble = hex_value(raw[offset + digit]);
+				if (nibble < 0)
+					return false;
+				codepoint = (codepoint << 4) | static_cast<uint32_t>(nibble);
+			}
+			return true;
+		};
+		const auto append_utf8 = [&](uint32_t codepoint) -> bool {
+			if (codepoint <= 0x7F)
+				value.push_back(static_cast<char>(codepoint));
+			else if (codepoint <= 0x7FF)
+			{
+				value.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else if (codepoint <= 0xFFFF)
+			{
+				if (codepoint >= 0xD800 && codepoint <= 0xDFFF)
+					return false;
+				value.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else if (codepoint <= 0x10FFFF)
+			{
+				value.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+				value.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+			}
+			else
+				return false;
+			return true;
+		};
+		for (size_t i = 0; i < raw.size(); ++i)
+		{
+			if (raw[i] == '\\' && i + 1 < raw.size())
+			{
+				const char escaped = raw[++i];
+				switch (escaped)
+				{
+				case '"': value += '"'; break;
+				case '\\': value += '\\'; break;
+				case '/': value += '/'; break;
+				case 'b': value += '\b'; break;
+				case 'f': value += '\f'; break;
+				case 'n': value += '\n'; break;
+				case 'r': value += '\r'; break;
+				case 't': value += '\t'; break;
+				case 'u':
+				{
+					uint32_t codepoint = 0;
+					if (!parse_hex4(i + 1, codepoint))
+						return false;
+					i += 4;
+
+					if (codepoint >= 0xD800 && codepoint <= 0xDBFF)
+					{
+						if (i + 6 >= raw.size() || raw[i + 1] != '\\' || raw[i + 2] != 'u')
+							return false;
+						uint32_t low_surrogate = 0;
+						if (!parse_hex4(i + 3, low_surrogate) || low_surrogate < 0xDC00 || low_surrogate > 0xDFFF)
+							return false;
+						codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low_surrogate - 0xDC00);
+						i += 6;
+					}
+
+					if (!append_utf8(codepoint))
+						return false;
+					break;
+				}
+				default: return false;
+				}
+			}
+			else
+			{
+				value += raw[i];
+			}
+		}
+		return true;
+	}
+
+	bool json_get_int(const std::string &json, const std::string &key, int &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*(-?\\d+)");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+		value = std::stoi(match[1].str());
+		return true;
+	}
+
+	bool json_get_bool(const std::string &json, const std::string &key, bool &value)
+	{
+		const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*(true|false)");
+		std::smatch match;
+		if (!std::regex_search(json, match, pattern))
+			return false;
+		value = match[1].str() == "true";
+		return true;
+	}
+
+	std::vector<std::string> json_get_string_array(const std::string &json, const std::string &key)
+	{
+		std::vector<std::string> values;
+		const std::regex array_pattern("\\\"" + key + "\\\"\\s*:\\s*\\[([^\\]]*)\\]");
+		std::smatch match;
+		if (!std::regex_search(json, match, array_pattern))
+			return values;
+
+		const std::string body = match[1].str();
+		const std::regex string_pattern("\\\"((?:\\\\.|[^\\\"])*)\\\"");
+		for (auto it = std::sregex_iterator(body.begin(), body.end(), string_pattern); it != std::sregex_iterator(); ++it)
+		{
+			std::string value;
+			json_get_raw_string("{\"v\":" + it->str() + "}", "v", value);
+			values.push_back(value);
+		}
+		return values;
+	}
+	std::vector<double> json_get_number_values(const std::string &json, const std::string &key, bool allow_bool = false)
+	{
+		std::vector<double> values;
+		const std::regex value_pattern("\\\"" + key + "\\\"\\s*:\\s*(\\[[^\\]]*\\]|true|false|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)");
+		std::smatch match;
+		if (!std::regex_search(json, match, value_pattern)) return values;
+		std::string body = match[1].str();
+		if (!body.empty() && body.front() == '[') body = body.substr(1, body.size() - 2);
+		const std::regex number_pattern("-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
+		for (size_t begin = 0; begin <= body.size();)
+		{
+			const auto end = body.find(',', begin);
+			auto part = body.substr(begin, end == std::string::npos ? end : end - begin);
+			const auto first = part.find_first_not_of(" \t\r\n"), last = part.find_last_not_of(" \t\r\n");
+			if (first == std::string::npos) return {};
+			part = part.substr(first, last - first + 1);
+			if (allow_bool && (part == "true" || part == "false")) values.push_back(part == "true" ? 1.0 : 0.0);
+			else
+			{
+				if (!std::regex_match(part, number_pattern)) return {};
+				try { values.push_back(std::stod(part)); } catch (...) { return {}; }
+				if (!std::isfinite(values.back())) return {};
+			}
+			if (end == std::string::npos) break;
+			begin = end + 1;
+		}
+		return values;
+	}
+	std::string json_float(float value)
+	{
+		if (!std::isfinite(value)) return "null";
+		char buffer[64];
+		const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general, std::numeric_limits<float>::max_digits10);
+		return result.ec == std::errc() ? std::string(buffer, result.ptr) : "null";
+	}
+
+	std::string runtime_string(const std::function<void(char *, size_t *)> &getter)
+	{
+		size_t size = 0;
+		getter(nullptr, &size);
+		if (size == 0)
+			return {};
+		std::string value(size, '\0');
+		getter(value.data(), &size);
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value;
+	}
+
+	std::string exported_json_string(bool (*getter)(char *, size_t *), const std::string &fallback)
+	{
+		if (getter == nullptr)
+			return fallback;
+
+		size_t size = 0;
+		if (!getter(nullptr, &size) || size == 0)
+			return fallback;
+
+		std::string value(size, '\0');
+		if (!getter(value.data(), &size))
+			return fallback;
+
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value.empty() ? fallback : value;
+	}
+
+	bool split_effect_id(const std::string &id, std::string &effect_name, std::string &name)
+	{
+		const size_t separator = id.find("::");
+		if (separator == std::string::npos)
+			return false;
+		effect_name = id.substr(0, separator);
+		name = id.substr(separator + 2);
+		return !effect_name.empty() && !name.empty();
+	}
+
+	std::string format_name(reshade::api::format format)
+	{
+		switch (format)
+		{
+		case reshade::api::format::r32_float: return "float";
+		case reshade::api::format::r32_sint: return "int";
+		case reshade::api::format::r32_uint: return "uint";
+		case reshade::api::format::r32_typeless: return "bool";
+		default: return "unknown";
+		}
+	}
+
+	std::string uniform_annotation_string(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name)
+	{
+		size_t size = 0;
+		if (!runtime->get_annotation_string_from_uniform_variable(variable, name, nullptr, &size) || size == 0)
+			return {};
+		std::string value(size, '\0');
+		if (!runtime->get_annotation_string_from_uniform_variable(variable, name, value.data(), &size))
+			return {};
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value;
+	}
+
+	bool uniform_annotation_bool(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name)
+	{
+		bool value = false;
+		return runtime->get_annotation_bool_from_uniform_variable(variable, name, &value, 1) && value;
+	}
+
+	bool uniform_annotation_float(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, const char *name, float &value)
+	{
+		return runtime->get_annotation_float_from_uniform_variable(variable, name, &value, 1);
+	}
+
+	struct technique_list_state
+	{
+		std::string result;
+		bool first = true;
+	};
+
+	std::string build_techniques_json(reshade::api::effect_runtime *runtime)
+	{
+		technique_list_state state;
+		state.result = "[";
+		runtime->enumerate_techniques(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_technique technique, void *user_data) {
+			auto &state = *static_cast<technique_list_state *>(user_data);
+			const std::string name = runtime_string([&](char *buffer, size_t *size) { runtime->get_technique_name(technique, buffer, size); });
+			const std::string effect_name = runtime_string([&](char *buffer, size_t *size) { runtime->get_technique_effect_name(technique, buffer, size); });
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"enabled\":" + (runtime->get_technique_state(technique) ? "true" : "false") + "}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
+	struct uniform_list_state
+	{
+		std::string result;
+		bool first = true;
+		bool compact = false;
+	};
+
+	std::string build_uniforms_json(reshade::api::effect_runtime *runtime, bool compact = false)
+	{
+		uniform_list_state state;
+		state.compact = compact;
+		state.result = "[";
+		runtime->enumerate_uniform_variables(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, void *user_data) {
+			auto &state = *static_cast<uniform_list_state *>(user_data);
+			if (uniform_annotation_bool(runtime, variable, "hidden"))
+				return;
+			if (!uniform_annotation_string(runtime, variable, "source").empty())
+				return;
+			const bool read_only = uniform_annotation_bool(runtime, variable, "nosave");
+			if (state.compact && read_only) return;
+
+			reshade::api::format base_type = reshade::api::format::unknown;
+			uint32_t rows = 0, columns = 0, array_length = 0;
+			runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+			const uint32_t components = std::max(1u, rows) * std::max(1u, columns);
+			if (components > 16 || array_length > 1) return;
+			const std::string name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_name(variable, buffer, size); });
+			const std::string effect_name = runtime_string([&](char *buffer, size_t *size) { runtime->get_uniform_variable_effect_name(variable, buffer, size); });
+			if (name.empty() || effect_name.empty())
+				return;
+
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"type\":" + json_string(format_name(base_type)) + ",\"rows\":" + std::to_string(rows) + ",\"columns\":" + std::to_string(columns) + ",\"arrayLength\":" + std::to_string(array_length);
+			if (read_only) state.result += ",\"readOnly\":true";
+
+			if (!state.compact)
+			{
+			const std::string label = uniform_annotation_string(runtime, variable, "ui_label");
+			const std::string category = uniform_annotation_string(runtime, variable, "ui_category");
+			const std::string ui_type = uniform_annotation_string(runtime, variable, "ui_type");
+			const std::string ui_items = uniform_annotation_string(runtime, variable, "ui_items");
+			if (!label.empty()) state.result += ",\"label\":" + json_string(label);
+			if (!category.empty()) state.result += ",\"category\":" + json_string(category);
+			if (!ui_type.empty()) state.result += ",\"uiType\":" + json_string(ui_type);
+			for (const auto &annotation : { "ui_tooltip", "ui_text", "ui_units" })
+				state.result += "," + json_string(annotation) + ":" + json_string(uniform_annotation_string(runtime, variable, annotation));
+			if (!ui_items.empty()) state.result += ",\"items\":" + json_string_array_from_nul_list(ui_items);
+			double min_value = 0.0, max_value = 0.0, step_value = 0.0;
+			if (uniform_annotation_number(runtime, variable, "ui_min", min_value) || uniform_annotation_number(runtime, variable, "ui_minimum", min_value)) state.result += ",\"min\":" + std::to_string(min_value);
+			if (uniform_annotation_number(runtime, variable, "ui_max", max_value) || uniform_annotation_number(runtime, variable, "ui_maximum", max_value)) state.result += ",\"max\":" + std::to_string(max_value);
+			if (uniform_annotation_number(runtime, variable, "ui_step", step_value)) state.result += ",\"step\":" + std::to_string(step_value);
+			}
+
+			state.result += ",\"value\":[";
+			for (uint32_t i = 0; i < components; ++i)
+			{
+				if (i != 0)
+					state.result += ',';
+				if (base_type == reshade::api::format::r32_float)
+				{
+					float values[16] = {};
+					runtime->get_uniform_value_float(variable, values, components);
+					state.result += json_float(values[i]);
+				}
+				else if (base_type == reshade::api::format::r32_sint)
+				{
+					int32_t values[16] = {};
+					runtime->get_uniform_value_int(variable, values, components);
+					state.result += std::to_string(values[i]);
+				}
+				else if (base_type == reshade::api::format::r32_uint)
+				{
+					uint32_t values[16] = {};
+					runtime->get_uniform_value_uint(variable, values, components);
+					state.result += std::to_string(values[i]);
+				}
+				else
+				{
+					bool values[16] = {};
+					runtime->get_uniform_value_bool(variable, values, components);
+					state.result += values[i] ? "true" : "false";
+				}
+			}
+			state.result += "]}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
+
+	struct preprocessor_list_state
+	{
+		std::string result;
+		bool first = true;
+	};
+
+	std::string build_preprocessor_definitions_json(reshade::api::effect_runtime *runtime)
+	{
+		preprocessor_list_state state;
+		state.result = "[";
+		runtime->enumerate_preprocessor_definitions(nullptr, [](reshade::api::effect_runtime *, const char *effect_name, const char *name, const char *default_value, const char *current_value, void *user_data) {
+			auto &state = *static_cast<preprocessor_list_state *>(user_data);
+			if (!state.first)
+				state.result += ',';
+			state.first = false;
+			const std::string effect = effect_name != nullptr ? effect_name : "";
+			const std::string definition_name = name != nullptr ? name : "";
+			state.result += "{\"id\":" + json_string(effect + "::" + definition_name) + ",\"effectName\":" + json_string(effect) + ",\"name\":" + json_string(definition_name) + ",\"defaultValue\":" + json_string(default_value != nullptr ? default_value : "") + ",\"value\":" + json_string(current_value != nullptr ? current_value : "") + "}";
+		}, &state);
+		state.result += "]";
+		return state.result;
+	}
+	std::string build_edit_definitions_json(reshade::api::effect_runtime *runtime, std::set<std::string> &scopes)
+	{
+		// Keep known scopes even if a failed compilation temporarily removes its controls.
+		runtime->enumerate_preprocessor_definitions(nullptr, [](reshade::api::effect_runtime *, const char *effect, const char *, const char *, const char *, void *data) {
+			if (effect != nullptr && *effect != '\0') static_cast<std::set<std::string> *>(data)->insert(effect);
+		}, &scopes);
+		scopes.insert("PRESET");
+		std::string result = "[";
+		bool first = true;
+		for (const auto &scope : scopes)
+		{
+			const auto names = runtime_string([&](char *buffer, size_t *size) { runtime->get_preprocessor_definition_for_effect(scope.c_str(), nullptr, buffer, size); });
+			for (size_t begin = 0; begin < names.size();)
+			{
+				const auto end = names.find('\0', begin);
+				const auto name = names.substr(begin, end == std::string::npos ? end : end - begin);
+				const auto value = runtime_string([&](char *buffer, size_t *size) { runtime->get_preprocessor_definition_for_effect(scope.c_str(), name.c_str(), buffer, size); });
+				if (!first) result += ',';
+				first = false;
+				result += "{\"id\":" + json_string(scope + "::" + name) + ",\"effectName\":" + json_string(scope) + ",\"name\":" + json_string(name) + ",\"value\":" + json_string(value) + "}";
+				if (end == std::string::npos) break;
+				begin = end + 1;
+			}
+		}
+		return result + "]";
+	}
+	std::string make_response(int id, const std::string &result)
+	{
+		return "{\"id\":" + std::to_string(id) + ",\"ok\":true,\"result\":" + result + "}";
+	}
+
+	std::string make_error(int id, const std::string &code, const std::string &message)
+	{
+		return "{\"id\":" + std::to_string(id) + ",\"ok\":false,\"error\":{\"code\":" + json_string(code) + ",\"message\":" + json_string(message) + "}}";
+	}
+
+	struct control_command
+	{
+		int id = 0;
+		std::string method;
+		std::string params;
+		std::string response;
+		bool done = false;
+		std::mutex mutex;
+		std::condition_variable cv;
+	};
+
+	class control_server
+	{
+		std::set<std::string> _edit_definition_scopes;
+	public:
+		struct input_switch_result
+		{
+			std::string error;
+			bool fallback_to_kks = false;
+			std::string warning;
+			bool restart_required = false;
+		};
+
+		using input_switch_callback = std::function<input_switch_result(const std::filesystem::path &, const std::filesystem::path &, const std::string &, const std::string &, const std::string &, const std::filesystem::path &)>;
+		using validation_callback = std::function<std::string()>;
+        using save_output_callback = std::function<std::string(const std::filesystem::path &, uint32_t)>;
+		using save_screenshot_callback = std::function<std::string(const std::filesystem::path &)>;
+		using input_watch_callback = std::function<void(bool)>;
+		using addon_state_callback = std::function<std::string()>;
+		using addon_imgui_state_callback = std::function<std::string()>;
+		using addon_imgui_input_callback = std::function<bool(const std::string &, const std::string &)>;
+		using addon_overlay_select_callback = std::function<bool(const std::string &, const std::string &, bool)>;
+		using addon_overlay_input_callback = std::function<bool(uint32_t, uintptr_t, intptr_t)>;
+		using addon_overlay_resize_callback = std::function<bool(uint32_t, uint32_t)>;
+		using runtime_loading_callback = std::function<bool()>;
+
+		control_server(std::string pipe_name, reshade::api::effect_runtime *runtime, uint32_t width, uint32_t height, std::filesystem::path output_path, frame_rate_stats *stats, const shared_preview_state *shared_preview, const shared_addon_overlay_state *shared_addon_overlay, input_switch_callback input_switch, save_output_callback save_output, save_screenshot_callback save_screenshot, input_watch_callback input_watch, addon_state_callback addon_state, addon_imgui_state_callback addon_imgui_state, addon_imgui_input_callback addon_imgui_input, addon_overlay_select_callback addon_overlay_select, addon_overlay_input_callback addon_overlay_input, addon_overlay_resize_callback addon_overlay_resize, runtime_loading_callback runtime_loading, validation_callback validation, validation_callback dependencies, std::function<std::string(const std::string &, const std::string &, const std::string &)> service) :
+			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _shared_addon_overlay(shared_addon_overlay), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input)), _addon_overlay_select(std::move(addon_overlay_select)), _addon_overlay_input(std::move(addon_overlay_input)), _addon_overlay_resize(std::move(addon_overlay_resize)), _runtime_loading(std::move(runtime_loading)), _validation(std::move(validation)), _dependencies(std::move(dependencies)), _service(std::move(service))
+		{
+		}
+
+		~control_server()
+		{
+			stop();
+		}
+
+		void start()
+		{
+			_running = true;
+			_thread = std::thread([this]() { pipe_thread(); });
+			std::cout << "CONTROL_PIPE=" << _pipe_name << std::endl;
+			std::cout << "CONTROL_READY=1" << std::endl;
+		}
+
+		void stop()
+		{
+			if (!_running.exchange(false))
+				return;
+			if (_pipe != INVALID_HANDLE_VALUE)
+			{
+				CancelIoEx(_pipe, nullptr);
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+			if (_thread.joinable())
+				_thread.join();
+		}
+
+		void process_pending()
+		{
+			for (;;)
+			{
+				std::shared_ptr<control_command> command;
+				{
+					std::lock_guard<std::mutex> lock(_queue_mutex);
+					if (_queue.empty())
+						break;
+					command = _queue.front();
+					_queue.pop_front();
+				}
+
+				std::string response = execute(*command);
+				{
+					std::lock_guard<std::mutex> lock(command->mutex);
+					command->response = std::move(response);
+					command->done = true;
+				}
+				command->cv.notify_one();
+			}
+		}
+
+	private:
+		void pipe_thread()
+		{
+			const std::wstring pipe_path = L"\\\\.\\pipe\\" + widen_utf8(_pipe_name);
+			while (_running)
+			{
+				_pipe = CreateNamedPipeW(pipe_path.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 1 << 20, 1 << 20, 0, nullptr);
+				if (_pipe == INVALID_HANDLE_VALUE)
+					return;
+
+				const BOOL connected = ConnectNamedPipe(_pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+				if (connected)
+					serve_client(_pipe);
+
+				DisconnectNamedPipe(_pipe);
+				CloseHandle(_pipe);
+				_pipe = INVALID_HANDLE_VALUE;
+			}
+		}
+
+		void serve_client(HANDLE pipe)
+		{
+			std::string pending;
+			char buffer[4096];
+			while (_running)
+			{
+				DWORD bytes_read = 0;
+				if (!ReadFile(pipe, buffer, sizeof(buffer), &bytes_read, nullptr) || bytes_read == 0)
+					break;
+				pending.append(buffer, buffer + bytes_read);
+				for (;;)
+				{
+					const size_t newline = pending.find('\n');
+					if (newline == std::string::npos)
+						break;
+					std::string line = pending.substr(0, newline);
+					pending.erase(0, newline + 1);
+					if (!line.empty() && line.back() == '\r')
+						line.pop_back();
+					const std::string response = handle_line(line);
+					DWORD bytes_written = 0;
+					const std::string output = response + "\n";
+					if (!WriteFile(pipe, output.data(), static_cast<DWORD>(output.size()), &bytes_written, nullptr))
+						break;
+				}
+			}
+		}
+
+		std::string handle_line(const std::string &line)
+		{
+			int id = 0;
+			std::string method;
+			if (!json_get_int(line, "id", id) || !json_get_raw_string(line, "method", method))
+				return make_error(0, "bad_request", "Request must include numeric id and string method.");
+
+			auto command = std::make_shared<control_command>();
+			command->id = id;
+			command->method = method;
+			command->params = line;
+			{
+				std::lock_guard<std::mutex> lock(_queue_mutex);
+				_queue.push_back(command);
+			}
+			std::unique_lock<std::mutex> lock(command->mutex);
+			command->cv.wait(lock, [&]() { return command->done || !_running; });
+			return command->done ? command->response : make_error(id, "stopped", "Control server stopped.");
+		}
+
+		std::string shared_addon_overlay_json() const
+		{
+			return ",\"sharedAddonOverlayHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_addon_overlay != nullptr ? _shared_addon_overlay->handle : nullptr)) +
+				",\"sharedAddonOverlayWidth\":" + std::to_string(_shared_addon_overlay != nullptr ? _shared_addon_overlay->width : 0) +
+				",\"sharedAddonOverlayHeight\":" + std::to_string(_shared_addon_overlay != nullptr ? _shared_addon_overlay->height : 0);
+		}
+
+		std::string graphics_json() const
+		{
+			return ",\"adapterLuid\":" + std::to_string(_stats->adapter_luid) + ",\"adapterName\":" + json_string(_stats->adapter_name) +
+				",\"recoveryRequired\":" + (_stats->device_error.empty() ? "false" : "true") + ",\"deviceError\":" + json_string(_stats->device_error) +
+				",\"previewOriginal\":" + (_stats->preview_original ? "true" : "false") +
+				",\"cpuPreview\":" + (_stats->cpu_preview ? "true" : "false") + ",\"previewError\":" + json_string(_stats->preview_error) + ",\"previewSynchronization\":\"keyed-mutex\"";
+		}
+
+        std::string compatibility_json() const
+        {
+            return "\"endpoint\":\"native\",\"productVersion\":" + json_string(offline_contract::ProductVersion) +
+                ",\"protocolVersion\":" + std::to_string(offline_contract::NativeRpc) +
+                ",\"nativeRpcVersion\":" + std::to_string(offline_contract::NativeRpc) +
+                ",\"offlineApiVersion\":" + std::to_string(offline_contract::OfflineApi) +
+                ",\"previewBridgeVersion\":" + std::to_string(offline_contract::PreviewBridge) +
+                ",\"reShadeApiVersion\":" + std::to_string(offline_contract::ReShadeApi) +
+                ",\"upstreamVersion\":" + json_string(offline_contract::UpstreamVersion) +
+                ",\"upstreamCommit\":" + json_string(offline_contract::UpstreamCommit);
+        }
+
+		std::string execute(control_command &command)
+		{
+			try
+			{
+
+                if (command.method == "get_compatibility") return make_response(command.id, "{" + compatibility_json() + "}");
+				if (command.method == "set_preview_transport") {
+					bool enabled = false;
+					if (!json_get_bool(command.params, "cpu", enabled)) return make_error(command.id, "invalid_argument", "cpu is required.");
+					_stats->cpu_preview = enabled;
+					return make_response(command.id, "{\"cpuPreview\":" + std::string(enabled ? "true" : "false") + "}");
+				}
+				if (command.method == "set_preview_comparison") {
+					bool original = false;
+					if (!json_get_bool(command.params, "original", original)) return make_error(command.id, "invalid_argument", "original is required.");
+					_stats->preview_original = original;
+					return make_response(command.id, "{\"previewOriginal\":" + std::string(original ? "true" : "false") + "}");
+				}
+				if (command.method == "validate_export") {
+                    const auto error = _validation();
+                    if (!error.empty()) return make_error(command.id, "export_invalid", error);
+                    return make_response(command.id, "{\"dependencies\":" + json_string(_dependencies()) + "}");
+                }
+                if (command.method == "get_runtime_info")
+				{
+					std::string preset = runtime_string([&](char *buffer, size_t *size) { _runtime->get_current_preset_path(buffer, size); });
+					return make_response(command.id, "{" + compatibility_json() + ",\"restartRequired\":" + std::string(_stats->restart_required ? "true" : "false") + ",\"inputError\":" + json_string(_stats->input_error) + ",\"frameCount\":" + std::to_string(_stats ? _stats->frame_count : 0) + ",\"inputGeneration\":" + std::to_string(_stats ? _stats->input_generation : 0) + ",\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"presetPath\":" + json_string(preset) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"outputPath\":" + json_string(path_utf8(_output_path)) + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "}");
+				}
+				if (command.method == "get_edit_state")
+				{
+					return make_response(command.id, "{\"effectsEnabled\":" + std::string(_runtime->get_effects_state() ? "true" : "false") + ",\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime, true) + ",\"preprocessorDefinitions\":" + build_edit_definitions_json(_runtime, _edit_definition_scopes) + "}");
+				}
+				if (command.method == "list_state")
+				{
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
+				}
+				if (command.method == "list_addons" || command.method == "list_addon_overlays")
+				{
+					return make_response(command.id, _addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}");
+				}
+                if (command.method == "call_addon_service") {
+                    std::string addon, method, request;
+                    if (!json_get_raw_string(command.params, "addon", addon) || !json_get_raw_string(command.params, "serviceMethod", method) || !json_get_raw_string(command.params, "request", request) || request.size() > 1048576)
+                        return make_error(command.id, "bad_params", "Missing or oversized service request.");
+                    if (method != "get" && method != "set" && method != "action") return make_error(command.id, "bad_params", "Unknown service method.");
+                    return make_response(command.id, _service(addon, method, request));
+                }
+				if (command.method == "list_addon_imgui_capture")
+				{
+					return make_response(command.id, _addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}");
+				}
+				if (command.method == "set_addon_imgui_value")
+				{
+					std::string id, value;
+					if (!json_get_raw_string(command.params, "id", id) || !json_get_raw_string(command.params, "value", value))
+						return make_error(command.id, "bad_params", "Missing add-on ImGui control id or value.");
+					if (!_addon_imgui_input)
+						return make_error(command.id, "not_supported", "Add-on ImGui input injection is not available.");
+					if (!_addon_imgui_input(id, value))
+						return make_error(command.id, "inject_failed", "Add-on ImGui input injection was not accepted.");
+					return make_response(command.id, "{\"status\":\"queued\",\"id\":" + json_string(id) + "}");
+				}
+				if (command.method == "cancel_addon_imgui_value") {
+					std::string id;
+					if (!json_get_raw_string(command.params, "id", id)) return make_error(command.id, "bad_params", "Missing control ID.");
+					return make_response(command.id, _service("@imgui", "cancel", id));
+				}
+				if (command.method == "open_native_addon_panel")
+				{
+					if (_addon_overlay_select)
+						_addon_overlay_select({}, {}, false);
+					_runtime->open_overlay(true, reshade::api::input_source::none);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_native_addon_overlay")
+				{
+					std::string addon, overlay;
+					bool settings = false;
+					bool enabled = true;
+					json_get_raw_string(command.params, "addon", addon);
+					json_get_raw_string(command.params, "overlay", overlay);
+					json_get_bool(command.params, "settings", settings);
+					json_get_bool(command.params, "enabled", enabled);
+					if (!_addon_overlay_select)
+						return make_error(command.id, "not_supported", "External add-on overlay selection is not available.");
+					if (!_addon_overlay_select(enabled ? addon : std::string(), enabled ? overlay : std::string(), enabled && settings))
+						return make_error(command.id, "selection_failed", "The add-on overlay selection was rejected.");
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "send_addon_overlay_input")
+				{
+					int message = 0, wparam = 0, lparam = 0;
+					if (!json_get_int(command.params, "message", message) ||
+						!json_get_int(command.params, "wparam", wparam) ||
+						!json_get_int(command.params, "lparam", lparam))
+						return make_error(command.id, "bad_params", "Missing external add-on overlay input message data.");
+					if (!_addon_overlay_input || !_addon_overlay_input(
+						static_cast<uint32_t>(message),
+						static_cast<uintptr_t>(static_cast<uint32_t>(wparam)),
+						static_cast<intptr_t>(lparam)))
+						return make_error(command.id, "not_supported", "External add-on overlay input is not available.");
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_addon_overlay_size")
+				{
+					int width = 0, height = 0;
+					if (!json_get_int(command.params, "width", width) || !json_get_int(command.params, "height", height) || width <= 0 || height <= 0)
+						return make_error(command.id, "bad_params", "Overlay width and height must be positive.");
+					if (!_addon_overlay_resize || !_addon_overlay_resize(static_cast<uint32_t>(width), static_cast<uint32_t>(height)))
+						return make_error(command.id, "resize_failed", "The shared add-on overlay surface could not be resized.");
+					return make_response(command.id, "{" + shared_addon_overlay_json().substr(1) + "}");
+				}
+				if (command.method == "set_effects_state")
+				{
+					bool enabled = true;
+					if (!json_get_bool(command.params, "enabled", enabled))
+						return make_error(command.id, "bad_params", "Missing enabled.");
+					_runtime->set_effects_state(enabled);
+					// The global toggle is not a preset technique edit. Saving during loading
+					// would replace the requested techniques with an incomplete runtime list.
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_technique_state")
+				{
+					std::string id, effect_name, name;
+					bool enabled = false;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name) || !json_get_bool(command.params, "enabled", enabled))
+						return make_error(command.id, "bad_params", "Missing id or enabled.");
+					auto technique = _runtime->find_technique(effect_name.c_str(), name.c_str());
+					if (technique.handle == 0)
+						return make_error(command.id, "not_found", "Technique not found.");
+					bool no_save = false;
+					_runtime->get_annotation_bool_from_technique(technique, "nosave", &no_save, 1);
+					if (no_save) return make_error(command.id, "not_supported", "This shader-managed technique cannot be saved in a preset.");
+					_runtime->set_technique_state(technique, enabled);
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_uniform")
+				{
+					std::string id, effect_name, name;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name))
+						return make_error(command.id, "bad_params", "Missing uniform id.");
+					auto variable = _runtime->find_uniform_variable(effect_name.c_str(), name.c_str());
+					if (variable.handle == 0)
+						return make_error(command.id, "not_found", "Uniform not found.");
+					reshade::api::format base_type = reshade::api::format::unknown;
+					uint32_t rows = 0, columns = 0, array_length = 0;
+					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+					const size_t count = std::max(1u, rows) * std::max(1u, columns);
+					if (count > 16 || array_length > 1) return make_error(command.id, "not_supported", "Uniform arrays require an indexed editor.");
+					if (uniform_annotation_bool(_runtime, variable, "hidden") || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
+						return make_error(command.id, "not_supported", "This uniform is not an editable FX parameter.");
+					if (base_type == reshade::api::format::r32_float)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return std::abs(x) > std::numeric_limits<float>::max(); }))
+							return make_error(command.id, "bad_params", "Float value is outside its representable range or has too many components.");
+						float values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<float>(numbers[std::min(i, numbers.size() - 1)]);
+						_runtime->set_uniform_value_float(variable, values, count);
+						_runtime->save_current_preset();
+					}
+					else if (base_type == reshade::api::format::r32_sint)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return x < std::numeric_limits<int32_t>::min() || x > std::numeric_limits<int32_t>::max(); }))
+							return make_error(command.id, "bad_params", "Integer value is outside its representable range or has too many components.");
+						int32_t values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<int32_t>(numbers[std::min(i, numbers.size() - 1)]);
+						_runtime->set_uniform_value_int(variable, values, count);
+						_runtime->save_current_preset();
+					}
+					else if (base_type == reshade::api::format::r32_uint)
+					{
+						auto numbers = json_get_number_values(command.params, "value");
+						if (numbers.empty()) return make_error(command.id, "bad_params", "Missing numeric value.");
+						if (numbers.size() > count || std::any_of(numbers.begin(), numbers.end(), [](double x) { return x < 0 || x > std::numeric_limits<uint32_t>::max(); }))
+							return make_error(command.id, "bad_params", "Unsigned value is outside its representable range or has too many components.");
+						uint32_t values[16] = {};
+						for (size_t i = 0; i < count && i < std::size(values); ++i) values[i] = static_cast<uint32_t>(std::max(0.0, numbers[std::min(i, numbers.size() - 1)]));
+						_runtime->set_uniform_value_uint(variable, values, count);
+						_runtime->save_current_preset();
+					}
+					else
+					{
+						auto numbers = json_get_number_values(command.params, "value", true);
+						if (numbers.empty() || numbers.size() > count) return make_error(command.id, "bad_params", "Missing or invalid bool value.");
+						bool values[16] = {};
+						for (size_t i = 0; i < count; ++i) values[i] = numbers[std::min(i, numbers.size() - 1)] != 0.0;
+						_runtime->set_uniform_value_bool(variable, values, count);
+						_runtime->save_current_preset();
+					}
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reset_uniform")
+				{
+					std::string id, effect_name, name;
+					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name))
+						return make_error(command.id, "bad_params", "Missing uniform id.");
+					auto variable = _runtime->find_uniform_variable(effect_name.c_str(), name.c_str());
+					if (variable.handle == 0)
+						return make_error(command.id, "not_found", "Uniform not found.");
+					reshade::api::format base_type = reshade::api::format::unknown;
+					uint32_t rows = 0, columns = 0, array_length = 0;
+					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
+					if (array_length > 1 || std::max(1u, rows) * std::max(1u, columns) > 16 ||
+						uniform_annotation_bool(_runtime, variable, "hidden") || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
+						return make_error(command.id, "not_supported", "This uniform is not an editable FX parameter.");
+					_runtime->reset_uniform_value(variable);
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reorder_techniques")
+				{
+					auto ids = json_get_string_array(command.params, "ids");
+					std::vector<reshade::api::effect_technique> techniques;
+					for (const std::string &id : ids)
+					{
+						std::string effect_name, name;
+						if (!split_effect_id(id, effect_name, name))
+							return make_error(command.id, "bad_params", "Invalid technique id.");
+						auto technique = _runtime->find_technique(effect_name.c_str(), name.c_str());
+						if (technique.handle == 0)
+							return make_error(command.id, "not_found", "Technique not found.");
+						techniques.push_back(technique);
+					}
+					_runtime->reorder_techniques(techniques.size(), techniques.data());
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_preprocessor_definition")
+				{
+					std::string effect_name, name, value;
+					if (!json_get_raw_string(command.params, "name", name) || !json_get_raw_string(command.params, "value", value))
+						return make_error(command.id, "bad_params", "Missing preprocessor name or value.");
+					json_get_raw_string(command.params, "effectName", effect_name);
+					if (effect_name.empty()) effect_name = "PRESET";
+					if (effect_name != "PRESET" && effect_name.find('.') == std::string::npos)
+						return make_error(command.id, "bad_params", "Choose an FX filename or PRESET scope; global application definitions are not preset edits.");
+					_edit_definition_scopes.insert(effect_name);
+					if (effect_name != "PRESET")
+					{
+						_runtime->set_preprocessor_definition_for_effect(effect_name.c_str(), name.c_str(), value.c_str());
+						_runtime->reload_effect_next_frame(effect_name.c_str());
+					}
+					else
+					{
+						_runtime->set_preprocessor_definition_for_effect("PRESET", name.c_str(), value.c_str());
+						_runtime->reload_effect_next_frame(nullptr);
+					}
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "reload_effects")
+				{
+					std::string effect_name;
+					_runtime->reload_effect_next_frame(json_get_raw_string(command.params, "effectName", effect_name) && !effect_name.empty() ? effect_name.c_str() : nullptr);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_input_paths")
+				{
+					std::string color_path, depth_path, depth_format, depth_profile, depth_downsample, output_path;
+					if (!json_get_raw_string(command.params, "colorPath", color_path) ||
+						!json_get_raw_string(command.params, "depthPath", depth_path) ||
+						!json_get_raw_string(command.params, "depthFormat", depth_format) ||
+						!json_get_raw_string(command.params, "outputPath", output_path))
+						return make_error(command.id, "bad_params", "Missing colorPath, depthPath, depthFormat, or outputPath.");
+					std::transform(depth_format.begin(), depth_format.end(), depth_format.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					if (depth_format != "raw" && depth_format != "rgba")
+						return make_error(command.id, "bad_params", "depthFormat must be raw or rgba.");
+					if (!json_get_raw_string(command.params, "depthProfile", depth_profile) || depth_profile.empty())
+						depth_profile = "kks";
+					if (!json_get_raw_string(command.params, "depthDownsample", depth_downsample) || depth_downsample.empty())
+						depth_downsample = "max2x2";
+					std::transform(depth_profile.begin(), depth_profile.end(), depth_profile.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					std::transform(depth_downsample.begin(), depth_downsample.end(), depth_downsample.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					if (depth_profile != "kks" && depth_profile != "kk")
+						return make_error(command.id, "bad_params", "depthProfile must be kks or kk.");
+					if (depth_downsample != "max2x2" && depth_downsample != "box")
+						return make_error(command.id, "bad_params", "depthDownsample must be max2x2 or box.");
+					if (!_input_switch)
+						return make_error(command.id, "not_supported", "Input switching is not available.");
+					std::filesystem::path output = std::filesystem::absolute(widen_utf8(output_path));
+					input_switch_result result = _input_switch(std::filesystem::absolute(widen_utf8(color_path)), (depth_path.empty() ? std::filesystem::path() : std::filesystem::absolute(widen_utf8(depth_path))), depth_format, depth_profile, depth_downsample, output);
+					if (!result.error.empty())
+						return make_error(command.id, "input_load_failed", result.error);
+					if (result.restart_required) return make_response(command.id, "{\"restartRequired\":true}");
+					_output_path = std::move(output);
+					return make_response(command.id, "{\"depthProfile\":" + json_string(result.fallback_to_kks ? "kks" : depth_profile) + ",\"fallbackToKks\":" + (result.fallback_to_kks ? "true" : "false") + ",\"warning\":" + json_string(result.warning) + "}");
+				}
+				if (command.method == "set_input_watch_enabled")
+				{
+					bool enabled = true;
+					if (!json_get_bool(command.params, "enabled", enabled))
+						return make_error(command.id, "bad_params", "Missing enabled.");
+					if (!_input_watch)
+						return make_error(command.id, "not_supported", "Input watch control is not available.");
+					_input_watch(enabled);
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "save_preset")
+				{
+					_runtime->save_current_preset();
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "export_preset")
+				{
+					std::string path;
+					if (!json_get_raw_string(command.params, "path", path) || path.empty())
+						return make_error(command.id, "bad_params", "Missing export path.");
+					_runtime->export_current_preset(path.c_str());
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "set_preset")
+				{
+					std::string path;
+					if (!json_get_raw_string(command.params, "path", path) || path.empty())
+						return make_error(command.id, "bad_params", "Missing preset path.");
+					_runtime->set_current_preset_path(path.c_str());
+					return make_response(command.id, "{}");
+				}
+				if (command.method == "save_output" || command.method == "save_preview" || command.method == "save_screenshot")
+                {
+                    if (_runtime_loading && _runtime_loading()) return make_error(command.id, "loading", "Effects are still compiling.");
+                    std::string path;
+                    json_get_raw_string(command.params, "path", path);
+                    const auto destination = path.empty() ? _output_path : std::filesystem::absolute(widen_utf8(path));
+                    int max_width = 1280;
+                    json_get_int(command.params, "maxWidth", max_width);
+                    const std::string error = command.method == "save_screenshot"
+                        ? (_save_screenshot ? _save_screenshot(destination) : "Screenshot export is unavailable.")
+                        : (_save_output ? _save_output(destination, command.method == "save_preview" ? static_cast<uint32_t>(std::clamp(max_width, 64, 2048)) : 0) : "PNG export is unavailable.");
+                    if (!error.empty()) return make_error(command.id, "save_failed", error);
+                    return make_response(command.id, "{\"path\":" + json_string(path_utf8(destination)) + ",\"warning\":" + json_string(_stats->output_warning) + "}");
+                }
+				return make_error(command.id, "unknown_method", "Unknown method.");
+			}
+			catch (const std::exception &ex)
+			{
+				return make_error(command.id, "exception", ex.what());
+			}
+		}
+
+		std::string _pipe_name;
+		reshade::api::effect_runtime *_runtime = nullptr;
+		uint32_t _width = 0;
+		uint32_t _height = 0;
+		std::filesystem::path _output_path;
+		frame_rate_stats *_stats = nullptr;
+		const shared_preview_state *_shared_preview = nullptr;
+		const shared_addon_overlay_state *_shared_addon_overlay = nullptr;
+		input_switch_callback _input_switch;
+		save_output_callback _save_output;
+		save_screenshot_callback _save_screenshot;
+		input_watch_callback _input_watch;
+		addon_state_callback _addon_state;
+		addon_imgui_state_callback _addon_imgui_state;
+		addon_imgui_input_callback _addon_imgui_input;
+        std::function<std::string(const std::string &, const std::string &, const std::string &)> _service;
+		addon_overlay_select_callback _addon_overlay_select;
+		addon_overlay_input_callback _addon_overlay_input;
+		addon_overlay_resize_callback _addon_overlay_resize;
+		runtime_loading_callback _runtime_loading;
+        validation_callback _validation, _dependencies;
+		std::atomic_bool _running = false;
+		std::thread _thread;
+		std::mutex _queue_mutex;
+		std::deque<std::shared_ptr<control_command>> _queue;
+		HANDLE _pipe = INVALID_HANDLE_VALUE;
+	};
+	void bind_semantics(reshade::api::effect_runtime *runtime, ID3D11ShaderResourceView *color_srv, ID3D11ShaderResourceView *depth_srv, ID3D11ShaderResourceView *motion_srv)
+	{
+		const reshade::api::resource_view color_view = { reinterpret_cast<uint64_t>(color_srv) };
+		const reshade::api::resource_view depth_view = { reinterpret_cast<uint64_t>(depth_srv) };
+		const reshade::api::resource_view motion_view = { reinterpret_cast<uint64_t>(motion_srv) };
+
+		for (const char *semantic : { "DEPTH" })
+			runtime->update_texture_bindings(semantic, depth_view, depth_view);
+
+		for (const char *semantic : { "PREVIOUS_COLOR", "PREV_COLOR", "PREV_FRAME", "HISTORY", "COLOR_HISTORY" })
+			runtime->update_texture_bindings(semantic, color_view, color_view);
+
+		for (const char *semantic : { "PREVIOUS_DEPTH", "PREV_DEPTH", "DEPTH_HISTORY" })
+			runtime->update_texture_bindings(semantic, depth_view, depth_view);
+
+		for (const char *semantic : { "MOTION", "MOTION_VECTOR", "MOTION_VECTORS", "VELOCITY" })
+			runtime->update_texture_bindings(semantic, motion_view, motion_view);
+	}
+}
+
+int run_offline(int argc, wchar_t **argv)
+{
+	options opts;
+	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+	{
+		std::cerr << "Failed to initialize COM.\n";
+		return 1;
+	}
+
+	ComPtr<IWICImagingFactory> wic_factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_factory))))
+	{
+		std::cerr << "Failed to create WIC imaging factory.\n";
+		CoUninitialize();
+		return 1;
+	}
+
+
+	if (!parse_options(argc, argv, opts))
+	{
+		print_usage();
+		return 1;
+	}
+
+    if (opts.color_path.empty()) { std::cerr << "--color is required.\n"; return 1; }
+    if (opts.output_path.empty()) opts.output_path = opts.color_path.parent_path() / L"reshadeoutput.png";
+    if (_wcsicmp(opts.output_path.c_str(), opts.color_path.c_str()) == 0 || (!opts.depth_path.empty() && _wcsicmp(opts.output_path.c_str(), opts.depth_path.c_str()) == 0)) {
+        std::cerr << "Output must not overwrite an input file.\n"; return 1;
+    }
+
+	if (opts.effect_dir.empty())
+	{
+		opts.effect_dir = L"Effects";
+		std::filesystem::create_directories(opts.effect_dir);
+	}
+
+	if (!std::filesystem::exists(opts.color_path))
+	{
+		std::cerr << "Color image does not exist: " << path_utf8(opts.color_path) << '\n';
+		return 1;
+	}
+	if (!std::filesystem::exists(opts.effect_dir))
+	{
+		std::cerr << "Effect directory does not exist: " << path_utf8(opts.effect_dir) << '\n';
+		return 1;
+	}
+
+	image_rgba color_image;
+	if (!load_png_rgba(wic_factory.Get(), opts.color_path, color_image))
+	{
+		std::cerr << "Failed to load color PNG: " << path_utf8(opts.color_path) << '\n';
+		return 1;
+	}
+
+	const uint32_t width = opts.width != 0 ? opts.width : static_cast<uint32_t>(color_image.width);
+	const uint32_t height = opts.height != 0 ? opts.height : static_cast<uint32_t>(color_image.height);
+	if (!offline_limits::image_size(width, height)) { std::cerr << "Render dimensions exceed limits (16384 per axis, 64 megapixels).\n"; return 1; }
+    MEMORYSTATUSEX system_memory = { sizeof(MEMORYSTATUSEX) };
+    const uint64_t estimated_cpu_bytes = static_cast<uint64_t>(width) * height * 64 + static_cast<uint64_t>(color_image.width) * color_image.height * 36 + (128ull << 20);
+    if (GlobalMemoryStatusEx(&system_memory) && estimated_cpu_bytes > std::min(system_memory.ullAvailPhys, system_memory.ullAvailPageFile) * 3 / 5) {
+        std::cerr << "Render exceeds available system memory budget; lower output dimensions or free memory.\n"; return 1;
+    }
+    const uint32_t source_width = color_image.width, source_height = color_image.height;
+    color_image = resize_rgba(color_image, width, height);
+	std::vector<float> depth_data;
+	depth_load_status initial_depth_status;
+	if (!load_depth_data(wic_factory.Get(), opts, width, height, depth_data, &initial_depth_status, source_width, source_height))
+	{
+		std::cerr << "Invalid depth (expected matching dimensions and finite normalized values in [0,1]): " << path_utf8(opts.depth_path) << '\n';
+		return 1;
+	}
+	if (initial_depth_status.fallback_to_kks)
+	{
+		opts.depth_profile = "kks";
+		std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << initial_depth_status.warning << std::endl;
+	}
+	const std::vector<float> motion_data(static_cast<size_t>(width) * height * 2, 0.0f);
+
+	const std::filesystem::path work_dir = opts.work_dir.empty() ? prototype_directory() : opts.work_dir;
+    std::filesystem::create_directories(work_dir);
+	const std::filesystem::path preset_path = make_preset(opts, work_dir);
+	const std::filesystem::path config_path = make_config(opts, work_dir, preset_path, width, height);
+
+	const HWND parent_hwnd = reinterpret_cast<HWND>(opts.parent_hwnd);
+	HWND hwnd = create_render_window(width, height, parent_hwnd);
+	const auto destroy_render_window = [&]() {
+		if (hwnd != nullptr)
+			DestroyWindow(hwnd);
+	};
+	if (hwnd == nullptr)
+	{
+		std::cerr << "Failed to create render window.\n";
+		return 1;
+	}
+
+	ComPtr<ID3D11Device> device;
+	ComPtr<ID3D11DeviceContext> context;
+	ComPtr<IDXGISwapChain> swapchain;
+	if (!create_device_and_swapchain(hwnd, width, height, device, context, swapchain))
+	{
+		std::cerr << "Failed to create D3D11 device and swapchain.\n";
+		destroy_render_window();
+		return 1;
+	}
+
+    // Every GUI draw has a private destination, including non-present export frames.
+    ComPtr<ID3D11Texture2D> clean_overlay_texture;
+    ComPtr<ID3D11RenderTargetView> clean_overlay_target;
+    D3D11_TEXTURE2D_DESC clean_desc = {};
+    clean_desc.Width = clean_desc.Height = 32;
+    clean_desc.MipLevels = clean_desc.ArraySize = clean_desc.SampleDesc.Count = 1;
+    clean_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    clean_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device->CreateTexture2D(&clean_desc, nullptr, &clean_overlay_texture)) ||
+        FAILED(device->CreateRenderTargetView(clean_overlay_texture.Get(), nullptr, &clean_overlay_target))) return 1;
+	ComPtr<ID3D11Texture2D> color_texture, depth_texture, motion_texture;
+	ComPtr<ID3D11ShaderResourceView> color_srv, depth_srv, motion_srv;
+	if (!create_shader_resource(device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, width, height, color_image.pixels.data(), width * 4, color_texture, color_srv) ||
+		!create_shader_resource(device.Get(), DXGI_FORMAT_R32_FLOAT, width, height, depth_data.data(), width * sizeof(float), depth_texture, depth_srv) ||
+		!create_shader_resource(device.Get(), DXGI_FORMAT_R32G32_FLOAT, width, height, motion_data.data(), width * sizeof(float) * 2, motion_texture, motion_srv))
+	{
+		std::cerr << "Failed to create input shader resources.\n";
+		destroy_render_window();
+		return 1;
+	}
+	std::filesystem::file_time_type color_write_time = file_write_time_or_min(opts.color_path);
+	std::filesystem::file_time_type depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
+
+	reshade_exports reshade = load_reshade(work_dir);
+	if (reshade.module == nullptr)
+	{
+		std::cerr << "Failed to load ReShade64.dll from " << path_utf8(executable_directory()) << ", GetLastError=" << GetLastError() << '\n';
+		destroy_render_window();
+		return 1;
+	}
+	if (reshade.create_runtime == nullptr || reshade.destroy_runtime == nullptr || reshade.update_and_present_runtime == nullptr || reshade.set_external_overlay_target == nullptr || reshade.is_runtime_loading == nullptr || reshade.export_error == nullptr || reshade.dependencies == nullptr)
+	{
+		std::cerr << "Failed to load ReShade64.dll exports:"
+			<< " create=" << (reshade.create_runtime != nullptr)
+			<< " destroy=" << (reshade.destroy_runtime != nullptr)
+			<< " update_present=" << (reshade.update_and_present_runtime != nullptr)
+			<< '\n';
+		FreeLibrary(reshade.module);
+		destroy_render_window();
+		return 1;
+	}
+
+	reshade::api::effect_runtime *runtime = nullptr;
+	const std::string config_path_u8 = path_utf8(config_path);
+	if (!reshade.create_runtime(reshade::api::device_api::d3d11, device.Get(), context.Get(), swapchain.Get(), config_path_u8.c_str(), &runtime) || runtime == nullptr)
+	{
+		std::cerr << "Failed to create ReShade effect runtime. Check ReShade.log next to ReShade64.dll.\n";
+		FreeLibrary(reshade.module);
+		destroy_render_window();
+		return 1;
+	}
+
+	bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
+	uint64_t input_generation = 1;
+	const auto notify_offline_input_changed = [&]() {
+		if (reshade.notify_offline_input_changed == nullptr)
+			return;
+		const std::string color_path = path_utf8(opts.color_path);
+		const std::string depth_path = path_utf8(opts.depth_path);
+		reshade.notify_offline_input_changed(runtime, color_path.c_str(), depth_path.c_str(), width, height, input_generation);
+	};
+	notify_offline_input_changed();
+	frame_rate_stats stats;
+	{
+		ComPtr<IDXGIDevice> dxgi_device;
+		ComPtr<IDXGIAdapter> adapter;
+		DXGI_ADAPTER_DESC desc = {};
+		if (FAILED(device.As(&dxgi_device)) || FAILED(dxgi_device->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc))) {
+			std::cerr << "Failed to identify rendering adapter.\n"; return 1;
+		}
+		stats.adapter_luid = (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) | desc.AdapterLuid.LowPart;
+		stats.adapter_name = narrow_utf8(desc.Description);
+	}
+	shared_preview_state shared_preview;
+	if (opts.interactive && opts.preview_shared &&
+		(GetEnvironmentVariableW(L"OFFLINE_RESHADE_TEST_SHARED_FAILURE", nullptr, 0) != 0 || !create_shared_preview_texture(device.Get(), width, height, shared_preview)))
+	{
+		std::cerr << "Failed to create shared preview texture.\n";
+		stats.preview_error = "Shared GPU preview unavailable; using CPU preview.";
+		opts.preview_shared = false;
+	}
+	stats.cpu_preview = !opts.preview_shared;
+	shared_addon_overlay_state shared_addon_overlay;
+	if (opts.interactive && opts.addon_overlay_shared &&
+		!create_shared_addon_overlay_texture(device.Get(), opts.addon_overlay_width, opts.addon_overlay_height, shared_addon_overlay))
+	{
+		std::cerr << "Failed to create shared add-on overlay texture.\n";
+		opts.addon_overlay_shared = false;
+	}
+	bool output_capture_valid = false;
+
+	const auto load_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::string &new_depth_profile, const std::string &new_depth_downsample, depth_load_status *depth_status = nullptr) -> std::string {
+		image_rgba new_color_image;
+		if (!load_png_rgba(wic_factory.Get(), new_color_path, new_color_image))
+			return "Failed to load color PNG: " + path_utf8(new_color_path);
+		const uint32_t new_source_width = new_color_image.width, new_source_height = new_color_image.height;
+        MEMORYSTATUSEX memory = { sizeof(MEMORYSTATUSEX) };
+        const uint64_t required = static_cast<uint64_t>(width) * height * 24 + static_cast<uint64_t>(new_source_width) * new_source_height * 36;
+        if (GlobalMemoryStatusEx(&memory) && required > std::min(memory.ullAvailPhys, memory.ullAvailPageFile) * 3 / 5)
+            return "Input replacement exceeds available system memory budget.";
+        new_color_image = resize_rgba(new_color_image, width, height);
+
+		std::vector<float> new_depth_data;
+		options input_opts = opts;
+		input_opts.depth_path = new_depth_path;
+		input_opts.depth_format = new_depth_format;
+		input_opts.depth_profile = new_depth_profile;
+		input_opts.depth_downsample = new_depth_downsample;
+		if (!load_depth_data(wic_factory.Get(), input_opts, width, height, new_depth_data, depth_status, new_source_width, new_source_height))
+			return "Invalid depth (expected matching dimensions and finite normalized values in [0,1]): " + path_utf8(new_depth_path);
+
+		ComPtr<ID3D11Texture2D> new_color_texture, new_depth_texture;
+		ComPtr<ID3D11ShaderResourceView> new_color_srv, new_depth_srv;
+		if (!create_shader_resource(device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, width, height, new_color_image.pixels.data(), width * 4, new_color_texture, new_color_srv) ||
+			!create_shader_resource(device.Get(), DXGI_FORMAT_R32_FLOAT, width, height, new_depth_data.data(), width * sizeof(float), new_depth_texture, new_depth_srv))
+			return "Failed to create input shader resources.";
+
+		color_image = std::move(new_color_image);
+		depth_data = std::move(new_depth_data);
+		color_texture = std::move(new_color_texture);
+		depth_texture = std::move(new_depth_texture);
+		color_srv = std::move(new_color_srv);
+		depth_srv = std::move(new_depth_srv);
+		opts.color_path = new_color_path;
+		opts.depth_path = new_depth_path;
+		opts.depth_format = new_depth_format;
+		opts.depth_profile = depth_status != nullptr && depth_status->fallback_to_kks ? "kks" : new_depth_profile;
+		opts.depth_downsample = new_depth_downsample;
+		color_write_time = file_write_time_or_min(opts.color_path);
+		depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
+		bind_semantics(runtime, color_srv.Get(), depth_srv.Get(), motion_srv.Get());
+		++input_generation;
+		notify_offline_input_changed();
+		stats.input_generation = input_generation;
+        stats.input_error.clear(); stats.restart_required = false;
+		output_capture_valid = false;
+		return {};
+	};
+
+	const auto reload_inputs_if_changed = [&]() {
+		const std::filesystem::file_time_type new_color_write_time = file_write_time_or_min(opts.color_path);
+		const std::filesystem::file_time_type new_depth_write_time = opts.depth_path.empty() ? std::filesystem::file_time_type::min() : file_write_time_or_min(opts.depth_path);
+		if (new_color_write_time == color_write_time && new_depth_write_time == depth_write_time)
+			return;
+
+        image_rgba probe;
+        if (!load_png_rgba(wic_factory.Get(), opts.color_path, probe)) { stats.input_error = "Changed color input is unreadable."; return; }
+        if (opts.width == 0 && opts.height == 0 && (probe.width != width || probe.height != height)) {
+            stats.restart_required = true; return;
+        }
+        depth_load_status depth_status;
+        stats.input_error = load_input_paths(opts.color_path, opts.depth_path, opts.depth_format, opts.depth_profile, opts.depth_downsample, &depth_status);
+        if (!stats.input_error.empty()) return;
+		if (depth_status.fallback_to_kks)
+			std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << depth_status.warning << std::endl;
+		std::cout << "INPUTS_RELOADED=1" << std::endl;
+	};
+
+	const auto switch_input_paths = [&](const std::filesystem::path &new_color_path, const std::filesystem::path &new_depth_path, const std::string &new_depth_format, const std::string &new_depth_profile, const std::string &new_depth_downsample, const std::filesystem::path &new_output_path) -> control_server::input_switch_result {
+        if (opts.width == 0 && opts.height == 0) {
+            image_rgba probe;
+            if (!load_png_rgba(wic_factory.Get(), new_color_path, probe)) return { "Failed to read color image.", false, {} };
+            if (static_cast<uint32_t>(probe.width) != width || static_cast<uint32_t>(probe.height) != height)
+                return { {}, false, {}, true };
+        }
+		depth_load_status depth_status;
+		const std::string error = load_input_paths(new_color_path, new_depth_path, new_depth_format, new_depth_profile, new_depth_downsample, &depth_status);
+		if (!error.empty())
+			return { error, false, {} };
+		opts.output_path = new_output_path;
+		if (depth_status.fallback_to_kks)
+			std::cout << "DEPTH_PROFILE_FALLBACK=KKS " << depth_status.warning << std::endl;
+		std::cout << "INPUTS_SWITCHED=1 " << path_utf8(opts.color_path) << std::endl;
+		return { {}, depth_status.fallback_to_kks, depth_status.warning };
+	};
+
+	const auto set_input_watch_enabled = [&](bool enabled) {
+		opts.disable_input_watch = !enabled;
+		std::cout << "INPUT_WATCH=" << (enabled ? "1" : "0") << std::endl;
+	};
+
+	std::unique_ptr<control_server> control;
+
+	std::unique_ptr<preview_stream_server> preview_stream;
+	const double preview_scale = std::min(1.0, 1920.0 / std::max(width, height));
+	const uint32_t preview_width = opts.preview_width != 0 ? opts.preview_width : std::max(1u, static_cast<uint32_t>(width * preview_scale));
+	const uint32_t preview_height = opts.preview_height != 0 ? opts.preview_height : std::max(1u, static_cast<uint32_t>(height * preview_scale));
+	if (!offline_limits::preview_size(preview_width, preview_height)) { std::cerr << "Preview dimensions exceed resource limits.\n"; return 1; }
+	if (opts.interactive && !opts.preview_pipe.empty())
+	{
+		preview_stream = std::make_unique<preview_stream_server>(opts.preview_pipe);
+		preview_stream->start();
+	}
+	async_backbuffer_reader preview_reader;
+	bool preview_reader_ready = false;
+
+	const HWND overlay_hwnd = reinterpret_cast<HWND>(opts.overlay_hwnd);
+	ComPtr<IDXGISwapChain> overlay_swapchain;
+	ComPtr<ID3D11RenderTargetView> overlay_rtv;
+	uint32_t overlay_width = 0;
+	uint32_t overlay_height = 0;
+	ComPtr<ID3D11Texture2D> output_capture_texture;
+	uint32_t output_capture_width = 0;
+	uint32_t output_capture_height = 0;
+	const auto device_failure = [&]() {
+		const HRESULT reason = device->GetDeviceRemovedReason();
+		char code[16]; std::snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(reason));
+		stats.device_error = "D3D render failed (device reason " + std::string(code) + "); recreate the runtime before exporting.";
+		std::cerr << stats.device_error << '\n';
+	};
+	// Explicit opt-in fault marker for integration tests; deletion makes injection one-shot across restarts.
+	wchar_t fault_marker[32768] = {};
+	GetEnvironmentVariableW(L"OFFLINE_RESHADE_TEST_DEVICE_LOSS_MARKER", fault_marker, static_cast<DWORD>(std::size(fault_marker)));
+
+	const auto render_frame = [&](bool present, const std::function<bool()> &before_present = {}) -> bool {
+		if (!stats.device_error.empty()) return false;
+		if (fault_marker[0] && DeleteFileW(fault_marker)) { stats.device_error = "Injected D3D device loss; runtime recovery required."; return false; }
+		if (FAILED(device->GetDeviceRemovedReason())) { device_failure(); return false; }
+		if (!copy_rgba_to_backbuffer(context.Get(), swapchain.Get(), width, height, color_image.pixels))
+			return false;
+
+		bool addon_overlay_acquired = false;
+		if (present && opts.addon_overlay_shared && shared_addon_overlay.render_target != nullptr && reshade.set_external_overlay_target != nullptr)
+		{
+			addon_overlay_acquired = shared_addon_overlay.keyed_mutex != nullptr &&
+				shared_addon_overlay.keyed_mutex->AcquireSync(0, 0) == S_OK;
+			if (addon_overlay_acquired)
+			{
+				const float clear_color[4] = { 0.08f, 0.085f, 0.095f, 1.0f };
+				context->ClearRenderTargetView(shared_addon_overlay.render_target.Get(), clear_color);
+				reshade.set_external_overlay_target(runtime, shared_addon_overlay.render_target.Get(), shared_addon_overlay.width, shared_addon_overlay.height);
+			}
+			else
+			{
+				// Keep rendering the selected overlay into a private target so input and ImGui
+				// state advance even while WinUI is sampling the last complete shared frame.
+				const float clear_color[4] = { 0.08f, 0.085f, 0.095f, 1.0f };
+				context->ClearRenderTargetView(shared_addon_overlay.scratch_render_target.Get(), clear_color);
+				reshade.set_external_overlay_target(runtime, shared_addon_overlay.scratch_render_target.Get(), shared_addon_overlay.width, shared_addon_overlay.height);
+			}
+		}
+		else if (present && overlay_hwnd != nullptr && reshade.set_external_overlay_target != nullptr)
+		{
+			if (!ensure_overlay_target(device.Get(), context.Get(), overlay_hwnd, overlay_swapchain, overlay_rtv, overlay_width, overlay_height))
+				return false;
+
+			const float clear_color[4] = { 0.08f, 0.085f, 0.095f, 1.0f };
+			context->ClearRenderTargetView(overlay_rtv.Get(), clear_color);
+			reshade.set_external_overlay_target(runtime, overlay_rtv.Get(), overlay_width, overlay_height);
+		}
+		else if (reshade.set_external_overlay_target != nullptr)
+		{
+			reshade.set_external_overlay_target(runtime, clean_overlay_target.Get(), 32, 32);
+		}
+
+		if (present && reshade.begin_present_runtime != nullptr)
+			reshade.begin_present_runtime(runtime);
+		reshade.update_and_present_runtime(runtime);
+        if (!reshade.is_runtime_loading(runtime)) stats.mark_render_frame();
+		if (addon_overlay_acquired)
+		{
+			context->Flush();
+			shared_addon_overlay.keyed_mutex->ReleaseSync(1);
+		}
+
+		if (before_present && !before_present())
+			return false;
+
+		if (present)
+		{
+			if (FAILED(swapchain->Present(0, 0)))
+				return false;
+			if (reshade.finish_present_runtime != nullptr)
+				reshade.finish_present_runtime(runtime);
+		}
+		if (present && overlay_swapchain != nullptr && FAILED(overlay_swapchain->Present(0, 0)))
+			return false;
+		if (FAILED(device->GetDeviceRemovedReason())) { device_failure(); return false; }
+		return true;
+	};
+
+    const auto validate_export = [&]() -> std::string {
+        if (FAILED(device->GetDeviceRemovedReason()) && stats.device_error.empty()) device_failure();
+        if (!stats.device_error.empty()) return stats.device_error;
+        if (!opts.disable_input_watch) reload_inputs_if_changed();
+        if (stats.restart_required) return "Input dimensions changed; restart the runtime before exporting.";
+        if (!stats.input_error.empty()) return stats.input_error;
+        return runtime_string([&](char *buffer, size_t *size) { reshade.export_error(runtime, buffer, size); });
+    };
+    const auto export_dependencies = [&]() {
+        return runtime_string([&](char *buffer, size_t *size) { reshade.dependencies(runtime, buffer, size); }) +
+            path_utf8(executable_directory() / L"ReShade64.dll") + "\n" + path_utf8(executable_directory() / L"OfflineReShadePrototype.exe") + "\n";
+    };
+    const auto warn_black = [&](const std::vector<uint8_t> &pixels) {
+        bool black = !pixels.empty();
+        for (size_t i = 0; i + 3 < pixels.size(); i += 4)
+            if (pixels[i] || pixels[i + 1] || pixels[i + 2]) { black = false; break; }
+        stats.output_warning = black ? "Output is entirely black; verify that this is intentional." : "";
+        if (black) std::cerr << "WARNING: " << stats.output_warning << '\n';
+    };
+    const auto validate_output = [&](const std::filesystem::path &destination) -> std::string {
+        if (destination.lexically_normal() == opts.color_path.lexically_normal() || destination.lexically_normal() == opts.depth_path.lexically_normal())
+            return "Output must not overwrite the color or depth source.";
+        return {};
+    };
+    const auto save_current_output = [&](const std::filesystem::path &destination, uint32_t max_width) -> std::string {
+        if (const auto error = validate_output(destination); !error.empty()) return error;
+        if (const auto error = validate_export(); !error.empty()) return error;
+        const uint64_t generation = stats.input_generation;
+        if (!render_frame(false)) return "Failed to render clean output frame.";
+        if (const auto error = validate_export(); !error.empty()) return error;
+        if (generation != stats.input_generation) return "Input changed during export; retry with a stable input pair.";
+        image_rgba output;
+        output.width = width; output.height = height;
+        output.pixels = read_backbuffer(device.Get(), context.Get(), swapchain.Get(), width, height);
+        if (output.pixels.empty()) return "Failed to read rendered image.";
+        warn_black(output.pixels);
+        if (max_width && width > max_width) output = resize_rgba(output, max_width, std::max(1u, static_cast<uint32_t>(static_cast<uint64_t>(height) * max_width / width)));
+        std::error_code ec;
+        if (!destination.parent_path().empty()) std::filesystem::create_directories(destination.parent_path(), ec);
+        const auto temp = destination.wstring() + L".partial-" + std::to_wstring(GetCurrentProcessId());
+        if (!save_png_rgba(wic_factory.Get(), temp, output.width, output.height, output.pixels) ||
+            !MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            std::filesystem::remove(temp, ec); return "Failed to save PNG: " + path_utf8(destination);
+        }
+        return {};
+    };
+
+	const auto save_reshade_screenshot = [&](const std::filesystem::path &destination) -> std::string {
+        if (const auto error = validate_output(destination); !error.empty()) return error;
+        if (const auto error = validate_export(); !error.empty()) return error;
+        const uint64_t generation = stats.input_generation;
+		if (!render_frame(false))
+			return "Failed to render screenshot frame.";
+        if (const auto error = validate_export(); !error.empty()) return error;
+		if (generation != stats.input_generation) return "Input changed during export; retry with a stable input pair.";
+
+		const std::filesystem::path screenshot_dir = work_dir / L"ReShadeShotTemp";
+		clear_screenshot_temp_dir(screenshot_dir);
+		runtime->save_screenshot(nullptr);
+
+		const std::filesystem::path screenshot_path = wait_for_screenshot_file(screenshot_dir, std::chrono::seconds(10));
+		if (screenshot_path.empty())
+			return "ReShade screenshot was not written.";
+
+		std::error_code ec;
+		std::filesystem::create_directories(destination.parent_path(), ec);
+		image_rgba verified;
+        if (!load_png_rgba(wic_factory.Get(), screenshot_path, verified) || verified.width != width || verified.height != height)
+            return "ReShade screenshot is incomplete or has incorrect dimensions.";
+        warn_black(verified.pixels);
+        const auto temp = destination.wstring() + L".partial-" + std::to_wstring(GetCurrentProcessId());
+        std::filesystem::copy_file(screenshot_path, temp, std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec && !MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            ec = std::error_code(GetLastError(), std::system_category());
+        if (ec) { std::error_code ignored; std::filesystem::remove(temp, ignored); }
+		if (ec)
+			return "Failed to copy ReShade screenshot to " + path_utf8(destination) + ": " + std::to_string(ec.value());
+
+		std::filesystem::remove(screenshot_path, ec);
+		std::cout << "ReShade screenshot " << path_utf8(destination) << " (" << width << "x" << height << ")\n";
+		return {};
+	};
+
+	if (opts.interactive)
+	{
+		if (opts.control_pipe.empty())
+			opts.control_pipe = "OfflineReShade-" + std::to_string(GetCurrentProcessId());
+		if (reshade.set_addon_imgui_capture_enabled != nullptr)
+			reshade.set_addon_imgui_capture_enabled(true);
+		const auto addon_state = [&]() {
+			return exported_json_string(reshade.get_addon_overlay_state_json, "{\"available\":false,\"allLoaded\":false,\"addons\":[]}");
+		};
+		const auto addon_imgui_state = [&]() {
+			return exported_json_string(reshade.get_addon_imgui_capture_json, "{\"available\":false,\"enabled\":false,\"controls\":[]}");
+		};
+		const auto addon_imgui_input = [&](const std::string &id, const std::string &value) {
+			return reshade.inject_addon_imgui_value != nullptr && reshade.inject_addon_imgui_value(id.c_str(), value.c_str());
+		};
+		const auto addon_overlay_select = [&](const std::string &addon, const std::string &overlay, bool settings) {
+			if (reshade.set_external_addon_overlay == nullptr)
+				return false;
+			reshade.set_external_addon_overlay(runtime, addon.c_str(), overlay.c_str(), settings);
+			return true;
+		};
+		const auto addon_overlay_input = [&](uint32_t message, uintptr_t wparam, intptr_t lparam) {
+			if (reshade.add_external_overlay_input_event == nullptr)
+				return false;
+			reshade.add_external_overlay_input_event(runtime, message, wparam, lparam);
+			return true;
+		};
+		const auto addon_overlay_resize = [&](uint32_t requested_width, uint32_t requested_height) {
+			if (!opts.addon_overlay_shared)
+				return false;
+			if (shared_addon_overlay.width == requested_width && shared_addon_overlay.height == requested_height)
+				return true;
+			return create_shared_addon_overlay_texture(device.Get(), requested_width, requested_height, shared_addon_overlay);
+		};
+		const auto runtime_loading = [&]() {
+			return reshade.is_runtime_loading != nullptr && reshade.is_runtime_loading(runtime);
+		};
+		control = std::make_unique<control_server>(opts.control_pipe, runtime, width, height, opts.output_path, &stats, opts.preview_shared ? &shared_preview : nullptr, opts.addon_overlay_shared ? &shared_addon_overlay : nullptr, switch_input_paths, save_current_output, save_reshade_screenshot, set_input_watch_enabled, addon_state, addon_imgui_state, addon_imgui_input, addon_overlay_select, addon_overlay_input, addon_overlay_resize, runtime_loading, validate_export, export_dependencies,
+            [&](const std::string &addon, const std::string &method, const std::string &request) -> std::string {
+                if (addon == "@imgui" && method == "cancel") {
+                    if (reshade.inject_addon_imgui_value) reshade.inject_addon_imgui_value(request.c_str(), nullptr);
+                    return "{}";
+                }
+                if (!reshade.call_addon_service) return "{\"supported\":false,\"error\":\"Service API unavailable\"}";
+                return reshade.call_addon_service(runtime, addon.c_str(), method.c_str(), request.c_str());
+            });
+		control->start();
+	}
+
+	if (opts.interactive)
+	{
+		timer_resolution_scope timer_resolution;
+		if (opts.preview_pipe.empty() && !opts.preview_shared)
+			ShowWindow(hwnd, SW_SHOW);
+		std::cout << "PREVIEW_HWND=" << reinterpret_cast<uintptr_t>(hwnd) << " PARENT_HWND=" << opts.parent_hwnd << std::endl;
+		MSG msg = {};
+		uint32_t input_reload_counter = 0;
+		const auto target_frame_time = std::chrono::duration<double>(1.0 / 60.0);
+		while (IsWindow(hwnd) && (parent_hwnd == nullptr || IsWindow(parent_hwnd)))
+		{
+			const auto frame_start = std::chrono::steady_clock::now();
+
+			while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+			{
+				if (msg.message == WM_QUIT)
+					goto end_interactive;
+				TranslateMessage(&msg);
+				DispatchMessageW(&msg);
+			}
+
+			if (parent_hwnd != nullptr)
+			{
+				RECT parent_rect = {};
+				if (IsWindowVisible(parent_hwnd) && GetWindowRect(parent_hwnd, &parent_rect))
+				{
+					SetWindowPos(hwnd, HWND_TOP,
+						parent_rect.left,
+						parent_rect.top,
+						parent_rect.right - parent_rect.left,
+						parent_rect.bottom - parent_rect.top,
+						SWP_NOACTIVATE | SWP_SHOWWINDOW);
+				}
+				else
+				{
+					ShowWindow(hwnd, SW_HIDE);
+				}
+			}
+
+			if (control != nullptr)
+				control->process_pending();
+			if (!stats.device_error.empty()) { Sleep(20); continue; }
+
+			if (!opts.disable_input_watch && (++input_reload_counter % 10) == 0)
+				reload_inputs_if_changed();
+
+			bool refreshed_shared_preview = false;
+			bool refreshed_output_capture = false;
+			if (!render_frame(true, [&]() {
+				if (ensure_private_capture_texture(device.Get(), swapchain.Get(), output_capture_texture, output_capture_width, output_capture_height))
+					refreshed_output_capture = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), output_capture_texture.Get());
+				if (opts.preview_shared && shared_preview.texture != nullptr) {
+					const HRESULT acquired = shared_preview.keyed_mutex->AcquireSync(0, 0);
+					if (acquired == S_OK) {
+						if (stats.preview_original) {
+							context->CopyResource(shared_preview.texture.Get(), color_texture.Get());
+							refreshed_shared_preview = true;
+						} else refreshed_shared_preview = copy_backbuffer_to_texture(context.Get(), swapchain.Get(), shared_preview.texture.Get());
+						context->Flush();
+						if (FAILED(shared_preview.keyed_mutex->ReleaseSync(1))) {
+							refreshed_shared_preview = false;
+							stats.preview_error = "Shared preview release failed; using CPU preview.";
+							opts.preview_shared = false; stats.cpu_preview = true; shared_preview.handle = nullptr;
+						}
+					} else if (acquired != WAIT_TIMEOUT) {
+						stats.preview_error = "Shared preview synchronization failed; using CPU preview.";
+						opts.preview_shared = false; stats.cpu_preview = true; shared_preview.handle = nullptr;
+					}
+				}
+				return true;
+			}))
+			{
+				if (stats.device_error.empty()) device_failure();
+				continue; // Keep the control pipe alive so the owner can rebuild safely.
+			}
+			if (refreshed_output_capture)
+				output_capture_valid = true;
+			if (preview_stream != nullptr && stats.cpu_preview)
+			{
+				if (!preview_reader_ready) {
+					preview_reader_ready = preview_reader.initialize(device.Get(), swapchain.Get(), width, height, 2);
+					if (!preview_reader_ready) { stats.preview_error = "CPU preview readback allocation failed."; stats.cpu_preview = false; continue; }
+				}
+				std::vector<uint8_t> backbuffer = preview_reader.submit_and_try_read(context.Get(), swapchain.Get());
+				if (!backbuffer.empty())
+				{
+					preview_stream->publish(preview_width, preview_height, make_preview_frame_bgra(stats.preview_original ? color_image.pixels : backbuffer, width, height, preview_width, preview_height));
+					stats.mark_preview_frame();
+				}
+			}
+			else if (parent_hwnd != nullptr)
+			{
+				stats.mark_preview_frame();
+			}
+			else if (opts.preview_shared && shared_preview.texture != nullptr)
+			{
+				if (refreshed_shared_preview)
+					stats.mark_preview_frame();
+			}
+
+			const auto elapsed = std::chrono::steady_clock::now() - frame_start;
+			if (elapsed < target_frame_time)
+			{
+				const auto target_time = frame_start + target_frame_time;
+				auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(target_time - std::chrono::steady_clock::now()).count();
+				if (remaining_ms > 2)
+					Sleep(static_cast<DWORD>(remaining_ms - 1));
+				while (std::chrono::steady_clock::now() < target_time)
+					Sleep(0);
+			}
+		}
+	end_interactive:
+		reshade.destroy_runtime(runtime);
+		FreeLibrary(reshade.module);
+		destroy_render_window();
+		std::cout << "Preview stopped\n";
+		wic_factory.Reset();
+		CoUninitialize();
+		return 0;
+	}
+
+    const auto export_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(opts.timeout_seconds);
+    uint64_t ready_start = 0;
+    do {
+        if (std::chrono::steady_clock::now() >= export_deadline) { std::cerr << "Timed out waiting for effects and warmup frames.\n"; reshade.destroy_runtime(runtime); return 1; }
+        if (!render_frame(false)) { std::cerr << "Failed to render export frame.\n"; reshade.destroy_runtime(runtime); return 1; }
+        if (reshade.is_runtime_loading(runtime)) ready_start = stats.frame_count;
+        Sleep(1);
+    } while (reshade.is_runtime_loading(runtime) || stats.frame_count - ready_start < std::max(1u, opts.warmup_frames));
+    if (const auto error = save_current_output(opts.output_path, 0); !error.empty()) {
+        std::cerr << error << '\n'; reshade.destroy_runtime(runtime); FreeLibrary(reshade.module); destroy_render_window(); return 1;
+    }
+
+	reshade.destroy_runtime(runtime);
+	FreeLibrary(reshade.module);
+	destroy_render_window();
+
+	std::cout << "Wrote " << path_utf8(opts.output_path) << " (" << width << "x" << height << ")\n";
+	wic_factory.Reset();
+	CoUninitialize();
+	return 0;
+}
+
+int wmain(int argc, wchar_t **argv)
+{
+    try { return run_offline(argc, argv); }
+    catch (const std::exception &ex) { std::cerr << "Offline render failed: " << ex.what() << '\n'; return 1; }
+}

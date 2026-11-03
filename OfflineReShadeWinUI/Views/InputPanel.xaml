@@ -1,0 +1,115 @@
+﻿<UserControl x:Class="OfflineReShade.WinUI.Views.InputPanel"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:vm="using:OfflineReShade.WinUI.ViewModels"
+ xmlns:views="using:OfflineReShade.WinUI.Views">
+  <ScrollViewer x:Name="InputPanelScroll" HorizontalScrollBarVisibility="Disabled">
+    <Border Margin="12,0,12,0">
+      <StackPanel Spacing="8">
+          <StackPanel Spacing="12">
+        <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
+        <TextBlock Text="{x:Bind ViewModel.InputSourceText, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.AutomationId="InputSourceStatus" />
+        <TextBlock Text="{x:Bind ViewModel.PresetEditStatus, Mode=OneWay}" AutomationProperties.AutomationId="PresetEditStatus" AutomationProperties.LiveSetting="Polite" />
+        <StackPanel Spacing="8">
+          <StackPanel><TextBlock Text="Current image" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentInputText, Mode=OneWay}" TextTrimming="CharacterEllipsis" AutomationProperties.AutomationId="CurrentInputPath" /></StackPanel>
+          <StackPanel><TextBlock Text="Depth association" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentDepthText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
+          <StackPanel><TextBlock Text="Current preset" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Text="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.CurrentPresetText, Mode=OneWay}" TextTrimming="CharacterEllipsis" /></StackPanel>
+        </StackPanel>
+          <Grid>
+            <StackPanel Spacing="8">
+              <TextBlock Text="{x:Bind ViewModel.InputSelectionMessage, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+              <StackPanel Spacing="8">
+                <Button Content="Apply files to preview" Command="{x:Bind ViewModel.StartPreviewCommand}" AutomationProperties.AutomationId="ApplyInput"  />
+                <Button Content="Choose game export folder" Command="{x:Bind ViewModel.PickWatchFolderCommand}" AutomationProperties.AutomationId="ChooseWatchFolder"  />
+                <Button Content="Start listening" Command="{x:Bind ViewModel.StartListeningCommand}" AutomationProperties.AutomationId="StartListening"  />
+                <Button Content="Stop listening" Command="{x:Bind ViewModel.StopListeningCommand}" AutomationProperties.AutomationId="StopListening"  />
+              </StackPanel>
+              <TextBlock Text="Edits below are pending until applied. Listening can wait for files that do not exist yet." TextWrapping="Wrap" />
+            <TextBlock Text="Depth profile" />
+            <ComboBox x:Name="DepthProfileBox"
+                      MinWidth="180"
+                      SelectionChanged="OnDepthProfileSelectionChanged" AutomationProperties.AutomationId="InputPanelControl6">
+              <ComboBoxItem Content="Koikatsu Sunshine (KKS)" Tag="kks" />
+              <ComboBoxItem Content="Koikatsu (KK)" Tag="kk" />
+            </ComboBox>
+
+            <TextBlock Text="Depth Downsample Filter" />
+            <ComboBox x:Name="DepthDownsampleBox"
+                      MinWidth="180"
+                      SelectionChanged="OnDepthDownsampleSelectionChanged" AutomationProperties.AutomationId="InputPanelControl7">
+              <ComboBoxItem Content="Max 2x2" Tag="max2x2" />
+              <ComboBoxItem Content="Smooth Box 2x2" Tag="box" />
+            </ComboBox>
+
+            <TextBlock Text="Color PNG" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.ColorPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl8" AutomationProperties.Name="Color PNG path" />
+              <Button Grid.Column="1" Content="Choose image" Command="{x:Bind ViewModel.PickColorCommand}" AutomationProperties.AutomationId="ChooseInputColor"  />
+            </Grid>
+
+            <TextBlock Text="Depth Encoding" />
+            <ComboBox x:Name="DepthFormatBox"
+                      MinWidth="240"
+                      SelectionChanged="OnDepthFormatSelectionChanged" AutomationProperties.AutomationId="InputPanelControl10">
+              <ComboBoxItem Content="Raw Float32 device depth (.rfloat)" Tag="raw" />
+              <ComboBoxItem Content="RGBA8 packed device depth PNG" Tag="rgba" />
+            </ComboBox>
+
+            <TextBlock Text="Depth File" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.DepthPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl11" AutomationProperties.Name="Depth file path" />
+              <Button Grid.Column="1" Content="Associate depth" Command="{x:Bind ViewModel.PickDepthCommand}" AutomationProperties.AutomationId="AssociateDepth"  />
+            </Grid>
+
+            <TextBlock Text="Preset INI" />
+            <Grid ColumnSpacing="8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBox Text="{x:Bind ViewModel.Settings.PresetPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl13" AutomationProperties.Name="Preset INI path" />
+              <Button Grid.Column="1" Content="Load preset" Command="{x:Bind ViewModel.PickPresetCommand}" AutomationProperties.AutomationId="LoadPreset"  />
+            </Grid>
+
+            <TextBlock Text="Render Size" FontSize="16" FontWeight="SemiBold" Margin="0,10,0,0" />
+            <TextBlock Text="Follow the color image size, or choose custom output dimensions. Changes apply with the other input settings." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind ViewModel.ConfigurationStatusText, Mode=OneWay}"
+                       AutomationProperties.AutomationId="ConfigurationStatus"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <ToggleSwitch x:Name="SourceSizeToggle" Header="Output size" OnContent="Follow color image" OffContent="Custom size" Toggled="OnSourceSizeToggled" AutomationProperties.AutomationId="SourceSizeMode" />
+            <Grid x:Name="CustomSizeFields" ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <StackPanel Spacing="4">
+                <TextBlock Text="Width" />
+                <TextBox x:Name="WidthEditor" Text="{x:Bind ViewModel.Settings.RenderWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl15" AutomationProperties.Name="Render width in pixels" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Spacing="4">
+                <TextBlock Text="Height" />
+                <TextBox x:Name="HeightEditor" Text="{x:Bind ViewModel.Settings.RenderHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"  AutomationProperties.AutomationId="InputPanelControl16" AutomationProperties.Name="Render height in pixels" />
+              </StackPanel>
+            </Grid>
+
+              <Button Content="Use color only (clear depth)" Command="{x:Bind ViewModel.ClearDepthCommand}" AutomationProperties.AutomationId="ClearInputDepth"  />
+            </StackPanel>
+          </Grid>
+          </StackPanel>
+
+        <TextBlock Text="{x:Bind ViewModel.HistoryWarning, Mode=OneWay}" Visibility="{x:Bind views:InputPanel.TextVisibility(ViewModel.HistoryWarning), Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+      </StackPanel>
+    </Border>
+
+
+  </ScrollViewer>
+</UserControl>
