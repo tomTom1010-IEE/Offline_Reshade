@@ -189,7 +189,7 @@
 
 ## Add-on 修复与跨设备交付（2026-11-03）
 
-- 先提交已验收的布局和自动尺寸修改，`f2a6e295` 已推送 `codex/first-architecture-refactor`。制作个人迁移包，包含应用、Marty 18 个 FX 及依赖、4 款 Add-on、原 Marty 预设/颜色专用预设/测试预设和 6 张示例 PNG（另含一份合成配对深度）。设置由解压目录重新生成；显式导入时备份目标设备原设置。本机原设置未改，迁移目录实测 4 个 Add-on 加载和 CLI 导出通过。
+- 先提交已验收的布局和自动尺寸修改，`f2a6e295` 已推送 `codex/first-architecture-refactor`。制作个人迁移包，包含应用、Marty 18 个 FX 及依赖、4 款 Add-on、原 Marty 预设/颜色专用预设/测试预设和 5 张示例 PNG（另含一份合成配对深度）。设置由解压目录重新生成；显式导入时备份目标设备原设置。本机原设置未改，迁移目录实测 4 个 Add-on 加载和 CLI 导出通过。
 - 第一阶段：ImGui 控件 ID 纳入会话和原生 ID 栈，校验目标、类型、数量、有限值、范围及禁用状态；回执区分 queued/applied/rejected/expired/cancelled。Core 等待读回并清理取消/超时的排队请求。Marty 实测确认原来的 6 个串位消失，隐藏/不存在 ID 被拒绝；Parallax DOF 显示 IGCS 依赖。
 - 第二阶段：FX 按钮改为瞬时动作，颜色参数增加颜色选择器并保留精确数值入口，传递提示/说明/单位；修复 BeginCombo 输入和解析、窗口分组、禁用状态及折叠头重复分支。ReGrade+ Scopes 已通过接口展开并列出选项。没有 computer use 或视觉验收。
 - 第三阶段：实现独立服务 ABI v1、WinUI 独立服务区，以及 MCP 的能力查询、独立参数写入、声明动作和 FX 按钮工具。测试 Add-on 没有 ImGui 界面，实际 MCP → 原生 → GPU 导出像素验证通过。Marty 的 LUT Manager/ReGrade+ 公开 companion FX 参数提供限定适配，写回与 FX 撤销通过；私有 LUT 选择、灯光对象、调色曲线仍需作者接口或独立实现，未宣称完成这些私有功能。契约见 [ADDON_SERVICES.md](ADDON_SERVICES.md)。
