@@ -40,6 +40,8 @@ public sealed class ApplicationActivity
         "save_preset" or "save_preset_as" or "export_preset" => "Saving preset", "stop_session" or "close_session" => "Stopping renderer",
         "undo" => "Undoing edit", "redo" => "Redoing edit",
         "save_settings" => "Saving settings", "load_settings" => "Loading settings", "preview_transport" => "Displaying preview",
+        // UI-only steps before an operation starts (file pickers); not retryable because they carry no request.
+        "choose_image" => "Opening image", "choose_preset" => "Loading preset", "choose_save_location" => "Saving preset",
         "recover_session" => "Recovering renderer", "runtime_exit" or "observe_runtime" => "Monitoring renderer", _ => "Updating parameters"
     };
     public OperationRequest Create(string method, JsonElement args, RenderInput input)
