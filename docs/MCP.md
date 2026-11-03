@@ -370,4 +370,8 @@ changed inputs/dependencies cannot overwrite a previous artwork and be reported
 as success. Legal black images remain successful exports with a warning.
 # Independent Add-on interfaces (RPC 8)
 
-`list_addons`, `list_addon_services`, `set_addon_parameter`, and `invoke_addon_action` expose declared business capabilities without opening native UI. `press_parameter` invokes momentary FX buttons. See [Add-on service contracts, supported Marty scope and tests](ADDON_SERVICES.md). Existing Marty DLLs do not implement the new service ABI; host adapters currently expose only LUT Manager and ReGrade+ public companion-FX parameters. Private lights, LUT selection and curves are not advertised as independently supported.
+`list_addons`, `list_addon_services`, `set_addon_parameter`, and `invoke_addon_action` expose declared business capabilities without opening native UI. `press_parameter` invokes momentary FX buttons. See [Add-on service contracts, supported Marty scope and tests](ADDON_SERVICES.md). Existing Marty DLLs do not implement the new service ABI; host adapters expose their public companion parameters and a version-verified subset of private preset state.
+
+## Verified Marty private actions
+
+`list_addon_services` now includes version-verified Marty private preset adapters when the installed DLL/FX pair matches the tested profile. Use the declared `invoke_addon_action` arguments for ReGrade+ `set_curve`, ReLight `set_light`, or LUT Manager `select_lut_from_preset`. These operate without ImGui and reconstruct internal GPU state by reloading effects. Private edits are outside FX undo/unsaved markers; save an explicit preset copy. See [the exact supported subset and remaining blockers](ADDON_SERVICES.md#installed-marty-support).

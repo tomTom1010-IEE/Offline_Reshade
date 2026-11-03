@@ -31,6 +31,8 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 else {
                     var schema = service.GetProperty("schema");
                     if (schema.TryGetProperty("scope", out var scope) && scope.GetString() == "companion_fx") group.Children.Add(new TextBlock { Text = "Companion FX parameters only. Private Add-on controls require a supported business interface.", TextWrapping = TextWrapping.Wrap });
+                    if (schema.TryGetProperty("privateAdapterError", out var adapterError) && adapterError.GetString() is { Length: > 0 } reason)
+                        group.Children.Add(new TextBlock { Text = reason, TextWrapping = TextWrapping.Wrap });
                     foreach (var p in schema.GetProperty("parameters").EnumerateArray()) {
                         var node = JsonNode.Parse(p.GetRawText())!.AsObject();
                         node["addonService"] = addon; node["effectName"] = addon; node["name"] = node["id"]!.GetValue<string>();
@@ -39,6 +41,10 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                     }
                     if (schema.TryGetProperty("actions", out var actions)) foreach (var action in actions.EnumerateArray()) {
                         var id = action.GetProperty("id").GetString()!;
+                        if (action.TryGetProperty("requiresArguments", out var required) && required.GetBoolean()) {
+                            group.Children.Add(new TextBlock { Text = $"{id} — use MCP invoke_addon_action with the declared arguments.", TextWrapping = TextWrapping.Wrap });
+                            continue;
+                        }
                         var button = new Button { Content = action.TryGetProperty("label", out var label) ? label.GetString() : id };
                         AutomationProperties.SetAutomationId(button, "ServiceAction_" + MakeAutomationId(addon + id));
                         button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.InvokeAddonActionAsync(addon, id));

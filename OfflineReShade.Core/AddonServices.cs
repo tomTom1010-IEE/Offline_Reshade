@@ -6,18 +6,19 @@ public sealed partial class AutomationEngine
 {
     private async Task<JsonElement> AddonServiceAsync(string addon, string method, JsonElement request, CancellationToken token)
     {
-        var effect = addon switch { "MARTYSMODS LUT-Manager" => "MartysMods_LUTMANAGER.fx", "MARTYSMODS ReGrade+" => "MartysMods_REGRADE+.fx", _ => "" };
+        var effect = MartyProfileFor(addon)?.Effect ?? "";
         var loaded = await _call("list_addons", null, token);
         var info = loaded.GetProperty("addons").EnumerateArray().FirstOrDefault(a => a.GetProperty("name").GetString() == addon && a.GetProperty("loaded").GetBoolean());
         if (info.ValueKind == JsonValueKind.Undefined) throw new NotSupportedException("The requested Add-on is not loaded.");
         var hasProvider = info.TryGetProperty("businessApiVersion", out var providerVersion) && providerVersion.GetInt32() == 1;
         if (effect.Length != 0 && !hasProvider)
         {
-            // Deliberately limited to the companion FX's public contract. Private
-            // LUT selection and grading curves are not inferred from ImGui state.
+            await WaitForEditStateAsync(token);
+            // Public companion parameters remain available even when the private
+            // preset format does not match the independently verified profile.
             var allowed = effect == "MartysMods_LUTMANAGER.fx"
                 ? new[] { "UPSAMPLE_LUT", "SHOW_LUT_PREVIEW", "LUT_BLEND_INTENSITY_CHROMA", "LUT_BLEND_INTENSITY_LUMA" }
-                : new[] { "REGRADE_LUT_MODE" };
+                : effect == "MartysMods_REGRADE+.fx" ? new[] { "REGRADE_LUT_MODE" } : Array.Empty<string>();
             var state = await _call("list_state", null, token);
             var companionParameters = state.GetProperty("uniforms").EnumerateArray().Where(u => u.GetProperty("effectName").GetString() == effect && allowed.Contains(u.GetProperty("name").GetString())).Select(u => u.Clone()).ToArray();
             if (companionParameters.Length != allowed.Length) throw new NotSupportedException("The installed companion FX does not match this adapter schema.");
@@ -26,14 +27,28 @@ public sealed partial class AutomationEngine
                 var expected = name == "REGRADE_LUT_MODE" ? "int" : name is "UPSAMPLE_LUT" or "SHOW_LUT_PREVIEW" ? "bool" : "float";
                 if (parameter.GetProperty("type").GetString() != expected || parameter.GetProperty("value").GetArrayLength() != 1) throw new NotSupportedException("The companion parameter type changed; adapter requires review.");
             }
-            if (method == "action") throw new NotSupportedException("This companion adapter has no independent private Add-on actions.");
+            var profile = MartyProfileFor(addon)!;
+            var privateError = await MartyCompatibilityAsync(profile, loaded, info, token);
+            if (method == "action") {
+                if (privateError != null) throw new NotSupportedException(privateError);
+                await ApplyMartyActionAsync(profile, request, token);
+                return await AddonServiceAsync(addon, "get", Json(new { }), token);
+            }
             if (method == "set") {
                 var id = request.GetProperty("id").GetString();
                 if (!companionParameters.Any(p => p.GetProperty("id").GetString() == id)) throw new ArgumentException("Unknown companion parameter.");
                 await _history.ChangeAsync("set_uniform", null, ct => _call("set_uniform", new { id, value = request.GetProperty("value") }, ct), token);
                 return await AddonServiceAsync(addon, "get", Json(new { }), token);
             }
-            return Json(new { schemaVersion = 1, scope = "companion_fx", privateControls = false, fxHistory = true, parameters = companionParameters, actions = Array.Empty<object>() });
+            object? privateState = null;
+            if (privateError == null) {
+                try { privateState = await MartyPrivateStateAsync(profile, token); }
+                catch (Exception privateFailure) when (privateFailure is not OperationCanceledException) { privateError = privateFailure.Message; }
+            }
+            return Json(new { schemaVersion = 1, scope = privateError == null ? "verified_preset_bridge" : "companion_fx", privateControls = privateError == null,
+                fxHistory = true, privateStateHistory = false, parameters = companionParameters, actions = privateError == null ? MartyActions(profile) : Array.Empty<object>(),
+                state = privateState, privateAdapterError = privateError,
+                limitations = "Private actions reload effects and are not in FX undo. Save an explicit preset copy to persist them. LUT selection requires an existing saved atlas reference; arbitrary LUT filename mapping and favorites are unavailable. ReLight editing supports sphere lights with temperature/tint; ReGrade editing supports RGB/R/G/B tone curves." });
         }
         var reply = await _call("call_addon_service", new { addon, serviceMethod = method, request = request.GetRawText() }, token);
         if (!reply.GetProperty("supported").GetBoolean()) throw new NotSupportedException(reply.GetProperty("error").GetString());
@@ -56,7 +71,7 @@ public sealed partial class AutomationEngine
         {
             var name = addon.GetProperty("name").GetString()!;
             if (!addon.GetProperty("loaded").GetBoolean()) continue;
-            if ((!addon.TryGetProperty("businessApiVersion", out var version) || version.GetInt32() != 1) && name is not ("MARTYSMODS LUT-Manager" or "MARTYSMODS ReGrade+")) continue;
+            if ((!addon.TryGetProperty("businessApiVersion", out var version) || version.GetInt32() != 1) && MartyProfileFor(name) == null) continue;
             try { services.Add(new { addon = name, schema = await AddonServiceAsync(name, "get", Json(new { }), token), error = "" }); }
             catch (Exception error) when (error is not OperationCanceledException) { services.Add(new { addon = name, schema = (object?)null, error = error.Message }); }
         }

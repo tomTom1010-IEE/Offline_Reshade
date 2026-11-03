@@ -195,3 +195,13 @@
 - 第三阶段：实现独立服务 ABI v1、WinUI 独立服务区，以及 MCP 的能力查询、独立参数写入、声明动作和 FX 按钮工具。测试 Add-on 没有 ImGui 界面，实际 MCP → 原生 → GPU 导出像素验证通过。Marty 的 LUT Manager/ReGrade+ 公开 companion FX 参数提供限定适配，写回与 FX 撤销通过；私有 LUT 选择、灯光对象、调色曲线仍需作者接口或独立实现，未宣称完成这些私有功能。契约见 [ADDON_SERVICES.md](ADDON_SERVICES.md)。
 - RPC/broker 升为 8，固定新的 SDK 头文件哈希；上游、驱动和依赖版本不变。全量发布回归 24 项通过：`build/addon-services-delivery/verification-20261103-231255.json`。其后仅修复派发时取消的清理边界，并让有原生服务的提供方优先于 companion 适配；核心测试（含派发取消）、实际独立服务/MCP/GPU 回归和 Marty 写回/撤销再次通过。
 - 最终程序包：`build/addon-services-handoff/OfflineReShade-0.8.3-win-x64-20261103-231615.zip`，SHA256 `d749c95cc627c16196ddc65afeb8d614616a77aefdfcb1cb12aa2ab08f38dbec`。MSVC 全量重编译曾遇 D8040，使用单编译进程后成功；后续 SkipBuild 只复用已编译且未再修改的 C++。一次构建因源码在验证期间变化被来源校验拒绝，稳定源码重跑后通过。所有失败记录保留，没有把失败构建作为交付结果。
+
+## Marty 私有接口进一步接入（2026-11-03）
+
+- 继续遵守不使用 computer use；本轮也没有启用原生面板、转录 ImGui 控件、发送键鼠或启动 WinUI。通过本机 DLL/FX、官方说明、隔离预设和实际 MCP/GPU 输出检查。发现 ReLight 灯光及 ReGrade+ 曲线有私有预设编码，但仅修改编码不会重建内部资源；完整效果重载后才产生正确像素变化。
+- 增加严格 DLL/FX SHA-256 版本门槛的独立预设适配。MCP 原有 `list_addon_services` / `invoke_addon_action` 可查询和调用 `set_curve`（RGB/R/G/B、2–10 节点）、`set_light`（64 个稳定槽位、球形光、色温/色调）和 `select_lut_from_preset`（已保存 atlas 引用、tile 0、隔离资源目录）。真正实现服务 ABI 的 Add-on 仍优先；未知版本保留公开 FX 控件并明确禁用私有写入。没有修改/复制厂商算法到公共代码，也没有发布私有 FX/DLL。
+- LUT 异常测试发现：未知 atlas ID 保留在预设中，插件却静默回退中性 LUT。因此读回相同 ID 不足以确认选择；适配额外要求本轮效果重载后，固定版本插件日志明确确认资源已找到。日志缺失、截断、回退或读回不一致都失败。取消/失败会恢复预设与 LUT 目录；恢复也失败时保留恢复文件并阻止导出，直到显式加载已知预设。
+- 单元测试通过：曲线量化碰撞/越界、无关设置保留、确认写入、拒写恢复、派发取消、恢复失败导出保护，以及有效/缺失/回退 LUT 回执。实际 MCP 测试 `tests/run_marty_private_services.py` 通过：总曲线和三个单通道的像素变化/复位，灯光增加/关闭，Neutral/Warm LUT 切换，未知 atlas 失败后的画面恢复，以及 FX 版本不匹配拒绝。结果保存在 `build/marty-private-probe/verification/result.json`，原始 Marty 文件哈希未变。
+- 测试中修复了切换预设后过早判定 companion schema 的等待问题；测试脚本曾误用 native 的 `set_preset` 工具名，已改为 MCP 的 `load_preset` 并重跑。未知 atlas 曾在仅检查字段时误报成功，增加资源加载回执后异常回归通过。这些失败没有被视为验收成功。
+- 尚不覆盖任意新 LUT 文件名到内部 atlas ID 的解析、收藏、非零 atlas tile、其他灯光模型/RGB 编辑、黑白/色相曲线、色轮及图形示波器；具体缺少的契约与操作限制见 [ADDON_SERVICES.md](ADDON_SERVICES.md)。私有动作不进入 FX 撤销和未保存标记；需显式导出预设副本，LUT 文件同时携带。本次补齐独立接口与 MCP，没有声称实现可视化曲线编辑器或灯光 gizmo。
+- 最终 Core 测试全部通过，WinUI Release/x64 编译通过；现有无 ImGui 测试 Add-on 的 MCP/参数/动作/GPU 输出回归再次通过。按 WinUI 代码审查约定检查本次改动：业务处理留在 Core，界面仅展示不可用原因和带参数动作的 MCP 入口说明，避免空参数按钮；没有运行 UI 自动化、视觉或新驱动测试。原生 C++、上游、接口版本和依赖均未改变。

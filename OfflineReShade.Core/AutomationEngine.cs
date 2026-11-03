@@ -71,7 +71,7 @@ public sealed partial class AutomationEngine
         // Display selection neither submits pending edits nor enters preset history.
         if (method == "set_preview_comparison") return await _call(method, args, token);
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
-        if (method == "list_addon_services") return await ListAddonServicesAsync(token);
+        if (method == "list_addon_services") return await _operations.RunAsync(Activity.Create(method, args, _current()), ListAddonServicesAsync, token);
         if (method == "get_operation_status") {
             var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();
             node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);
@@ -326,6 +326,7 @@ public sealed partial class AutomationEngine
     public static JsonElement Json<T>(T value) => JsonSerializer.SerializeToElement(value, JsonOptions);
     private async Task PrepareExportAsync(int frames, CancellationToken token)
     {
+        if (_martyRecoveryError != null) throw new InvalidOperationException(_martyRecoveryError);
         for (var attempt = 0; ; attempt++)
         {
             try {

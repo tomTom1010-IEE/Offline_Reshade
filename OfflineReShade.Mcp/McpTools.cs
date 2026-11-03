@@ -12,14 +12,14 @@ public sealed class McpTools(McpBridge bridge)
     [McpServerTool(Name = "list_addons", ReadOnly = true), Description("List loaded Add-ons, external dependencies, event support and independent service API availability. Loading does not imply full functionality.")]
     public Task<JsonElement> ListAddons(CancellationToken cancellationToken) => bridge.CallAsync("list_addons", token: cancellationToken);
 
-    [McpServerTool(Name = "list_addon_services", ReadOnly = true), Description("Read independent Add-on business schemas and current parameter values without opening native UI. Only Add-ons implementing service ABI v1 appear; private state has no host undo/snapshot guarantee.")]
+    [McpServerTool(Name = "list_addon_services", ReadOnly = true), Description("Read independent Add-on schemas, values and action arguments without opening native UI. Includes service ABI v1 providers and version-verified Marty preset adapters. Inspect privateAdapterError and limitations; private actions have no FX undo guarantee.")]
     public Task<JsonElement> ListAddonServices(CancellationToken cancellationToken) => bridge.CallAsync("list_addon_services", token: cancellationToken);
 
     [McpServerTool(Name = "set_addon_parameter"), Description("Set a stable independent service parameter ID. Value must match the schema value shape (normally an array). Validates target and confirms readback. Does not use ImGui capture.")]
     public Task<CallToolResult> SetAddonParameter(string addon, string id, JsonElement value, CancellationToken cancellationToken)
         => ExecuteToolAsync("mutate_addon_service", new { addon, method = "set", request = new { id, value } }, cancellationToken);
 
-    [McpServerTool(Name = "invoke_addon_action"), Description("Invoke an explicitly declared independent Add-on action ID with JSON arguments. Private Add-on actions are not covered by host undo.")]
+    [McpServerTool(Name = "invoke_addon_action"), Description("Invoke a declared independent action with JSON arguments from list_addon_services. Verified Marty adapters support set_curve, set_light and select_lut_from_preset; these reload effects, validate readback and restore on failure. Private actions are not covered by FX undo; export a preset copy to persist them.")]
     public Task<CallToolResult> InvokeAddonAction(string addon, string id, JsonElement arguments, CancellationToken cancellationToken)
         => ExecuteToolAsync("mutate_addon_service", new { addon, method = "action", request = new { id, arguments } }, cancellationToken);
 
