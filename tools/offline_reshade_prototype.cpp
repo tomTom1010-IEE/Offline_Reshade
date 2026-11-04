@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -96,6 +97,8 @@ namespace
 		bool (*is_runtime_loading)(reshade::api::effect_runtime *) = nullptr;
         bool (*export_error)(reshade::api::effect_runtime *, char *, size_t *) = nullptr;
         bool (*dependencies)(reshade::api::effect_runtime *, char *, size_t *) = nullptr;
+		// Optional: without it list_state omits uniform defaultValue.
+		bool (*uniform_default)(reshade::api::effect_runtime *, reshade::api::effect_uniform_variable, uint32_t *, size_t) = nullptr;
 		bool (*get_addon_overlay_state_json)(char *, size_t *) = nullptr;
 		void (*set_addon_imgui_capture_enabled)(bool) = nullptr;
 		bool (*get_addon_imgui_capture_json)(char *, size_t *) = nullptr;
@@ -665,6 +668,7 @@ namespace
 		result.notify_offline_input_changed = reinterpret_cast<decltype(result.notify_offline_input_changed)>(GetProcAddress(result.module, "ReShadeNotifyOfflineInputChanged"));
 		result.export_error = reinterpret_cast<decltype(result.export_error)>(GetProcAddress(result.module, "ReShadeGetOfflineExportError"));
         result.dependencies = reinterpret_cast<decltype(result.dependencies)>(GetProcAddress(result.module, "ReShadeGetOfflineDependencies"));
+		result.uniform_default = reinterpret_cast<decltype(result.uniform_default)>(GetProcAddress(result.module, "ReShadeGetOfflineUniformDefault"));
         result.is_runtime_loading = reinterpret_cast<decltype(result.is_runtime_loading)>(GetProcAddress(result.module, "ReShadeIsEffectRuntimeLoading"));
 		result.get_addon_overlay_state_json = reinterpret_cast<decltype(result.get_addon_overlay_state_json)>(GetProcAddress(result.module, "ReShadeGetAddonOverlayStateJson"));
 		result.set_addon_imgui_capture_enabled = reinterpret_cast<decltype(result.set_addon_imgui_capture_enabled)>(GetProcAddress(result.module, "ReShadeSetAddonImGuiCaptureEnabled"));
@@ -1897,15 +1901,32 @@ namespace
 		return runtime->get_annotation_float_from_uniform_variable(variable, name, &value, 1);
 	}
 
+	std::string technique_annotation_string(reshade::api::effect_runtime *runtime, reshade::api::effect_technique technique, const char *name)
+	{
+		size_t size = 0;
+		if (!runtime->get_annotation_string_from_technique(technique, name, nullptr, &size) || size == 0)
+			return {};
+		std::string value(size, '\0');
+		if (!runtime->get_annotation_string_from_technique(technique, name, value.data(), &size))
+			return {};
+		while (!value.empty() && value.back() == '\0')
+			value.pop_back();
+		return value;
+	}
+
 	struct technique_list_state
 	{
 		std::string result;
 		bool first = true;
+		bool compact = false;
 	};
 
-	std::string build_techniques_json(reshade::api::effect_runtime *runtime)
+	// Compact snapshots (edit history) keep only identity and state. The full list adds the
+	// technique annotations that carry shader authors' setup rules and runtime behaviour.
+	std::string build_techniques_json(reshade::api::effect_runtime *runtime, bool compact = false)
 	{
 		technique_list_state state;
+		state.compact = compact;
 		state.result = "[";
 		runtime->enumerate_techniques(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_technique technique, void *user_data) {
 			auto &state = *static_cast<technique_list_state *>(user_data);
@@ -1914,22 +1935,45 @@ namespace
 			if (!state.first)
 				state.result += ',';
 			state.first = false;
-			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"enabled\":" + (runtime->get_technique_state(technique) ? "true" : "false") + "}";
+			state.result += "{\"id\":" + json_string(effect_name + "::" + name) + ",\"effectName\":" + json_string(effect_name) + ",\"name\":" + json_string(name) + ",\"enabled\":" + (runtime->get_technique_state(technique) ? "true" : "false");
+			if (!state.compact)
+			{
+				const std::string label = technique_annotation_string(runtime, technique, "ui_label");
+				const std::string tooltip = technique_annotation_string(runtime, technique, "ui_tooltip");
+				if (!label.empty()) state.result += ",\"label\":" + json_string(label);
+				if (!tooltip.empty()) state.result += ",\"ui_tooltip\":" + json_string(tooltip);
+				bool flag = false;
+				// ReShade hides "hidden" techniques from its UI and forces "enabled" ones on at load, ignoring the preset.
+				if (runtime->get_annotation_bool_from_technique(technique, "hidden", &flag, 1) && flag) state.result += ",\"hidden\":true";
+				if (runtime->get_annotation_bool_from_technique(technique, "enabled", &flag, 1) && flag) state.result += ",\"forceEnabled\":true";
+				if (runtime->get_annotation_bool_from_technique(technique, "nosave", &flag, 1) && flag) state.result += ",\"readOnly\":true";
+				// Authors mark overlays this way; in-game screenshots skip them, but offline exports capture the rendered frame and include them.
+				if (runtime->get_annotation_bool_from_technique(technique, "enabled_in_screenshot", &flag, 1) && !flag) state.result += ",\"enabledInScreenshot\":false";
+				// A timeout disables the technique again after that many milliseconds of rendering (one-shot setup passes).
+				int32_t timeout = 0;
+				if (runtime->get_annotation_int_from_technique(technique, "timeout", &timeout, 1) && timeout > 0) state.result += ",\"timeoutMs\":" + std::to_string(timeout);
+			}
+			state.result += "}";
 		}, &state);
 		state.result += "]";
 		return state.result;
 	}
+
+	using uniform_default_reader = bool (*)(reshade::api::effect_runtime *, reshade::api::effect_uniform_variable, uint32_t *, size_t);
+
 	struct uniform_list_state
 	{
 		std::string result;
 		bool first = true;
 		bool compact = false;
+		uniform_default_reader read_default = nullptr;
 	};
 
-	std::string build_uniforms_json(reshade::api::effect_runtime *runtime, bool compact = false)
+	std::string build_uniforms_json(reshade::api::effect_runtime *runtime, bool compact = false, uniform_default_reader read_default = nullptr)
 	{
 		uniform_list_state state;
 		state.compact = compact;
+		state.read_default = read_default;
 		state.result = "[";
 		runtime->enumerate_uniform_variables(nullptr, [](reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, void *user_data) {
 			auto &state = *static_cast<uniform_list_state *>(user_data);
@@ -2004,7 +2048,32 @@ namespace
 					state.result += values[i] ? "true" : "false";
 				}
 			}
-			state.result += "]}";
+			state.result += "]";
+
+			uint32_t defaults[16] = {};
+			if (!state.compact && state.read_default != nullptr && state.read_default(runtime, variable, defaults, components))
+			{
+				state.result += ",\"defaultValue\":[";
+				for (uint32_t i = 0; i < components; ++i)
+				{
+					if (i != 0)
+						state.result += ',';
+					if (base_type == reshade::api::format::r32_float)
+					{
+						float value = 0.0f;
+						std::memcpy(&value, &defaults[i], sizeof(value));
+						state.result += json_float(value);
+					}
+					else if (base_type == reshade::api::format::r32_sint)
+						state.result += std::to_string(static_cast<int32_t>(defaults[i]));
+					else if (base_type == reshade::api::format::r32_uint)
+						state.result += std::to_string(defaults[i]);
+					else
+						state.result += defaults[i] != 0 ? "true" : "false";
+				}
+				state.result += "]";
+			}
+			state.result += "}";
 		}, &state);
 		state.result += "]";
 		return state.result;
@@ -2108,6 +2177,9 @@ namespace
 			_pipe_name(std::move(pipe_name)), _runtime(runtime), _width(width), _height(height), _output_path(std::move(output_path)), _stats(stats), _shared_preview(shared_preview), _shared_addon_overlay(shared_addon_overlay), _input_switch(std::move(input_switch)), _save_output(std::move(save_output)), _save_screenshot(std::move(save_screenshot)), _input_watch(std::move(input_watch)), _addon_state(std::move(addon_state)), _addon_imgui_state(std::move(addon_imgui_state)), _addon_imgui_input(std::move(addon_imgui_input)), _addon_overlay_select(std::move(addon_overlay_select)), _addon_overlay_input(std::move(addon_overlay_input)), _addon_overlay_resize(std::move(addon_overlay_resize)), _runtime_loading(std::move(runtime_loading)), _validation(std::move(validation)), _dependencies(std::move(dependencies)), _service(std::move(service))
 		{
 		}
+
+		// Set before start(); a renderer without the export omits uniform defaults.
+		void set_uniform_default_reader(uniform_default_reader reader) { _uniform_default = reader; }
 
 		~control_server()
 		{
@@ -2285,11 +2357,11 @@ namespace
 				}
 				if (command.method == "get_edit_state")
 				{
-					return make_response(command.id, "{\"effectsEnabled\":" + std::string(_runtime->get_effects_state() ? "true" : "false") + ",\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime, true) + ",\"preprocessorDefinitions\":" + build_edit_definitions_json(_runtime, _edit_definition_scopes) + "}");
+					return make_response(command.id, "{\"effectsEnabled\":" + std::string(_runtime->get_effects_state() ? "true" : "false") + ",\"techniques\":" + build_techniques_json(_runtime, true) + ",\"uniforms\":" + build_uniforms_json(_runtime, true) + ",\"preprocessorDefinitions\":" + build_edit_definitions_json(_runtime, _edit_definition_scopes) + "}");
 				}
 				if (command.method == "list_state")
 				{
-					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
+					return make_response(command.id, "{\"runtime\":{\"width\":" + std::to_string(_width) + ",\"height\":" + std::to_string(_height) + ",\"loading\":" + (_runtime_loading && _runtime_loading() ? "true" : "false") + ",\"effectsEnabled\":" + (_runtime->get_effects_state() ? "true" : "false") + ",\"renderFps\":" + std::to_string(_stats != nullptr ? _stats->render_fps() : 0.0) + ",\"previewFps\":" + std::to_string(_stats != nullptr ? _stats->preview_fps() : 0.0) + ",\"sharedPreviewHandle\":" + std::to_string(reinterpret_cast<uintptr_t>(_shared_preview != nullptr ? _shared_preview->handle : nullptr)) + ",\"sharedPreviewWidth\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->width : 0) + ",\"sharedPreviewHeight\":" + std::to_string(_shared_preview != nullptr ? _shared_preview->height : 0) + shared_addon_overlay_json() + graphics_json() + "},\"techniques\":" + build_techniques_json(_runtime) + ",\"uniforms\":" + build_uniforms_json(_runtime, false, _uniform_default) + ",\"preprocessorDefinitions\":" + build_preprocessor_definitions_json(_runtime) + ",\"addons\":" + (_addon_state ? _addon_state() : "{\"available\":false,\"allLoaded\":false,\"addons\":[]}") + ",\"addonUi\":" + (_addon_imgui_state ? _addon_imgui_state() : "{\"available\":false,\"enabled\":false,\"controls\":[]}") + "}");
 				}
 				if (command.method == "list_addons" || command.method == "list_addon_overlays")
 				{
@@ -2622,6 +2694,7 @@ namespace
 		addon_overlay_resize_callback _addon_overlay_resize;
 		runtime_loading_callback _runtime_loading;
         validation_callback _validation, _dependencies;
+		uniform_default_reader _uniform_default = nullptr;
 		std::atomic_bool _running = false;
 		std::thread _thread;
 		std::mutex _queue_mutex;
@@ -3163,6 +3236,7 @@ int run_offline(int argc, wchar_t **argv)
                 if (!reshade.call_addon_service) return "{\"supported\":false,\"error\":\"Service API unavailable\"}";
                 return reshade.call_addon_service(runtime, addon.c_str(), method.c_str(), request.c_str());
             });
+		control->set_uniform_default_reader(reshade.uniform_default);
 		control->start();
 	}
 

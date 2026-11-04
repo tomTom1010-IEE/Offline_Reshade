@@ -20,6 +20,12 @@ custom offline entry points in addition to the public ReShade API.
 | WinUI automation broker | 7 | Shared FX history, preview comparison and frozen batch tasks with per-item results |
 | Preview bridge ABI | 3 | WinUI checks export before creating a panel |
 
+Additive offline exports that the host looks up by name are optional and do not
+change the offline DLL API version. Currently this is `ReShadeGetOfflineUniformDefault`,
+which supplies `list_state` uniform defaults. A renderer without the export omits the
+dependent field instead of failing. Additive response fields do not change the native
+RPC version either; clients ignore fields they do not know.
+
 An incompatible renderer blocks rendering/export with an explicit error. An
 incompatible preview bridge follows the existing CPU preview fallback. An old
 broker cannot be attached silently. Product patch versions may interoperate only

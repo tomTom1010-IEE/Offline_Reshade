@@ -49,6 +49,8 @@ RESHADE_API_LIBRARY_DECL void ReShadeNotifyOfflineInputChanged(reshade::api::eff
 RESHADE_API_LIBRARY_DECL bool ReShadeIsEffectRuntimeLoading(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL bool ReShadeGetOfflineExportError(reshade::api::effect_runtime *runtime, char *value, size_t *size);
 RESHADE_API_LIBRARY_DECL bool ReShadeGetOfflineDependencies(reshade::api::effect_runtime *runtime, char *value, size_t *size);
+// Copies the raw 32-bit words of a scalar/vector/matrix uniform's shader initializer (zero without one), the value reset_uniform_value restores.
+RESHADE_API_LIBRARY_DECL bool ReShadeGetOfflineUniformDefault(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, uint32_t *values, size_t count);
 RESHADE_API_LIBRARY_DECL uint32_t ReShadeGetOfflineApiVersion();
 RESHADE_API_LIBRARY_DECL const char *ReShadeGetOfflineUpstreamCommit();
 RESHADE_API_LIBRARY_DECL void ReShadeSetAddonImGuiCaptureEnabled(bool enabled);

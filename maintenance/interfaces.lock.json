@@ -7,7 +7,7 @@
   },
   "reShadeApi": 20,
   "headers": {
-    "include/reshade.hpp": "38f6e4042e6b95a94878d9a722733976e191b7161c8ac46bd740b174b49c0afc",
+    "include/reshade.hpp": "b1ad0c7cc71c4736b8d552b505f4736a594d1d6c7a26a0fc24260bf6e4c29559",
     "include/reshade_api.hpp": "2d659403f24ee4737a1834e404d00631b1fb128102d6fb74b6fb220c837b2d72",
     "include/reshade_api_device.hpp": "a716c44b6fbb064dbbb0826687728f21aa71ed45e13564e4dc1cdf36da5bdfa0",
     "include/reshade_api_resource.hpp": "32cdafe6d783813f3ac72ad43e426638d8d0fef56bcb558fad218a14cfb75ee3",

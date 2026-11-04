@@ -223,7 +223,8 @@ edge. The preview composition transform accounts for DPI independently of output
 | `listen_input`, `stop_listening` | Wait for game output; stop watching while retaining the current image |
 | `get_operation_status`, `cancel_operation` | Inspect structured activity and pending/applied input; cancel work |
 | `get_status` | Loading, dimensions, frame count and input generation |
-| `list_effects` | Paginated uniform metadata/current values and techniques |
+| `list_effects` | Paginated uniform metadata, current values and shader defaults; techniques with their annotations |
+| `search_effect_source`, `get_effect_source` | Search and read the shader sources of the session's effect directory (read-only, bounded) |
 | `set_parameters` | Set uniforms using `effect.fx::uniform` IDs |
 | `set_technique`, `set_effects_enabled` | Change technique or global effect state |
 | `set_preview_comparison` | Compare original/processed preview without changing exported effects |
@@ -259,6 +260,57 @@ Items may use different presets, effect directories and dimensions. Each item's
 settings are frozen when the task starts; matching the current preset captures
 live unsaved FX edits. See [Frozen batch tasks](#frozen-batch-tasks-broker-7) for
 per-item results, saved-task recovery and context restoration.
+
+## FX knowledge for agents
+
+Metadata alone rarely explains how a shader uses a value, so the server exposes
+three more sources of knowledge. The server's MCP `instructions` summarize the
+workflow and point to the guide.
+
+**Agent guide.** The resource `offline-reshade://guide/agent` (`text/markdown`) is
+[AGENT_GUIDE.md](AGENT_GUIDE.md). It covers the isolate, preview and stack loop, depth
+conventions, ordering heuristics and known traps.
+
+**Technique annotations in `list_effects`.** Techniques report these fields, which are
+omitted when the annotation is absent:
+
+| Field | Source annotation | Meaning |
+| --- | --- | --- |
+| `label`, `ui_tooltip` | `ui_label`, `ui_tooltip` | Display text. Authors often state setup and order rules here. |
+| `hidden: true` | `hidden` | Hidden from ReShade's UI. |
+| `forceEnabled: true` | `enabled` | Enabled by the shader at load, regardless of the preset. |
+| `timeoutMs` | `timeout` | Disables itself after this many milliseconds of rendering. One-shot passes use it. |
+| `readOnly: true` | `nosave` | `set_technique` rejects it. |
+| `enabledInScreenshot: false` | `enabled_in_screenshot` | In-game screenshots skip it. Offline exports capture the rendered frame and include it. |
+
+**Uniform defaults in `list_effects`.** Uniforms report `defaultValue`, the shader
+initializer that `reset_parameter` restores, in the same shape as `value`. A
+renderer without the optional `ReShadeGetOfflineUniformDefault` export omits it.
+
+**Shader source tools.** `search_effect_source` and `get_effect_source` read the
+source when metadata does not explain a parameter: squared sliders, blend formulas,
+depth handling. They read only from the effect directory of the applied input, or of
+the input a listener is waiting for, in both independent and attached modes.
+
+- **`search_effect_source(pattern, effectName, regex, caseSensitive, contextLines, maxResults)`**
+  - Searches `.fx`, `.fxh`, `.addonfx`, `.h`, `.hlsl`, `.hlsli` and `.inc` files.
+  - The pattern is a literal by default. With `regex: true` it is a .NET regular
+    expression run by the linear-time engine, so backreferences and lookarounds are
+    not supported.
+  - `effectName` limits the search to that FX file and the headers it includes.
+    Includes are resolved approximately as ReShade does: the including file's directory
+    first, then the effect directory and its subdirectories.
+  - Results are `file:start-end` excerpts with numbered lines; `>` marks the matching
+    lines. At most 100 matching lines are returned.
+- **`get_effect_source(file, startLine, lineCount)`**
+  - Reads up to 400 numbered lines.
+  - `file` is a path relative to the effect directory, an absolute path inside it, or a
+    unique file name.
+- **Containment**
+  - Paths that resolve outside the effect directory are refused, as are non-shader
+    files and alternate data streams.
+  - Links, hidden entries and system entries inside the directory are not followed.
+  - Files over 4 MiB are skipped, and each result is capped at 32,000 characters.
 
 ## Native CLI and diagnostics
 

@@ -75,6 +75,7 @@ try {
     foreach ($name in @('README.md', 'README.zh-CN.md', 'LICENSE.md', 'CHANGELOG.md', 'offlineReshadelogo.png')) { Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $stage }
     New-Item -ItemType Directory -Path (Join-Path $stage 'docs') | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'docs\MCP.md') -Destination (Join-Path $stage 'docs')
+    Copy-Item -LiteralPath (Join-Path $repo 'docs\AGENT_GUIDE.md') -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath (Join-Path $repo 'docs\ADDON_SERVICES.md') -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath (Join-Path $repo 'docs\STABILITY_PLAN.md') -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath (Join-Path $repo 'docs\MAINTENANCE.md') -Destination (Join-Path $stage 'docs')
@@ -115,6 +116,7 @@ try {
         Invoke-Checked $msbuild @('tests\OfflineReShade.CaptureContract.vcxproj', '/p:Configuration=Release', '/p:Platform=x64', '/m', '/v:minimal', '/nologo')
         Invoke-Checked 'dotnet' @('run', '--project', 'tests\OfflineReShade.Core.Tests\OfflineReShade.Core.Tests.csproj', '-c', 'Release', '--nologo')
         Invoke-Checked 'python' @('tests\run_integration.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "verification-$stamp"))
+        Invoke-Checked 'python' @('tests\run_fx_knowledge.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "fx-knowledge-$stamp"))
         Invoke-Checked 'python' @('tests\run_input_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "input-workflow-$stamp"))
         Invoke-Checked 'python' @('tests\run_export_workflow.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "export-workflow-$stamp"))
         Invoke-Checked 'python' @('tests\run_edit_history.py', '--package', $stage, '--work', (Join-Path $OutputDirectory "edit-history-$stamp"))

@@ -104,6 +104,7 @@ namespace reshade
 		bool get_annotation_string_from_uniform_variable(api::effect_uniform_variable variable, const char *name, char *value, size_t *value_size) const final;
 
 		void reset_uniform_value(api::effect_uniform_variable variable);
+		bool offline_uniform_default(api::effect_uniform_variable variable, uint32_t *values, size_t count) const;
 
 		void get_uniform_value_bool(api::effect_uniform_variable variable, bool *values, size_t count, size_t array_index) const final;
 		void get_uniform_value_float(api::effect_uniform_variable variable, float *values, size_t count, size_t array_index) const final;

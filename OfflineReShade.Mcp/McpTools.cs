@@ -52,7 +52,10 @@ public sealed class McpTools(McpBridge bridge)
     [McpServerTool(Name = "get_diagnostics", ReadOnly = true), Description("Read component versions, pinned upstream identity, release provenance, core binary integrity and runtime/device health. Works before opening an input. Does not change settings or reset the device.")]
     public Task<JsonElement> GetDiagnostics(CancellationToken cancellationToken) => bridge.CallAsync("get_diagnostics", token: cancellationToken);
 
-    [McpServerTool(Name = "list_effects", ReadOnly = true), Description("List effect/parameter metadata and current values. Filter by FX filename to keep large shader libraries manageable. Wait for get_status.loading=false first.")]
+    [McpServerTool(Name = "list_effects", ReadOnly = true), Description("List effect/parameter metadata and current values. Filter by FX filename to keep large shader libraries manageable. Wait for get_status.loading=false first. " +
+        "Techniques carry shader annotations: label and ui_tooltip (often setup or order rules such as \"move to the top\"), hidden, forceEnabled (switched on by the shader at load), " +
+        "timeoutMs (one-shot passes that switch themselves off), readOnly, and enabledInScreenshot=false (an overlay the author keeps out of in-game screenshots; exports here still include it). " +
+        "Uniforms include defaultValue, the shader initializer that reset_parameter restores; min/max are UI ranges, not clamps. When a parameter's effect is unclear, use search_effect_source.")]
     public async Task<object> ListEffects(CancellationToken cancellationToken, string effectName = "", int offset = 0, int limit = 100)
     {
         if (offset < 0 || limit is < 1 or > 500) throw new ArgumentException("Offset must be nonnegative; limit must be 1–500.");
@@ -63,6 +66,42 @@ public sealed class McpTools(McpBridge bridge)
         var definitions = state.GetProperty("preprocessorDefinitions").EnumerateArray().Where(Match).ToArray();
         return new { totalParameters = uniforms.Length, totalTechniques = techniques.Length, totalDefinitions = definitions.Length, offset, limit,
             uniforms = uniforms.Skip(offset).Take(limit).ToArray(), techniques = techniques.Skip(offset).Take(limit).ToArray(), definitions = definitions.Skip(offset).Take(limit).ToArray() };
+    }
+
+    [McpServerTool(Name = "search_effect_source", ReadOnly = true), Description("Search the shader sources (.fx, .fxh and other headers) in the active session's effect directory for a uniform, technique, macro or function name. " +
+        "Use it when list_effects metadata does not explain a parameter: non-linear (for example squared) sliders, blend formulas, depth conventions, required setup or order. " +
+        "Returns file:line excerpts with context, capped in size. Needs an opened input or an attached session; reads nothing outside that directory.")]
+    public async Task<CallToolResult> SearchEffectSource(
+        [Description("Text to find, such as a uniform name from list_effects. Literal unless regex is true.")] string pattern, CancellationToken cancellationToken,
+        [Description("Limit the search to this FX file (as in list_effects effectName) and the headers it includes. Empty searches every shader file.")] string effectName = "",
+        [Description("Treat pattern as a .NET regular expression (linear-time engine: no backreferences or lookarounds).")] bool regex = false,
+        bool caseSensitive = false,
+        [Description("Lines of context around each match, 0-20.")] int contextLines = 3,
+        [Description("Maximum matching lines to return, 1-100.")] int maxResults = 20)
+    {
+        try
+        {
+            var sources = await EffectSourcesAsync(cancellationToken);
+            var result = await Task.Run(() => sources.Search(pattern, effectName, regex, caseSensitive, contextLines, maxResults, cancellationToken), cancellationToken);
+            return new CallToolResult { Content = [new TextContentBlock { Text = result.ToText() }] };
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { return SourceFailure(error); }
+    }
+
+    [McpServerTool(Name = "get_effect_source", ReadOnly = true), Description("Read numbered lines of a shader source in the active session's effect directory, " +
+        "for example to follow a match from search_effect_source. At most 400 lines per call; the result says where to continue.")]
+    public async Task<CallToolResult> GetEffectSource(
+        [Description("Path relative to the effect directory as printed by search_effect_source, or a unique file name such as MyEffect.fx.")] string file, CancellationToken cancellationToken,
+        [Description("First line to return (1-based).")] int startLine = 1,
+        [Description("Number of lines, 1-400.")] int lineCount = 120)
+    {
+        try
+        {
+            var sources = await EffectSourcesAsync(cancellationToken);
+            var excerpt = await Task.Run(() => sources.Read(file, startLine, lineCount), cancellationToken);
+            return new CallToolResult { Content = [new TextContentBlock { Text = excerpt.ToText() }] };
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { return SourceFailure(error); }
     }
 
     [McpServerTool(Name = "set_parameters"), Description("Set 1–256 uniform values by stable effect.fx::uniform ID. Values use real shader units; slider display mapping does not affect them.")]
@@ -151,6 +190,16 @@ public sealed class McpTools(McpBridge bridge)
     [McpServerTool(Name = "cancel_operation"), Description("Request cancellation of the active operation and pending edits. The operation remains busy until native work drains and input restoration completes.")]
     public Task<CallToolResult> CancelOperation(CancellationToken cancellationToken)
         => ExecuteToolAsync("cancel_operation", null, cancellationToken);
+
+    // In attached mode this is the WinUI session's directory; this process reads the files directly.
+    private async Task<EffectSourceLibrary> EffectSourcesAsync(CancellationToken token)
+    {
+        var effectDir = EffectSourceLibrary.EffectDirectoryFrom(await bridge.CallAsync("get_operation_status", token: token));
+        if (string.IsNullOrEmpty(effectDir))
+            throw new InvalidOperationException("No effect directory is active. Call open_input first, or attach_session to a WinUI session that has an image open.");
+        return new EffectSourceLibrary(effectDir);
+    }
+    private static CallToolResult SourceFailure(Exception error) => new() { IsError = true, Content = [new TextContentBlock { Text = error.Message }] };
 
     private static JsonElement Decision(object args, string unsavedChanges, string? savePath, long? expectedRevision)
         => AutomationEngine.CopyPresetDecision(AutomationEngine.Json(args), AutomationEngine.Json(new { unsavedChanges, savePath, expectedRevision }));

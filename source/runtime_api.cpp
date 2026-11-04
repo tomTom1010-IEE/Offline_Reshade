@@ -338,6 +338,19 @@ void reshade::runtime::reset_uniform_value(api::effect_uniform_variable handle)
 
 	reset_uniform_value(*variable);
 }
+bool reshade::runtime::offline_uniform_default(api::effect_uniform_variable handle, uint32_t *values, size_t count) const
+{
+	// Mirrors reset_uniform_value for the scalar/vector/matrix uniforms the offline host edits.
+	// The words are the initializer constant's union storage: interpret them by the uniform's base type.
+	const auto variable = reinterpret_cast<const uniform *>(handle.handle);
+	if (variable == nullptr || values == nullptr || variable->special != special_uniform::none || variable->type.is_array())
+		return false;
+
+	const reshadefx::constant zero = {};
+	const reshadefx::constant &value = variable->has_initializer_value ? variable->initializer_value : zero;
+	std::copy_n(value.as_uint, std::min(count, std::size(value.as_uint)), values);
+	return true;
+}
 
 void reshade::runtime::get_uniform_value_bool(api::effect_uniform_variable handle, bool *values, size_t count, size_t array_index) const
 {

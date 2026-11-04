@@ -20,7 +20,8 @@ builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 var bridge = new McpBridge(native);
 if (session != null) await bridge.AttachAsync(session, CancellationToken.None);
 builder.Services.AddSingleton(bridge);
-builder.Services.AddMcpServer().WithStdioServerTransport().WithTools<McpTools>();
+builder.Services.AddMcpServer(options => options.ServerInstructions = McpResources.Instructions)
+    .WithStdioServerTransport().WithTools<McpTools>().WithResources<McpResources>();
 using var host = builder.Build();
 try { await host.RunAsync(); }
 finally { await bridge.DisposeAsync(); }

@@ -394,6 +394,10 @@ bool ReShadeGetOfflineDependencies(reshade::api::effect_runtime *runtime, char *
 {
 	return runtime != nullptr && copy_offline_string(static_cast<reshade::runtime *>(runtime)->offline_dependencies(), value, size);
 }
+bool ReShadeGetOfflineUniformDefault(reshade::api::effect_runtime *runtime, reshade::api::effect_uniform_variable variable, uint32_t *values, size_t count)
+{
+	return runtime != nullptr && static_cast<reshade::runtime *>(runtime)->offline_uniform_default(variable, values, count);
+}
 
 #include "d3d9/d3d9_impl_device.hpp"
 #include "d3d9/d3d9_impl_swapchain.hpp"
