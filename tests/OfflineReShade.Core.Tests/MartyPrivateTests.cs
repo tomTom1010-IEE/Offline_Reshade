@@ -62,5 +62,44 @@ internal static class MartyPrivateTests
         catch (InvalidOperationException e) when (e.Message.Contains("restoration failed")) { blocked = true; }
         if (!blocked || !Directory.EnumerateDirectories(work, ".marty-edit-*").Any()) throw new Exception("Unrecovered private state was exportable or its recovery snapshot was lost.");
         Console.WriteLine("PASS: Marty curve validation, unrelated-state preservation, confirmed apply, mismatch rollback and dispatch cancellation");
+        await SelectLightAsync(folder, original);
+    }
+
+    // ReLight selection is a hidden field written in place; reloading the effect hands it to the add-on.
+    private static async Task SelectLightAsync(string folder, string workingPreset)
+    {
+        int selected = -1, count = 3; ulong frame = 0; var keep = true;
+        var writes = new List<JsonElement>(); var calls = new List<string>();
+        string Preset() => $"[MartysMods_RELIGHT.fx]\nNUM_ACTIVE_LIGHTS={count}\n" +
+            string.Join('\n', Enumerable.Range(0, 4).Select(i => $"RELIGHT_LIGHT_DATA_{i}={(i < count ? "1,2,3,0" : "0,0,0,0")}")) + $"\nSELECTED_LIGHT_INDEX={selected}\n";
+        Task<JsonElement> Call(string method, object? obj, CancellationToken token) {
+            var a = AutomationEngine.Json(obj); calls.Add(method);
+            if (method == "get_runtime_info") return Task.FromResult(AutomationEngine.Json(new { presetPath = workingPreset, loading = false, frameCount = ++frame, inputGeneration = 1 }));
+            if (method == "export_preset") File.WriteAllText(a.GetProperty("path").GetString()!, Preset());
+            if (method == "set_hidden_uniform") { writes.Add(a.Clone()); if (keep) selected = a.GetProperty("value").GetInt32(); }
+            return Task.FromResult(AutomationEngine.Json(new { }));
+        }
+        var engine = new AutomationEngine(Call, (_, _) => Task.CompletedTask, () => new RenderInput(Path.Combine(folder, "test.png"), PresetPath: Path.Combine(folder, "source.ini")));
+        var relight = new AutomationEngine.MartyProfile("MartysMods_RELIGHT.fx", "", "");
+        Task Select(object slot) => engine.ApplyMartyActionAsync(relight, AutomationEngine.Json(new { id = "select_light", arguments = new { slot } }), CancellationToken.None);
+
+        await Select(2);
+        var write = writes.Single();
+        if (write.GetProperty("id").GetString() != "MartysMods_RELIGHT.fx::SELECTED_LIGHT_INDEX" || write.GetProperty("value").GetInt32() != 2 || !write.GetProperty("reloadEffect").GetBoolean() || selected != 2)
+            throw new Exception("Light selection was not written to the hidden field with an effect reload.");
+        if (calls.Contains("set_preset") || calls.Contains("reload_effects")) throw new Exception("Light selection took the full preset round trip.");
+        await Select(-1);
+        if (selected != -1) throw new Exception("Clearing the light selection failed.");
+        foreach (var bad in new object[] { 3, 64, -2, 1.5, "1" }) {
+            var rejected = false; try { await Select(bad); } catch (ArgumentException) { rejected = true; }
+            if (!rejected) throw new Exception($"Light slot {bad} was accepted with {count} lights.");
+        }
+        count = 0; var empty = false;
+        try { await Select(0); } catch (ArgumentException e) when (e.Message.Contains("no lights")) { empty = true; }
+        if (!empty) throw new Exception("Selecting with no lights was accepted.");
+        count = 3; keep = false; var refused = false;
+        try { await Select(1); } catch (InvalidOperationException) { refused = true; }
+        if (!refused || writes.Count != 3) throw new Exception("A selection the add-on did not keep was reported as applied.");
+        Console.WriteLine("PASS: ReLight light selection writes the hidden field, reloads only its effect, validates slots and confirms readback");
     }
 }

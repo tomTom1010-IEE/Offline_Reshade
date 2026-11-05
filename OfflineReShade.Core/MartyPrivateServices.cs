@@ -48,14 +48,17 @@ public sealed partial class AutomationEngine
     private async Task<object> MartyPrivateStateAsync(MartyProfile profile, CancellationToken token)
     {
         var preset = await ReadMartyPresetAsync(token);
-        if (profile.Effect == "MartysMods_RELIGHT.fx") return new { lights = preset.ReadLights(profile.Effect), capacity = 64, coordinateSystem = "screen XY and vendor depth coordinate (cubed before projection)" };
+        if (profile.Effect == "MartysMods_RELIGHT.fx") return new { lights = preset.ReadLights(profile.Effect), selectedLight = preset.Int(profile.Effect, "SELECTED_LIGHT_INDEX"),
+            capacity = 64, coordinateSystem = "screen XY and vendor depth coordinate (cubed before projection)" };
         if (profile.Effect == "MartysMods_REGRADE+.fx") return new { curves = preset.ReadCurves(profile.Effect), quantization = 255 };
         return new { atlasId = preset.UInts(profile.Effect, "LUT_MANAGER_SOURCE_ATLAS", 2), tileIndex = preset.UInts(profile.Effect, "LUT_MANAGER_ATLAS_IDX", 1)[0],
             tileSize = preset.UInts(profile.Effect, "LUT_MANAGER_ATLAS_TILE_SIZE", 1)[0], tileAmount = preset.UInts(profile.Effect, "LUT_MANAGER_ATLAS_TILE_AMT", 1)[0] };
     }
     private static object[] MartyActions(MartyProfile profile) => profile.Effect switch {
         "MartysMods_RELIGHT.fx" => [new { id = "set_light", label = "Set sphere light", requiresArguments = true,
-            arguments = "{slot:0..63, position:[x,y,depth] (0..1), radius:0..10, intensity:0..20, temperatureTint:[-1..1,-1..1]}; intensity 0 disables a slot without renumbering" }],
+            arguments = "{slot:0..63, position:[x,y,depth] (0..1), radius:0..10, intensity:0..20, temperatureTint:[-1..1,-1..1]}; intensity 0 disables a slot without renumbering" },
+            new { id = "select_light", label = "Select light to edit", requiresArguments = true,
+            arguments = "{slot:-1..lights-1}; chooses the light that the add-on's Light Properties editor changes (-1 clears it). Takes effect in a few frames and leaves the image unchanged" }],
         "MartysMods_REGRADE+.fx" => [new { id = "set_curve", label = "Set tone curve", requiresArguments = true,
             arguments = "{channel:RGB|R|G|B, points:[[input,output],...]}; 2..10 normalized points, strictly increasing input, endpoint inputs 0 and 1" }],
         _ => [new { id = "select_lut_from_preset", label = "Select saved LUT reference", requiresArguments = true,
@@ -69,6 +72,7 @@ public sealed partial class AutomationEngine
         var original = (await _call("get_runtime_info", null, token)).GetProperty("presetPath").GetString()!;
         if (!Path.IsPathFullyQualified(original) || string.Equals(Path.GetFullPath(original), _current().PresetPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Private edits require a host-owned working preset, not the user's source preset.");
+        if (profile.Effect == "MartysMods_RELIGHT.fx" && id == "select_light") { await SelectMartyLightAsync(profile, args, token); return; }
         var work = Path.GetDirectoryName(original)!;
         var temp = Path.Combine(work, ".marty-edit-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -156,6 +160,23 @@ public sealed partial class AutomationEngine
             }
             throw;
         } finally { lutReceipt?.Dispose(); if (!preserveRecovery) Directory.Delete(temp, true); }
+    }
+    // ReLight edits one light at a time and keeps its selection in SELECTED_LIGHT_INDEX. The add-on only
+    // re-reads that field when its effect reloads, so write it and reload that effect alone (a few frames,
+    // compiled from cache) instead of the full preset round trip that light data needs.
+    private async Task SelectMartyLightAsync(MartyProfile profile, JsonElement args, CancellationToken token)
+    {
+        if (!args.TryGetProperty("slot", out var value) || value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var slot) || slot is < -1 or >= 64)
+            throw new ArgumentException("slot must be a light index 0–63, or -1 to clear the selection.");
+        var preset = await ReadMartyPresetAsync(token);
+        var count = preset.UInts(profile.Effect, "NUM_ACTIVE_LIGHTS", 1)[0];
+        if (count > 64) throw new InvalidDataException("Invalid light count.");
+        if (slot >= (int)count) throw new ArgumentException(count == 0 ? "There are no lights to select." : $"Light slot {slot} is not in use; slots 0–{count - 1} are.");
+        _ = preset.Int(profile.Effect, "SELECTED_LIGHT_INDEX"); // This profile stores the selection; never invent the field.
+        await _call("set_hidden_uniform", new { id = profile.Effect + "::SELECTED_LIGHT_INDEX", value = slot, reloadEffect = true }, token);
+        await RuntimeOperations.WaitForFramesAsync(_call, 3, token, 120);
+        if ((await ReadMartyPresetAsync(token)).Int(profile.Effect, "SELECTED_LIGHT_INDEX") != slot)
+            throw new InvalidOperationException("ReLight did not keep the requested light selection.");
     }
     private async Task LoadMartyPresetAsync(string path, CancellationToken token)
     {

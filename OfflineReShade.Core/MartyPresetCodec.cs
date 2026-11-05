@@ -29,6 +29,8 @@ internal sealed class MartyPresetCodec
         if (parts.Length != count || parts.Any(p => !uint.TryParse(p, NumberStyles.None, CultureInfo.InvariantCulture, out _))) throw new InvalidDataException("Invalid private field: " + key);
         return parts.Select(p => uint.Parse(p, CultureInfo.InvariantCulture)).ToArray();
     }
+    public int Int(string section, string key) => int.TryParse(Get(section, key), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var value)
+        ? value : throw new InvalidDataException("Invalid private field: " + key);
     public string Patch(string section, IReadOnlyDictionary<string, string> patch)
     {
         var lines = (string[])_lines.Clone();

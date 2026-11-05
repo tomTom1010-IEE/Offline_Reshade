@@ -2465,8 +2465,11 @@ namespace
 					_runtime->save_current_preset();
 					return make_response(command.id, "{}");
 				}
-				if (command.method == "set_uniform")
+				// set_hidden_uniform writes preset-backed add-on storage that the FX hides from users, such as
+				// ReLight's selected light. The automation layer only calls it for version-verified add-on fields.
+				if (command.method == "set_uniform" || command.method == "set_hidden_uniform")
 				{
+					const bool hidden_field = command.method == "set_hidden_uniform";
 					std::string id, effect_name, name;
 					if (!json_get_raw_string(command.params, "id", id) || !split_effect_id(id, effect_name, name))
 						return make_error(command.id, "bad_params", "Missing uniform id.");
@@ -2478,8 +2481,8 @@ namespace
 					_runtime->get_uniform_variable_type(variable, &base_type, &rows, &columns, &array_length);
 					const size_t count = std::max(1u, rows) * std::max(1u, columns);
 					if (count > 16 || array_length > 1) return make_error(command.id, "not_supported", "Uniform arrays require an indexed editor.");
-					if (uniform_annotation_bool(_runtime, variable, "hidden") || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
-						return make_error(command.id, "not_supported", "This uniform is not an editable FX parameter.");
+					if (uniform_annotation_bool(_runtime, variable, "hidden") != hidden_field || uniform_annotation_bool(_runtime, variable, "nosave") || !uniform_annotation_string(_runtime, variable, "source").empty())
+						return make_error(command.id, "not_supported", hidden_field ? "Only hidden, preset-backed add-on fields can be written here." : "This uniform is not an editable FX parameter.");
 					if (base_type == reshade::api::format::r32_float)
 					{
 						auto numbers = json_get_number_values(command.params, "value");
@@ -2522,6 +2525,11 @@ namespace
 						_runtime->set_uniform_value_bool(variable, values, count);
 						_runtime->save_current_preset();
 					}
+					// Add-ons such as ReLight cache their state and re-read it when effects reload. The value was
+					// saved above, so reloading that one effect hands it to the add-on without losing other edits.
+					bool reload_effect = false;
+					if (hidden_field && json_get_bool(command.params, "reloadEffect", reload_effect) && reload_effect)
+						_runtime->reload_effect_next_frame(effect_name.c_str());
 					return make_response(command.id, "{}");
 				}
 				if (command.method == "reset_uniform")

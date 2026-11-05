@@ -558,6 +558,28 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     public Task<JsonElement> ReadAddonServicesAsync() => _automation.ExecuteAsync("list_addon_services", AutomationEngine.Json(new { }));
     private Task<JsonElement> SetServiceParameterAsync(UniformViewModel uniform, object value) => SubmitEditAsync("mutate_addon_service", new { addon = uniform.AddonService, method = "set", request = new { id = uniform.Id, value = value is Array ? value : new[] { value } } });
     public Task InvokeAddonActionAsync(string addon, string id) => _automation.ExecuteAsync("mutate_addon_service", AutomationEngine.Json(new { addon, method = "action", request = new { id, arguments = new { } } }));
+    public const string ReLightAddon = "MARTYSMODS ReLight";
+    public Task<JsonElement> ReadAddonServiceAsync(string addon) => _automation.ExecuteAsync("get_addon_service", AutomationEngine.Json(new { addon }));
+    /// <summary>Chooses the light ReLight's Light Properties edit; returns the add-on's updated service schema.</summary>
+    public async Task<JsonElement> SelectReLightAsync(int slot)
+    {
+        var result = await _automation.ExecuteAsync("mutate_addon_service", AutomationEngine.Json(new { addon = ReLightAddon, method = "action", request = new { id = "select_light", arguments = new { slot } } }));
+        // ReLight redraws its Light Properties a frame or two after the reload; follow it closely
+        // instead of leaving the change to the one-second poll.
+        foreach (var delay in new[] { 0, 60, 150, 300 })
+        {
+            if (delay != 0) await Task.Delay(delay);
+            await RefreshAddonUiAsync();
+        }
+        return result.GetProperty("schema").Clone();
+    }
+    /// <summary>Reads the mirrored add-on controls now instead of waiting for the next one-second poll.</summary>
+    public async Task RefreshAddonUiAsync()
+    {
+        if (_isDisposed || !IsPreviewRunning || !_session.IsConnected) return;
+        var state = await _session.CallAsync("list_addon_imgui_capture");
+        if (!_isDisposed && IsPreviewRunning) ApplyAddonUiState(state);
+    }
     public Task PressUniformAsync(UniformViewModel uniform) => _automation.ExecuteAsync("press_uniform", AutomationEngine.Json(new { id = uniform.Id }));
 
     public void QueueUniformEdit(UniformViewModel uniform, object value)
@@ -946,6 +968,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         AddonDebugText = JsonStateParser.ParseAddonUiDebugText(state);
 
         var controls = JsonStateParser.ParseAddonImGuiControls(state);
+        AddonImGuiControlViewModel.ApplyCaptions(controls);
         var oldSignature = string.Join('\n', AddonImGuiControls.Select(AddonControlStructureSignature));
         var newSignature = string.Join('\n', controls.Select(AddonControlStructureSignature));
         if (string.Equals(oldSignature, newSignature, StringComparison.Ordinal))
@@ -971,7 +994,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             control.Id,
             control.Kind,
             control.IsEnabled.ToString(),
-            control.Label,
+            control.RawLabel,
             control.Minimum,
             control.Maximum,
             control.Components.ToString(CultureInfo.InvariantCulture),
@@ -1359,7 +1382,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void RefreshOutputInfo() => PreviewInfoText = _runtimeInput == null ? "No image opened" : Path.GetFileName(_runtimeInput.ColorPath);
 
-    private void AppendLog(string? message)
+    public void AppendLog(string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
             return;

@@ -22,7 +22,9 @@ public sealed class AddonImGuiControlViewModel
         Overlay = overlay;
         Window = window;
         Kind = kind;
-        Label = string.IsNullOrWhiteSpace(label) ? kind : label;
+        RawLabel = label;
+        // Text and tooltips print "##" literally; widget labels hide everything after it.
+        (Label, IdHint) = kind is "text" or "tooltip" ? (StripIcons(label), string.Empty) : SplitImGuiLabel(label);
         Value = value;
         Minimum = minimum;
         Maximum = maximum;
@@ -35,7 +37,20 @@ public sealed class AddonImGuiControlViewModel
     public string Overlay { get; }
     public string Window { get; }
     public string Kind { get; }
+    /// <summary>The label exactly as captured, including ImGui "##id" suffixes and icon glyphs.</summary>
+    public string RawLabel { get; }
+    /// <summary>The text ImGui shows: the part before "##", without icon-font glyphs. May be empty.</summary>
     public string Label { get; }
+    /// <summary>Words from a hidden "##id", e.g. "Temp Tint" for "##TempTint"; empty when there is none.</summary>
+    public string IdHint { get; }
+    /// <summary>Text drawn just before an unlabeled widget, which add-ons use as its label.</summary>
+    public string? Caption { get; private set; }
+    /// <summary>A text widget that labels the next control; the view shows it as that control's label instead.</summary>
+    public bool IsCaptionOfNext { get; private set; }
+    public string DisplayLabel => Caption ?? (Label.Length != 0 ? Label : IdHint);
+    public string AccessibleName => DisplayLabel.Length != 0 ? DisplayLabel : Kind.Replace('_', ' ');
+    /// <summary>Per-component names for a multi-value widget whose hidden id names each part ("##TempTint" → Temp, Tint).</summary>
+    public IReadOnlyList<string> ComponentNames => Components > 1 && IdHint.Split(' ') is { } words && words.Length == Components ? words : Array.Empty<string>();
     public string Value { get; private set; }
     public string Minimum { get; }
     public string Maximum { get; }
@@ -85,6 +100,60 @@ public sealed class AddonImGuiControlViewModel
             var maximum = string.IsNullOrWhiteSpace(Maximum) ? NumericValue + Math.Max(1.0, Math.Abs(NumericValue) * 2.0) : ParseFirstNumber(Maximum, minimum + 1.0);
             return Math.Abs(maximum - minimum) < 0.000001 ? minimum + 1.0 : maximum;
         }
+    }
+
+    public bool TakesCaption => IsNumeric || IsCombo || IsCheckbox || IsColor || IsTextInput;
+
+    /// <summary>
+    /// Add-ons often draw a text line and then an unlabeled widget ("Location X" then DragFloat("##x")).
+    /// Pair them so the widget is labeled and the separate text line is not repeated.
+    /// </summary>
+    public static void ApplyCaptions(IReadOnlyList<AddonImGuiControlViewModel> controls)
+    {
+        for (var i = 0; i + 1 < controls.Count; ++i)
+        {
+            var text = controls[i];
+            var next = controls[i + 1];
+            if (!text.IsText || text.Label.Length == 0 || next.Label.Length != 0 || !next.TakesCaption || text.GroupKey != next.GroupKey)
+                continue;
+            next.Caption = text.Label;
+            text.IsCaptionOfNext = true;
+        }
+    }
+
+    private static (string Label, string IdHint) SplitImGuiLabel(string label)
+    {
+        // ImGui shows only the text before "##"; "###" also hides it. Icon fonts use the private-use area.
+        var split = label.IndexOf("##", StringComparison.Ordinal);
+        var visible = split < 0 ? label : label[..split];
+        var id = split < 0 ? string.Empty : label[(split + 2)..].TrimStart('#');
+        return (StripIcons(visible), Humanize(StripIcons(id)));
+    }
+
+    // Icon fonts (Font Awesome in Marty's add-ons) map glyphs to the private-use area; WinUI fonts show boxes.
+    private static string StripIcons(string text) => new string(text.Where(ch => ch is < '' or > '').ToArray()).Trim();
+
+    private static string Humanize(string id)
+    {
+        if (id.Length == 0 || id.Any(char.IsWhiteSpace) || !id.All(ch => char.IsLetterOrDigit(ch) || ch == '_'))
+            return id.Any(char.IsLetter) ? id : string.Empty;
+        var words = new List<string>();
+        var current = new System.Text.StringBuilder();
+        foreach (var ch in id)
+        {
+            if (ch == '_' || (char.IsUpper(ch) && current.Length != 0 && !char.IsUpper(current[^1])))
+            {
+                if (current.Length != 0) words.Add(current.ToString());
+                current.Clear();
+                if (ch == '_') continue;
+            }
+            current.Append(ch);
+        }
+        if (current.Length != 0) words.Add(current.ToString());
+        // Bare numeric or single-letter ids ("##0", "##x") say nothing useful.
+        if (words.Count == 0 || words.All(word => word.Length < 2 || word.All(char.IsDigit))) return string.Empty;
+        var text = string.Join(' ', words);
+        return char.ToUpperInvariant(text[0]) + text[1..];
     }
 
     public bool UpdateValue(string value)

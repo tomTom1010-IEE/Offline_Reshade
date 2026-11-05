@@ -72,6 +72,8 @@ public sealed partial class AutomationEngine
         if (method == "set_preview_comparison") return await _call(method, args, token);
         if (method == "get_diagnostics") return await Diagnostics.CollectAsync(_call, token);
         if (method == "list_addon_services") return await _operations.RunAsync(Activity.Create(method, args, _current()), ListAddonServicesAsync, token);
+        if (method == "get_addon_service") return await _operations.RunAsync(Activity.Create(method, args, _current()),
+            ct => AddonServiceAsync(Text(args, "addon") ?? throw new ArgumentException("Missing addon."), "get", Json(new { }), ct), token);
         if (method == "get_operation_status") {
             var node = JsonSerializer.SerializeToNode(Activity.Snapshot, JsonOptions)!.AsObject();
             node["waitingInput"] = JsonSerializer.SerializeToNode(WaitingInput, JsonOptions);

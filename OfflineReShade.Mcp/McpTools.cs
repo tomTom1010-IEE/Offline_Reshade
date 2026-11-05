@@ -19,7 +19,7 @@ public sealed class McpTools(McpBridge bridge, EffectKnowledgeBase knowledge)
     public Task<CallToolResult> SetAddonParameter(string addon, string id, JsonElement value, CancellationToken cancellationToken)
         => ExecuteToolAsync("mutate_addon_service", new { addon, method = "set", request = new { id, value } }, cancellationToken);
 
-    [McpServerTool(Name = "invoke_addon_action"), Description("Invoke a declared independent action with JSON arguments from list_addon_services. Verified Marty adapters support set_curve, set_light and select_lut_from_preset; these reload effects, validate readback and restore on failure. Private actions are not covered by FX undo; export a preset copy to persist them.")]
+    [McpServerTool(Name = "invoke_addon_action"), Description("Invoke a declared independent action with JSON arguments from list_addon_services. Verified Marty adapters support set_curve, set_light, select_light and select_lut_from_preset; these reload effects, validate readback and restore on failure. select_light only chooses which light ReLight's own editor changes and reloads just that effect. Private actions are not covered by FX undo; export a preset copy to persist them.")]
     public Task<CallToolResult> InvokeAddonAction(string addon, string id, JsonElement arguments, CancellationToken cancellationToken)
         => ExecuteToolAsync("mutate_addon_service", new { addon, method = "action", request = new { id, arguments } }, cancellationToken);
 

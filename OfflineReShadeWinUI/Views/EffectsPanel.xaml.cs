@@ -82,6 +82,8 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private bool _buildingAddonOverlayTabs;
     private bool _updatingAddonControlValues;
     private string _activeNativeAddonOverlayId = string.Empty;
+    // An add-on editor opened from the compatibility controls; it stays open while the Add-ons page shows.
+    private string? _editorOverlayId;
     private string? _draggedEffectName;
     private PreviewHostInputMessage? _pendingAddonMouseMove;
     private uint? _capturedAddonPointerId;
@@ -202,6 +204,9 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                       IsAddonsPageSelected && NativeCompatibility.IsExpanded &&
                       NativeAddonOverlaySwitch.IsOn &&
                       selectedOverlay != null;
+        // An editor opened from the compatibility controls needs its add-on drawing, not the native surface.
+        var editor = _editorOverlayId == null ? null : ViewModel.AddonOverlays.FirstOrDefault(overlay => overlay.Id == _editorOverlayId);
+        var editorActive = editor != null && ViewModel.IsPreviewRunning && !ViewModel.IsSettingsOpen && _paneVisible && IsAddonsPageSelected;
 
         AddonNativeSurfaceBorder.Visibility = selectedOverlay != null ? Visibility.Visible : Visibility.Collapsed;
         AddonOverlaySwapChainPanel.Visibility = visible && ViewModel.SharedAddonOverlayHandle != 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -229,7 +234,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             }
         }
 
-        _ = SyncNativeAddonOverlayAsync(visible ? selectedOverlay : null);
+        _ = SyncNativeAddonOverlayAsync(visible ? selectedOverlay : editorActive ? editor : null);
     }
 
     private async Task SyncNativeAddonOverlayAsync(AddonOverlayViewModel? overlay)
@@ -241,7 +246,13 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             return;
 
         if (await RunUiCommandAsync(() => ViewModel.SelectNativeAddonOverlayAsync(overlay)))
+        {
             _activeNativeAddonOverlayId = requestedId;
+            // The add-on draws its controls on the next frames; show them without waiting for the next poll.
+            await Task.Delay(250);
+            if (!_isClosing && string.Equals(requestedId, _activeNativeAddonOverlayId, StringComparison.Ordinal))
+                await RunUiCommandAsync(ViewModel.RefreshAddonUiAsync);
+        }
     }
 
     private void QueueAddonOverlayInput(PreviewHostInputMessage input)
@@ -497,6 +508,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         FilterEffects();
 
         BuildAddons();
+        _reLightAvailable = true; // Effects or add-ons may have changed; let the adapter answer again.
         BuildAddonControls();
     }
 
@@ -1043,7 +1055,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         try
         {
             AddonOverlayTabView.TabItems.Clear();
-            var selectedIndex = -1;
+            int selectedIndex = -1, editorIndex = -1;
             foreach (var overlay in ViewModel.AddonOverlays)
             {
                 var tab = new TabViewItem
@@ -1057,11 +1069,13 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 AddonOverlayTabView.TabItems.Add(tab);
                 if (previousSelection != null && string.Equals(previousSelection.Id, overlay.Id, StringComparison.Ordinal))
                     selectedIndex = AddonOverlayTabView.TabItems.Count - 1;
+                if (string.Equals(_editorOverlayId, overlay.Id, StringComparison.Ordinal))
+                    editorIndex = AddonOverlayTabView.TabItems.Count - 1;
             }
 
             AddonOverlayTabView.Visibility = AddonOverlayTabView.TabItems.Count != 0 ? Visibility.Visible : Visibility.Collapsed;
             NativeAddonOverlaySwitch.IsEnabled = AddonOverlayTabView.TabItems.Count != 0;
-            AddonOverlayTabView.SelectedIndex = selectedIndex >= 0 ? selectedIndex : AddonOverlayTabView.TabItems.Count != 0 ? 0 : -1;
+            AddonOverlayTabView.SelectedIndex = selectedIndex >= 0 ? selectedIndex : editorIndex >= 0 ? editorIndex : AddonOverlayTabView.TabItems.Count != 0 ? 0 : -1;
         }
         finally
         {
@@ -1071,18 +1085,64 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         UpdateAddonOverlayHostVisibility();
     }
 
+    // Mirrored controls are rebuilt whenever the add-on's UI changes shape (choosing a light, creating one).
+    // Rebuilding drops the focused control and lets the page jump, so put both back afterwards.
     private void BuildAddonControls()
+    {
+        var offset = AddonsPage.VerticalOffset;
+        var focusedId = XamlRoot != null && FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement focused && IsWithin(focused, AddonControlsPanel)
+            ? AutomationProperties.GetAutomationId(focused) : null;
+        BuildAddonControlsCore();
+        if (!IsAddonsPageSelected) return;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (_isClosing) return;
+            AddonsPage.ChangeView(null, offset, null, true);
+            if (!string.IsNullOrEmpty(focusedId) && FindByAutomationId(AddonControlsPanel, focusedId) is Control control)
+                control.Focus(FocusState.Programmatic);
+        });
+    }
+
+    private static bool IsWithin(DependencyObject element, DependencyObject ancestor)
+    {
+        for (var current = element; current != null; current = VisualTreeHelper.GetParent(current))
+            if (ReferenceEquals(current, ancestor)) return true;
+        return false;
+    }
+
+    private static FrameworkElement? FindByAutomationId(DependencyObject root, string automationId)
+    {
+        var pending = new Queue<DependencyObject>();
+        pending.Enqueue(root);
+        while (pending.Count != 0)
+        {
+            var current = pending.Dequeue();
+            if (current is FrameworkElement element && AutomationProperties.GetAutomationId(element) == automationId) return element;
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(current); ++i) pending.Enqueue(VisualTreeHelper.GetChild(current, i));
+        }
+        return null;
+    }
+
+    private void BuildAddonControlsCore()
     {
         AddonControlsPanel.Children.Clear();
         _addonControlValueUpdaters.Clear();
         _addonMappedSliders.Clear();
         _addonLogIndicators.Clear();
+        _reLightList = null;
+        _reLightCount = _reLightStatus = null;
+
+        var shortcuts = BuildAddonEditorShortcuts();
+        if (shortcuts != null)
+            AddonControlsPanel.Children.Add(shortcuts);
 
         if (ViewModel.AddonImGuiControls.Count == 0)
         {
             AddonControlsPanel.Children.Add(new TextBlock
             {
-                Text = "No standard add-on ImGui controls captured yet. Complex custom draw-list UI still needs the native panel fallback.",
+                Text = shortcuts != null
+                    ? "Open an add-on's editor above to show its controls here."
+                    : "No add-on controls captured yet. Complex custom drawing still needs the native overlay below.",
                 Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
                 TextWrapping = TextWrapping.Wrap
             });
@@ -1095,8 +1155,78 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             var index = 0;
             var panel = BuildAddonControlSequence(controls, ref index);
 
-            AddonControlsPanel.Children.Add(CreateSectionExpander(group.Key, true, panel, new Thickness(0, 0, 0, 0)));
+            AddonControlsPanel.Children.Add(CreateSectionExpander(BuildAddonGroupHeader(controls[0]), true, panel, new Thickness(0, 0, 0, 0)));
         }
+    }
+
+    // "MartysMods: ReLight" over "MARTYSMODS ReLight · Event overlay" reads better than the raw group key.
+    private static FrameworkElement BuildAddonGroupHeader(AddonImGuiControlViewModel control)
+    {
+        var header = new StackPanel { Spacing = 0, Padding = new Thickness(0, 4, 0, 4) };
+        // A window named after its overlay ("Settings") says less than the add-on's name.
+        var window = control.Window.Length != 0 && !string.Equals(control.Window, control.Overlay, StringComparison.OrdinalIgnoreCase) ? control.Window : control.Addon;
+        header.Children.Add(new TextBlock { Text = window, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+        var source = string.Equals(window, control.Addon, StringComparison.Ordinal) ? control.Overlay : control.Addon + "  ·  " + control.Overlay;
+        if (source.Length != 0)
+            header.Children.Add(new TextBlock { Text = source, Style = (Style)Application.Current.Resources["SecondaryTextStyle"], TextTrimming = TextTrimming.CharacterEllipsis });
+        AutomationProperties.SetName(header, window);
+        return header;
+    }
+
+    // Some add-ons (ReLight) only draw their editor while it is open, so their controls never reach
+    // this list until the right native overlay is selected. Offer to open them here instead.
+    private FrameworkElement? BuildAddonEditorShortcuts()
+    {
+        var editors = ViewModel.AddonOverlays.Where(static overlay => !overlay.IsSettings && overlay.Title == "@event").ToArray();
+        var panel = new StackPanel { Spacing = 6 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "These add-ons show their controls here only while their editor is open.",
+            Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+            TextWrapping = TextWrapping.Wrap
+        });
+        foreach (var overlay in editors)
+        {
+            var isOpen = string.Equals(_editorOverlayId, overlay.Id, StringComparison.Ordinal);
+            // Settings windows are captured while closed; only the editor's own controls count.
+            var hasControls = ViewModel.AddonImGuiControls.Any(control => control.Addon == overlay.AddonName && control.Overlay == overlay.DisplayName);
+            // Add-ons that draw without being opened already show their controls; nothing to offer.
+            if (!isOpen && hasControls) continue;
+
+            var row = new Grid { ColumnSpacing = 12 };
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var name = new TextBlock { Text = overlay.AddonName, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            if (isOpen)
+                name.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = hasControls ? "  ·  open" : "  ·  opening…" });
+            row.Children.Add(name);
+            var button = new Button { Content = isOpen ? "Close editor" : "Open editor", VerticalAlignment = VerticalAlignment.Center };
+            AutomationProperties.SetAutomationId(button, (isOpen ? "CloseAddonEditor_" : "OpenAddonEditor_") + MakeAutomationId(overlay.AddonName));
+            AutomationProperties.SetName(button, (isOpen ? "Close " : "Open ") + overlay.AddonName + " editor");
+            button.Click += (_, _) => SetAddonEditor(isOpen ? null : overlay);
+            Grid.SetColumn(button, 1);
+            row.Children.Add(button);
+            panel.Children.Add(row);
+        }
+        return panel.Children.Count == 1 ? null : panel;
+    }
+
+    private void SetAddonEditor(AddonOverlayViewModel? overlay)
+    {
+        _editorOverlayId = overlay?.Id;
+        if (overlay != null)
+        {
+            // Keep the native overlay tabs in step, so expanding them shows the same editor.
+            var tab = AddonOverlayTabView.TabItems.OfType<TabViewItem>().FirstOrDefault(item => item.Tag is AddonOverlayViewModel candidate && candidate.Id == overlay.Id);
+            if (tab != null)
+            {
+                _buildingAddonOverlayTabs = true;
+                try { AddonOverlayTabView.SelectedItem = tab; }
+                finally { _buildingAddonOverlayTabs = false; }
+            }
+        }
+        UpdateAddonOverlayHostVisibility();
+        BuildAddonControls();
     }
 
     private StackPanel BuildAddonControlSequence(IReadOnlyList<AddonImGuiControlViewModel> controls, ref int index, params string[] stopKinds)
@@ -1156,7 +1286,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 {
                     panel.Children.Add(new TextBlock
                     {
-                        Text = control.Label,
+                        Text = control.DisplayLabel,
                         Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
                         TextWrapping = TextWrapping.Wrap
                     });
@@ -1200,17 +1330,26 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             {
                 ++index;
                 if (lastElement != null)
-                    ToolTipService.SetToolTip(lastElement, control.Label);
+                    ToolTipService.SetToolTip(lastElement, control.DisplayLabel);
                 continue;
             }
 
             if (control.IsTreeEnd || control.IsTabBarEnd || control.IsTabItemEnd || control.IsPopupEnd || control.IsMenuEnd)
                 break;
 
+            // The next control shows this text as its label.
+            if (control.IsCaptionOfNext || IsReplacedReLightHint(control))
+            {
+                ++index;
+                continue;
+            }
+
             var editor = new ContentControl { Content = BuildAddonControlEditor(control), IsEnabled = control.IsEnabled, HorizontalContentAlignment = HorizontalAlignment.Stretch };
             panel.Children.Add(editor);
             lastElement = editor;
             ++index;
+            if (IsReLightListAnchor(control))
+                panel.Children.Add(BuildReLightLightList());
         }
 
         return panel;
@@ -1254,7 +1393,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             var itemIndex = 0;
             var tab = new TabViewItem
             {
-                Header = tabControl.Label,
+                Header = tabControl.DisplayLabel,
                 IsClosable = false,
                 Tag = tabControl,
                 Content = BuildAddonControlSequence(itemControls, ref itemIndex)
@@ -1283,7 +1422,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         {
             return new TextBlock
             {
-                Text = control.Label,
+                Text = control.DisplayLabel,
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true
             };
@@ -1295,6 +1434,20 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         if (control.IsColor)
             return BuildAddonColorEditor(control);
 
+        if (control.IsNativeFallback && control.Label == "Custom drawing")
+        {
+            // Shapes drawn straight into ImGui (light markers, curve handles) have no WinUI equivalent.
+            // The controls around them still work, so say so quietly instead of raising a warning.
+            var note = new TextBlock
+            {
+                Text = "Some of this add-on's drawing, such as on-image markers, appears only in its native overlay.",
+                Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
+                TextWrapping = TextWrapping.Wrap
+            };
+            AutomationProperties.SetAutomationId(note, "AddonCustomDrawingNote_" + MakeAutomationId(control.Addon));
+            return note;
+        }
+
         if (control.IsNativeFallback)
         {
             return new InfoBar
@@ -1302,7 +1455,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 IsOpen = true,
                 IsClosable = false,
                 Severity = InfoBarSeverity.Warning,
-                Title = control.Label,
+                Title = control.DisplayLabel,
                 Message = string.IsNullOrWhiteSpace(control.Value) ? "This element requires the native add-on overlay." : control.Value
             };
         }
@@ -1311,7 +1464,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         {
             var button = new Button
             {
-                Content = control.BoolValue ? "[x] " + control.Label : control.Label,
+                Content = control.BoolValue ? "[x] " + control.DisplayLabel : control.DisplayLabel,
                 Tag = control,
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
@@ -1325,13 +1478,17 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         {
             var button = new Button
             {
-                Content = control.Label,
+                Content = control.DisplayLabel,
                 Tag = control,
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
             ApplyAddonAutomation(button, control);
             AutomationProperties.SetAutomationId(button, "AddonButton_" + MakeAutomationId(control.Id));
-            button.Click += async (_, _) => await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)button.Tag, "click"));
+            button.Click += async (_, _) =>
+            {
+                if (await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync((AddonImGuiControlViewModel)button.Tag, "click")))
+                    OnAddonControlCommitted(control, structural: true);
+            };
             return button;
         }
 
@@ -1339,7 +1496,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         {
             var checkBox = new CheckBox
             {
-                Content = control.Label,
+                Content = control.DisplayLabel,
                 IsChecked = control.BoolValue,
                 Tag = control
             };
@@ -1362,7 +1519,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
 
         return new TextBlock
         {
-            Text = control.Label,
+            Text = control.DisplayLabel,
             TextWrapping = TextWrapping.Wrap
         };
     }
@@ -1371,7 +1528,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     {
         var textBox = new TextBox
         {
-            Header = control.Label,
+            Header = control.DisplayLabel,
             Text = control.Value,
             PlaceholderText = control.Minimum,
             AcceptsReturn = control.IsMultilineTextInput,
@@ -1400,7 +1557,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
         panel.Children.Add(new TextBlock
         {
-            Text = control.Label,
+            Text = control.DisplayLabel,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap
         });
@@ -1434,7 +1591,8 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private FrameworkElement BuildAddonComboEditor(AddonImGuiControlViewModel control)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+        if (control.DisplayLabel.Length != 0)
+            panel.Children.Add(new TextBlock { Text = control.DisplayLabel, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
 
         var combo = new ComboBox
         {
@@ -1458,9 +1616,12 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
     private FrameworkElement BuildAddonNumericEditor(AddonImGuiControlViewModel control)
     {
         var panel = new StackPanel { Spacing = 4, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(control.IsCombo
-            ? new TextBlock { Text = control.Label, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap }
-            : CreateMappedSliderLabel(control.Label, _addonLogIndicators));
+        var componentNames = control.ComponentNames;
+        // A widget whose hidden id names each value ("##TempTint") labels its rows instead of the group.
+        if (control.DisplayLabel.Length != 0 && componentNames.Count == 0)
+            panel.Children.Add(control.IsCombo
+                ? new TextBlock { Text = control.DisplayLabel, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap }
+                : CreateMappedSliderLabel(control.DisplayLabel, _addonLogIndicators));
 
         var componentCount = Math.Max(1, control.Components);
         var numericValues = control.NumericValues.ToList();
@@ -1493,14 +1654,22 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 editor.Slider.SetMappedValue(value, false);
                 editor.TextBox.Text = FormatValue(editor.Slider.MappedValue);
             }
-            await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, BuildValue()));
+            if (await RunUiCommandAsync(() => ViewModel.SetAddonImGuiValueAsync(control, BuildValue())))
+                OnAddonControlCommitted(control, structural: false);
         }
 
         for (var component = 0; component < componentCount; ++component)
         {
             var componentIndex = component;
             var componentValue = numericValues[component];
+            var componentName = component < componentNames.Count ? componentNames[component] : null;
+            var accessibleName = componentName != null ? componentName
+                : componentCount > 1 ? control.AccessibleName + " " + (component + 1).ToString(CultureInfo.InvariantCulture) : control.AccessibleName;
+            // Named parts get a heading like every other mirrored slider, so all sliders keep one width.
+            if (componentName != null)
+                panel.Children.Add(new TextBlock { Text = componentName, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, component == 0 ? 0 : 6, 0, 0) });
             var row = new Grid { ColumnSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+            const int sliderColumn = 0;
             row.ColumnDefinitions.Add(new ColumnDefinition());
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
 
@@ -1511,6 +1680,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
             ApplyAddonAutomation(textBox, control);
+            AutomationProperties.SetName(textBox, accessibleName + " value");
             AutomationProperties.SetAutomationId(textBox, "AddonNumber_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
 
             MappedSlider? slider = null;
@@ -1530,6 +1700,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                 slider.DragSensitivityWheelChanged += OnSliderDragSensitivityWheelChanged;
                 _addonMappedSliders.Add(slider);
                 AutomationProperties.SetAutomationId(slider, "AddonSlider_" + MakeAutomationId(control.Id) + "_" + componentIndex.ToString(CultureInfo.InvariantCulture));
+                AutomationProperties.SetName(slider, accessibleName);
                 slider.MappedValueChanged += (_, args) =>
                 {
                     if (_updatingAddonControlValues)
@@ -1538,17 +1709,20 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
                     textBox.Text = FormatValue(args.Value);
                     QueueAddonControlUpdate(control, BuildValue());
                 };
+                Grid.SetColumn(slider, sliderColumn);
                 row.Children.Add(slider);
             }
             else
             {
-                row.Children.Add(new TextBlock
+                var indexLabel = new TextBlock
                 {
-                    Text = control.Kind,
+                    Text = "Item number",
                     Style = (Style)Application.Current.Resources["SecondaryTextStyle"],
                     VerticalAlignment = VerticalAlignment.Center,
                     TextWrapping = TextWrapping.Wrap
-                });
+                };
+                Grid.SetColumn(indexLabel, sliderColumn);
+                row.Children.Add(indexLabel);
             }
 
             textBox.KeyDown += async (_, args) =>
@@ -1558,7 +1732,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
             };
             textBox.LostFocus += async (_, _) => await CommitValueAsync();
 
-            Grid.SetColumn(textBox, 1);
+            Grid.SetColumn(textBox, sliderColumn + 1);
             row.Children.Add(textBox);
             panel.Children.Add(row);
             editors.Add((slider, textBox));
@@ -1617,12 +1791,16 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
         }
     }
 
-    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value) => ViewModel.QueueAddonEdit(control, value);
+    private void QueueAddonControlUpdate(AddonImGuiControlViewModel control, string value)
+    {
+        ViewModel.QueueAddonEdit(control, value);
+        OnAddonControlCommitted(control, structural: false);
+    }
 
     private static void ApplyAddonAutomation(FrameworkElement element, AddonImGuiControlViewModel control)
     {
         AutomationProperties.SetAutomationId(element, "AddonControl_" + MakeAutomationId(control.Id));
-        AutomationProperties.SetName(element, control.Label);
+        AutomationProperties.SetName(element, control.AccessibleName);
     }
 
     private static bool TryParseFirstNumber(string text, out double value)
@@ -1762,7 +1940,7 @@ public sealed partial class EffectsPanel : UserControl, IDisposable
 
     private FrameworkElement CreateAddonNestedSectionExpander(AddonImGuiControlViewModel control, UIElement content, string automationPrefix)
     {
-        var expander = new Expander { Header = control.Label, IsExpanded = control.IsOpen, Content = content,
+        var expander = new Expander { Header = control.DisplayLabel, IsExpanded = control.IsOpen, Content = content,
             HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
         ApplyAddonAutomation(expander, control);
         AutomationProperties.SetAutomationId(expander, automationPrefix + MakeAutomationId(control.Id));

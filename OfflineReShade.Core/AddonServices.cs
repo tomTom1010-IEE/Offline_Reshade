@@ -29,16 +29,17 @@ public sealed partial class AutomationEngine
             }
             var profile = MartyProfileFor(addon)!;
             var privateError = await MartyCompatibilityAsync(profile, loaded, info, token);
+            // MutateAddonServiceAsync reads the service again afterwards; a second read here only cost time.
             if (method == "action") {
                 if (privateError != null) throw new NotSupportedException(privateError);
                 await ApplyMartyActionAsync(profile, request, token);
-                return await AddonServiceAsync(addon, "get", Json(new { }), token);
+                return Json(new { status = "applied" });
             }
             if (method == "set") {
                 var id = request.GetProperty("id").GetString();
                 if (!companionParameters.Any(p => p.GetProperty("id").GetString() == id)) throw new ArgumentException("Unknown companion parameter.");
                 await _history.ChangeAsync("set_uniform", null, ct => _call("set_uniform", new { id, value = request.GetProperty("value") }, ct), token);
-                return await AddonServiceAsync(addon, "get", Json(new { }), token);
+                return Json(new { status = "applied" });
             }
             object? privateState = null;
             if (privateError == null) {

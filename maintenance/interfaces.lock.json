@@ -47,6 +47,7 @@
     "set_addon_imgui_value",
     "set_addon_overlay_size",
     "set_effects_state",
+    "set_hidden_uniform",
     "set_input_paths",
     "set_input_watch_enabled",
     "set_native_addon_overlay",

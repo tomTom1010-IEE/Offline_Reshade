@@ -74,6 +74,12 @@ try:
  action('ReLight','set_light',dict(light,slot=64),fail=True)
  tool('export_preset_copy',path=str(work/'lights-saved.ini'))
  print('PASS: sphere light changes GPU output, disable and invalid slot handling',flush=True)
+ action('ReLight','set_light',dict(light,slot=1,intensity=1));e=export('lights-two')
+ chosen=action('ReLight','select_light',{'slot':1})['schema']['state'];assert chosen['selectedLight']==1,chosen
+ assert max(diff(e,export('lights-selected')))<3,'selecting a light changed the image'
+ action('ReLight','select_light',{'slot':2},fail=True)
+ assert action('ReLight','select_light',{'slot':-1})['schema']['state']['selectedLight']==-1
+ print('PASS: light selection is confirmed by readback, leaves the image unchanged and rejects unused slots',flush=True)
  tool('load_preset',path=str(lut),unsavedChanges='discard')
  for name,reference in [('neutral',args.neutral_preset),('warm',args.warm_preset)]:
   action('LUT-Manager','select_lut_from_preset',{'presetPath':str(Path(reference).resolve()),'lutDirectory':str(Path(args.lut_directory).resolve())})
