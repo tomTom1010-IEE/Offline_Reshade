@@ -12,6 +12,12 @@ public sealed class McpBridge : IAsyncDisposable
     private SessionDescriptor? _session;
     private string? _sessionId;
     public string Mode => _attached == null ? "independent" : "attached";
+    // Effect notes backed only by a described comparison require that this server rendered something
+    // since the input was opened: an agent that never looked at an image cannot claim a visual result.
+    private int _rendersSinceOpen;
+    public bool HasRenderedSinceOpen => Volatile.Read(ref _rendersSinceOpen) > 0;
+    public void ObserveRender() => Interlocked.Increment(ref _rendersSinceOpen);
+    public void ObserveOpen() => Interlocked.Exchange(ref _rendersSinceOpen, 0);
     public McpBridge(string nativePath) => _nativePath = nativePath;
     public async Task AttachAsync(string id, CancellationToken token)
     {
@@ -26,6 +32,7 @@ public sealed class McpBridge : IAsyncDisposable
         catch { connection.Dispose(); throw; }
         await DisposeOwnedAsync();
         _attached?.Dispose(); _attached = connection; _session = descriptor; _sessionId = id;
+        ObserveOpen();
     }
     public async Task<JsonElement> CallAsync(string method, object? arguments = null, CancellationToken token = default)
     {

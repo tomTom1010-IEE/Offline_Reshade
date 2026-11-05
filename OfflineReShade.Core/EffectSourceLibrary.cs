@@ -1,9 +1,12 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace OfflineReShade.Core;
+
+public sealed record EffectFingerprint(string EffectName, string Hash, string[] Files);
 
 public sealed record EffectSourceHunk(string File, int StartLine, int EndLine, int[] MatchLines, string Excerpt);
 
@@ -42,6 +45,7 @@ public sealed class EffectSourceLibrary
     public static readonly IReadOnlyList<string> Extensions = [".fx", ".fxh", ".addonfx", ".h", ".hlsl", ".hlsli", ".inc"];
     private static readonly HashSet<string> ExtensionSet = new(Extensions, StringComparer.OrdinalIgnoreCase);
     private static readonly Regex IncludeDirective = new(@"^\s*#\s*include\s*[""<]([^"">\r\n]+)["">]", RegexOptions.CultureInvariant);
+    private static readonly Regex CitationPattern = new(@"^(?<file>.+?):(?<start>\d+)(?:-(?<end>\d+))?$", RegexOptions.CultureInvariant);
     private static readonly EnumerationOptions Walk = new() { RecurseSubdirectories = true, IgnoreInaccessible = true, MatchType = MatchType.Win32, AttributesToSkip = Skipped };
 
     public EffectSourceLibrary(string effectDirectory)
@@ -170,6 +174,52 @@ public sealed class EffectSourceLibrary
         return files;
     }
 
+    // Identifies one version of an effect: its FX file and the headers it includes, by file name and
+    // content. Moving the effect folder keeps the identity; editing any of those files changes it.
+    public EffectFingerprint Fingerprint(string effectName)
+    {
+        var all = ShaderFiles([]);
+        var named = all.Where(x => Path.GetFileName(x).Equals(effectName.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
+        if (named.Count == 0) throw new FileNotFoundException($"No effect file named '{effectName}' under {Root}. Use an effectName reported by list_effects.");
+        if (named.Count > 1) throw new ArgumentException($"'{effectName}' exists more than once: {string.Join(", ", named.Take(5).Select(Relative))}.");
+        var files = IncludeClosure(named, all, []);
+        var entries = files.Select(file => Path.GetFileName(file).ToLowerInvariant() + ":" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))))
+            .Order(StringComparer.Ordinal);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", entries)))).ToLowerInvariant();
+        return new(Path.GetFileName(named[0]), hash, files.Select(Relative).ToArray());
+    }
+
+    // Evidence of the form file:line or file:start-end names shader lines. Returns the normalized
+    // citation, or null when the text is not a citation; a citation that does not resolve throws.
+    public string? NormalizeCitation(string evidence)
+    {
+        var match = CitationPattern.Match(evidence.Trim());
+        if (!match.Success || !ExtensionSet.Contains(Path.GetExtension(match.Groups["file"].Value))) return null;
+        var path = Resolve(match.Groups["file"].Value.Trim());
+        if (!int.TryParse(match.Groups["start"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var start)) start = -1;
+        var end = start;
+        if (match.Groups["end"].Success && !int.TryParse(match.Groups["end"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out end)) end = -1;
+        var count = (ReadLines(path, null) ?? throw new IOException("The cited file is larger than 4 MiB.")).Length;
+        if (start < 1 || end < start || end > count) throw new ArgumentException($"{evidence.Trim()} does not exist: {Relative(path)} has {count} lines.");
+        return $"{Relative(path)}:{start}" + (end != start ? $"-{end}" : "");
+    }
+
+    // Notes must describe and cite code rather than reproduce it, since effect sources are often licensed.
+    // Returns where a long source line appears verbatim in the text, or null.
+    public string? FindCopiedSource(string text, IEnumerable<string> relativeFiles, int minimumLength = 40)
+    {
+        foreach (var relative in relativeFiles)
+        {
+            var lines = ReadLines(Path.GetFullPath(Path.Combine(Root, relative)), null) ?? [];
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i].Trim();
+                if (line.Length >= minimumLength && text.Contains(line, StringComparison.Ordinal)) return $"{relative}:{i + 1}";
+            }
+        }
+        return null;
+    }
+
     // The effect file plus the headers it includes, resolved like ReShade: the including file's
     // directory first, then the effect directory and its subdirectories in path order.
     private (List<string> Files, string Scope) EffectClosure(string effectName, List<string> all, List<string> notes)
@@ -179,7 +229,13 @@ public sealed class EffectSourceLibrary
         if (roots.Count == 0) roots = all.Where(x => IsEffect(x) && Path.GetFileName(x).Contains(effectName, StringComparison.OrdinalIgnoreCase)).ToList();
         if (roots.Count == 0) throw new FileNotFoundException($"No effect file matching '{effectName}' under {Root}. Use an effectName reported by list_effects.");
         if (roots.Count > 8) throw new ArgumentException($"'{effectName}' matches {roots.Count} effect files. Use the exact file name, for example {Path.GetFileName(roots[0])}.");
+        var files = IncludeClosure(roots, all, notes);
+        var scope = string.Join(", ", roots.Select(Relative)) + (files.Count > roots.Count ? $" and {files.Count - roots.Count} included file{(files.Count - roots.Count == 1 ? "" : "s")}" : "");
+        return (files, scope);
+    }
 
+    private List<string> IncludeClosure(List<string> roots, List<string> all, List<string> notes)
+    {
         var known = new HashSet<string>(all, StringComparer.OrdinalIgnoreCase);
         var directories = Directory.EnumerateDirectories(Root, "*", Walk).Prepend(Root).OrderBy(x => x, StringComparer.Ordinal).ToList();
         var files = new List<string>();
@@ -201,8 +257,7 @@ public sealed class EffectSourceLibrary
             }
         }
         if (unresolved.Count > 0) notes.Add("Includes not found under the effect directory: " + string.Join(", ", unresolved.Take(10)) + ".");
-        var scope = string.Join(", ", roots.Select(Relative)) + (files.Count > roots.Count ? $" and {files.Count - roots.Count} included file{(files.Count - roots.Count == 1 ? "" : "s")}" : "");
-        return (files, scope);
+        return files;
     }
 
     private static string? ResolveInclude(string includingFile, string include, HashSet<string> known, List<string> directories)

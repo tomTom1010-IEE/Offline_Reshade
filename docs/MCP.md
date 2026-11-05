@@ -225,6 +225,7 @@ edge. The preview composition transform accounts for DPI independently of output
 | `get_status` | Loading, dimensions, frame count and input generation |
 | `list_effects` | Paginated uniform metadata, current values and shader defaults; techniques with their annotations |
 | `search_effect_source`, `get_effect_source` | Search and read the shader sources of the session's effect directory (read-only, bounded) |
+| `get_effect_knowledge`, `record_effect_note`, `update_effect_note`, `delete_effect_note` | Read and maintain verified per-effect notes shared by every client |
 | `set_parameters` | Set uniforms using `effect.fx::uniform` IDs |
 | `set_technique`, `set_effects_enabled` | Change technique or global effect state |
 | `set_preview_comparison` | Compare original/processed preview without changing exported effects |
@@ -263,9 +264,10 @@ per-item results, saved-task recovery and context restoration.
 
 ## FX knowledge for agents
 
-Metadata alone rarely explains how a shader uses a value, so the server exposes
-three more sources of knowledge. The server's MCP `instructions` summarize the
-workflow and point to the guide.
+Metadata alone rarely explains how a shader uses a value. The server therefore also
+provides an agent guide, technique annotations, uniform defaults, shader source tools
+and shared effect notes. The server's MCP `instructions` summarize the workflow and
+point to the guide.
 
 **Agent guide.** The resource `offline-reshade://guide/agent` (`text/markdown`) is
 [AGENT_GUIDE.md](AGENT_GUIDE.md). It covers the isolate, preview and stack loop, depth
@@ -311,6 +313,45 @@ the input a listener is waiting for, in both independent and attached modes.
     files and alternate data streams.
   - Links, hidden entries and system entries inside the directory are not followed.
   - Files over 4 MiB are skipped, and each result is capped at 32,000 characters.
+
+**Effect notes.** Agents record verified findings so later sessions and other MCP clients
+do not have to rediscover them. Each note has:
+- a kind: `semantics`, `ordering`, `tuning` or `warning`
+- a target: the whole effect, or a technique, uniform or preprocessor definition id
+- short text
+- 1–8 evidence items: `file:line` citations or descriptions of a render comparison
+- optional conditions
+- its author and MCP client
+- the fingerprint of the effect files it was verified against
+
+`record_effect_note` checks a note against the session's copy of the effect before
+storing it. It rejects:
+- unknown targets
+- citations of lines that do not exist
+- one-word evidence
+- evidence without a citation when this server has not rendered a preview or export
+  since the input was opened
+- text that repeats a long shader source line
+- more than 100 notes per effect
+
+The fingerprint covers the FX file and the headers it includes, by file name and
+content. Moving the effect folder keeps the fingerprint; editing any of those files
+changes it. `get_effect_knowledge` then shows the effect's notes as `POSSIBLY STALE`
+instead of hiding or deleting them. `update_effect_note` re-checks a note's citations
+and marks it verified against the current files. `delete_effect_note` removes it.
+`get_effect_knowledge` with no `effectName` lists the effects that have notes.
+
+**Storage.**
+- Notes are stored in `Documents\Offline ReShade\Knowledge`, one `<effect>.json` file per
+  effect.
+- Packaged applications do not redirect Documents the way they redirect `%LOCALAPPDATA%`.
+  An MCP server launched by a packaged client, such as the Claude desktop app, therefore
+  shares the store with every other client.
+- To use another folder, set `OFFLINE_RESHADE_KNOWLEDGE_DIR` or start the server with
+  `--knowledge-dir <directory>`.
+- Writes are atomic and serialized across processes.
+- A file that is invalid or written by a newer schema is reported and never overwritten.
+- You can edit or delete the JSON files by hand.
 
 ## Native CLI and diagnostics
 

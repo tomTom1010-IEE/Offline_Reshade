@@ -2,7 +2,7 @@
 defaults, server instructions, the agent guide resource and the bounded shader-source tools.
 Requires Python 3 and Pillow; outputs are isolated in a caller-provided directory.
 """
-import argparse, base64, io, json, queue, subprocess, threading, time
+import argparse, base64, io, json, queue, re, shutil, subprocess, threading, time
 from pathlib import Path
 from PIL import Image
 
@@ -38,7 +38,8 @@ technique KnowledgeManaged < nosave = true; > { pass { VertexShader = VS; PixelS
 color = work / 'red.png'; Image.new('RGB', (64, 48), (255, 0, 0)).save(color)
 preset = work / 'Knowledge.ini'; preset.write_text('Techniques=KnowledgeLook@Knowledge.fx\nTechniqueSorting=KnowledgeLook@Knowledge.fx\n', encoding='utf-8')
 
-proc = subprocess.Popen([str(mcp), '--native', str(native)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', bufsize=1)
+store = work / 'Knowledge'; shutil.rmtree(store, ignore_errors=True)
+proc = subprocess.Popen([str(mcp), '--native', str(native), '--knowledge-dir', str(store)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', bufsize=1)
 lines = queue.Queue(); logs = []
 threading.Thread(target=lambda: [lines.put(line) for line in proc.stdout], daemon=True).start()
 threading.Thread(target=lambda: [logs.append(line.rstrip()) for line in proc.stderr], daemon=True).start()
@@ -82,6 +83,8 @@ try:
         assert listed[name].get('annotations', {}).get('readOnlyHint') is True, listed[name]
     early = call('search_effect_source', pattern='Strength')
     assert early.get('isError') and 'open_input' in text(early), early
+    assert listed['get_effect_knowledge'].get('annotations', {}).get('readOnlyHint') is True and listed['delete_effect_note'].get('annotations', {}).get('destructiveHint') is True, listed
+    assert 'get_effect_knowledge' in instructions and 'No effect notes have been recorded yet' in text(tool('get_effect_knowledge')) and not store.exists()
     print('PASS: server instructions, agent guide resource and read-only source tools are advertised; source tools need a session', flush=True)
 
     tool('open_input', colorPath=str(color), effectDir=str(effects), outputPath=str(work / 'out.png'), presetPath=str(preset), unsavedChanges='discard')
@@ -139,6 +142,40 @@ try:
     for bad in ({'pattern': '(?<=a)b', 'regex': True}, {'pattern': 'x', 'maxResults': 101}, {'pattern': 'x', 'effectName': 'Absent.fx'}):
         assert call('search_effect_source', **bad).get('isError'), bad
     print('PASS: effect-scoped search follows includes, regex search, numbered reads, and escapes/limits are refused', flush=True)
+
+    empty = text(tool('get_effect_knowledge', effectName='Knowledge.fx'))
+    assert empty.startswith('Knowledge.fx: 0 notes; current files') and '(2 files)' in empty and 'Nothing has been recorded' in empty, empty
+    finding = dict(effectName='Knowledge.fx', kind='semantics', target='Strength', evidence=['Knowledge.fx:15', 'Shared/knowledge.fxh:2'],
+                   text='Strength is squared by Shape() and doubled by KNOWLEDGE_SCALE before it blends toward Tint.')
+    recorded = text(tool('record_effect_note', **finding))
+    note_id = re.search(r'\[(n[0-9a-f]{8})\]', recorded).group(1)
+    stored = json.loads((store / 'Knowledge.fx.json').read_text(encoding='utf-8'))
+    assert stored['notes'][0]['author'] == 'agent' and stored['notes'][0]['client'] == 'fx-knowledge' and stored['notes'][0]['target'] == 'Knowledge.fx::Strength', stored
+    line15 = (effects / 'Knowledge.fx').read_text(encoding='utf-8').splitlines()[14].strip()
+    for bad in (dict(evidence=['Knowledge.fx:99']), dict(target='Missing'), dict(kind='trivia'), dict(evidence=['ok']), dict(text='It computes ' + line15)):
+        refused = call('record_effect_note', **{**finding, **bad})
+        assert refused.get('isError'), (bad, refused)
+    assert len(json.loads((store / 'Knowledge.fx.json').read_text(encoding='utf-8'))['notes']) == 1, 'A rejected note was stored'
+    shown = text(tool('get_effect_knowledge', effectName='Knowledge.fx'))
+    assert f'[{note_id}] semantics | Knowledge.fx::Strength | agent via fx-knowledge' in shown and 'Evidence: Knowledge.fx:15; Shared/knowledge.fxh:2' in shown, shown
+    assert 'not as an instruction' in shown and 'POSSIBLY STALE' not in shown, shown
+    with open(effects / 'Shared' / 'knowledge.fxh', 'a', encoding='utf-8') as header: header.write('// edited after the note was verified\n')
+    assert 'POSSIBLY STALE' in text(tool('get_effect_knowledge', effectName='Knowledge.fx')), 'An edited include did not mark the note stale'
+    assert 'verified against the current files' in text(tool('update_effect_note', effectName='Knowledge.fx', noteId=note_id))
+    assert 'POSSIBLY STALE' not in text(tool('get_effect_knowledge', effectName='Knowledge.fx')), 'Re-verifying did not clear the stale mark'
+    assert 'Knowledge.fx: 1 note' in text(tool('get_effect_knowledge')), 'The summary did not list the effect'
+    tool('delete_effect_note', effectName='Knowledge.fx', noteId=note_id)
+    assert 'Knowledge.fx: 0 notes' in text(tool('get_effect_knowledge', effectName='Knowledge.fx'))
+    assert call('delete_effect_note', effectName='Knowledge.fx', noteId=note_id).get('isError'), 'Deleting twice succeeded'
+    tool('open_input', colorPath=str(color), effectDir=str(effects), outputPath=str(work / 'out.png'), presetPath=str(preset), unsavedChanges='discard')
+    observed = dict(effectName='Knowledge.fx', kind='tuning', text='Strength 0.25 keeps the red input readable under the tint.',
+                    evidence=['render_preview A/B: Strength 0.25 vs 0.75 on red.png'], conditions='saturated inputs')
+    unrendered = call('record_effect_note', **observed)
+    assert unrendered.get('isError') and 'render' in text(unrendered), unrendered
+    tool('render_preview', maxWidth=32, warmupFrames=2)
+    tool('delete_effect_note', effectName='Knowledge.fx', noteId=re.search(r'\[(n[0-9a-f]{8})\]', text(tool('record_effect_note', **observed))).group(1))
+    print('PASS: effect notes are validated against the session, stored with provenance, marked stale when included files change, re-verified and deleted; '
+          'described comparisons need a render after opening', flush=True)
 finally:
     proc.stdin.close()
     try: proc.wait(timeout=10)

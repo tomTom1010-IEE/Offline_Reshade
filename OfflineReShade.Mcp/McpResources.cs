@@ -17,6 +17,8 @@ public sealed class McpResources
         "Techniques marked hidden, forceEnabled or timeoutMs are shader-managed passes: do not toggle them.\n" +
         "Uniform value and defaultValue are shader units, and labels do not reveal non-linear use: some sliders are squared or remapped in code. " +
         "When a parameter's effect is unclear, call search_effect_source with its name and read the surrounding code with get_effect_source.\n" +
+        "Before tuning an effect, call get_effect_knowledge for notes earlier sessions verified. As soon as you verify something non-obvious " +
+        "(a cited shader line or a render_preview A/B), record it with record_effect_note; never record per-image values such as focus or exposure.\n" +
         "Read the resource " + AgentGuideUri + " for depth conventions, ordering heuristics and known traps.";
 
     private static readonly Lazy<string> Guide = new(() =>
