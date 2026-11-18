@@ -3,7 +3,7 @@
 
 namespace offline_contract
 {
-	inline constexpr const char *ProductVersion = "0.8.3";
+	inline constexpr const char *ProductVersion = "0.9.0";
 	inline constexpr const char *UpstreamVersion = "6.7.3";
 	inline constexpr const char *UpstreamCommit = "0eff32e237578591a44946a0e0f9581620c026b4";
 	inline constexpr unsigned int ReShadeApi = 20;

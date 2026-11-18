@@ -2,11 +2,12 @@
 
 # Offline ReShade
 
-Version 0.8.3 establishes a checked upstream/dependency/interface baseline,
-version handshakes, verified CI packaging and MCP diagnostics. Existing synchronized
-GPU previews, DPI/zoom fixes, export validation and content-based batch resume remain.
-Preview zoom/fallback does not change final pixels; intentional black images remain valid.
-See [CHANGELOG](CHANGELOG.md), [MCP setup and tools](docs/MCP.md),
+Version 0.9.0 redesigns the window: commands in the title bar, a status bar, and one
+effects list with a switch on each row. Opening, exporting, presets, undo history and
+batch jobs are shared between the app and MCP. Add-on edits are confirmed, verified Marty
+add-ons get private controls, and any ReLight light can be chosen for editing. MCP agents
+can read technique annotations, defaults and effect source, and keep verified notes per effect.
+See [CHANGELOG](CHANGELOG.md), [MCP setup and tools](docs/MCP.md), [Add-on interfaces](docs/ADDON_SERVICES.md),
 [maintenance and upgrades](docs/MAINTENANCE.md), and the [stability plan](docs/STABILITY_PLAN.md).
 
 The portable release includes both .NET and Windows App SDK runtime dependencies.

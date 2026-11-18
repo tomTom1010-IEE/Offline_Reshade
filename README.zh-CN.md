@@ -1,6 +1,6 @@
 # Offline ReShade 中文使用说明
 
-0.8.3 建立上游、依赖和接口的固定基线，增加版本握手、CI 发布验证与 MCP 统一诊断。保留 GPU 同步、高 DPI 与缩放修复、导出验证和批处理内容哈希；预览缩放或降级不改变成品，合法全黑仍仅提示。详见 [更新记录](CHANGELOG.md)、[MCP 说明](docs/MCP.md)、[维护与升级流程](docs/MAINTENANCE.md) 和 [三步计划](docs/STABILITY_PLAN.md)。
+0.9.0 重新设计了主窗口：命令移到标题栏，底部新增状态栏，效果合并为每行带开关的单一列表。打开图片、导出、预设、撤销历史和批处理由应用与 MCP 共用同一套流程。Add-on 的修改经确认后才算生效；已验证版本的 Marty Add-on 提供私有控件，ReLight 可在应用内任选一盏灯编辑。MCP 代理可以读取 technique 注解、参数默认值和 FX 源码，并为每个效果记录经过验证的笔记。详见 [更新记录](CHANGELOG.md)、[MCP 说明](docs/MCP.md)、[Add-on 接口](docs/ADDON_SERVICES.md)、[维护与升级流程](docs/MAINTENANCE.md) 和 [三步计划](docs/STABILITY_PLAN.md)。
 
 设备失效时会尝试重建会话，30 秒内最多自动恢复 3 次；持续失败会明确报错。源图与输出上限为单边 16384、总计 64×1024² 像素，还需通过可用内存/显存预算检查。CPU 预览默认最长边 1920，仅影响显示，不会暗中降低成品尺寸。
 

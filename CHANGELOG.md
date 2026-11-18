@@ -1,3 +1,13 @@
+# Offline ReShade 0.9.0
+
+- The window is redesigned. Image and preset menus, undo/redo and Export sit in the title bar, with a one-line status bar below. Effects are one list with Active and Available sections, a switch on each row, compact parameter rows and parameter search. Text and caption buttons follow dark mode, and file pickers also open when the app runs elevated.
+- Opening images, listening for game output, exporting, saving presets and batch jobs are shared workflows for WinUI and MCP, with structured progress, errors and cancellation. Edits still being typed are submitted before an export or preset change. UI and MCP edits share one undo/redo history, presets are saved only to their chosen source file, and the renderer recovers without losing working edits. Batch jobs survive restarts and restore the full editing context.
+- The preview offers an original/processed comparison that never affects output, a tidier canvas and source-resolution controls.
+- Add-on ImGui edits count only once the add-on confirms them. Add-ons can expose an independent service interface (ABI v1). Version-verified Marty adapters change ReGrade+ tone curves, ReLight lights and LUT Manager selections without ImGui; any other version keeps only its public parameters.
+- In the app, add-ons that draw only while open (ReLight, ReGrade+, Parallax DOF) get an Open editor button. Mirrored controls carry proper labels and accessible names. The ReLight editor lists every light, so any light can be chosen for editing, not only the newest.
+- MCP agents get technique annotations (label, tooltip, hidden, forced on, timeout, read-only, screenshot flag) and uniform defaults in `list_effects`. They also get read-only source search and reading limited to the session's effects folder, an agent guide resource, and short verified notes per effect, stored in `Documents\Offline ReShade\Knowledge`.
+- Native RPC and the automation broker are now version 8; the offline API (1) and preview bridge (3) are unchanged. Update the complete package together.
+
 # Offline ReShade 0.8.3
 
 - Pin the actual ReShade upstream base/tree, all submodule commits, .NET SDK/runtime and internal interface versions in one checked baseline. Native version metadata no longer increments on every local build.

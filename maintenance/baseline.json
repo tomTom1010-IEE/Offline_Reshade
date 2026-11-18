@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.8.3",
+  "productVersion": "0.9.0",
   "upstream": {
     "repository": "https://github.com/crosire/reshade",
     "commit": "0eff32e237578591a44946a0e0f9581620c026b4",

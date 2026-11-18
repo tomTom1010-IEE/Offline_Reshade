@@ -3,7 +3,7 @@ namespace OfflineReShade.Core;
 
 public static class BuildContract
 {
-    public const string ProductVersion = "0.8.3";
+    public const string ProductVersion = "0.9.0";
     public const string UpstreamVersion = "6.7.3";
     public const string UpstreamCommit = "0eff32e237578591a44946a0e0f9581620c026b4";
     public const int ReShadeApi = 20;
